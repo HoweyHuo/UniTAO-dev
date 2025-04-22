@@ -7,7 +7,7 @@ RUN sed 's/\r$//' ./tool/DataServiceAdmin/initDynamo.sh > ./bin/initDynamo.sh
 RUN sed 's/\r$//' ./tool/DataServiceAdmin/initMongo.sh > ./bin/initMongo.sh
 RUN ls ./bin/
 
-FROM centos:latest
+FROM ubuntu:latest
 WORKDIR /opt/UniTAO/
 ENV PATH="/opt/UniTAO/:${PATH}"
 COPY --from=build /go/src/github.com/salesforce/UniTAO/bin/. ./

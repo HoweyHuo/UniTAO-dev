@@ -29,11 +29,10 @@ $dirName = $(Split-Path -Path $scriptRoot -Leaf)
 
 $imageName = "UniTAO/$($dirName):localbuild".ToLower()
 
-pushd $scriptRoot\..\..\
+Push-Location $scriptRoot\..\..\
 Write-Host "run docker build @[$(Get-Location)] with image [$imageName]"
 
-docker pull golang:1.18
-docker pull centos:latest
+docker pull node:alpine 
 
 $dockerFilePath = "$scriptRoot\dockerfile" 
 
@@ -52,4 +51,4 @@ if ($danglingImage) {
     docker rmi $danglingImage
 }
 
-popd
+Pop-Location
