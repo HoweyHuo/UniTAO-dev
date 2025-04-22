@@ -25,11 +25,11 @@
 docker-compose down
 
 Write-Host "clear $PSScriptRoot\InventoryService\data\referral/*"
-del -Force -Recurse $PSScriptRoot\InventoryService\data\referral\*
-dir $PSScriptRoot\InventoryService\data\referral\
+Remove-Item -Force -Recurse $PSScriptRoot\InventoryService\data\referral\*
+Get-ChildItem $PSScriptRoot\InventoryService\data\referral\
 Write-Host "clear $PSScriptRoot\InventoryService\data\schema\*"
-del -Force -Recurse $PSScriptRoot\InventoryService\data\schema\*
-dir $PSScriptRoot\InventoryService\data\schema\
+Remove-Item -Force -Recurse $PSScriptRoot\InventoryService\data\schema\*
+Get-ChildItem $PSScriptRoot\InventoryService\data\schema\
 Write-Host "remove $PSScriptRoot\logs"
 if (Test-Path -Path $PSScriptRoot\logs) {
     Write-Host "log path exists, delete []"
@@ -37,6 +37,6 @@ if (Test-Path -Path $PSScriptRoot\logs) {
 }
 Write-Host "removed"
 Write-Host "remove database file $PSScriptRoot\MongoDB\db\*"
-del -Force -Recurse $PSScriptRoot\MongoDB\db\*
+Remove-Item -Force -Recurse $PSScriptRoot\MongoDB\db\*
 
 

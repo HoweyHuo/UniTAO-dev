@@ -4,7 +4,7 @@ COPY . ./
 RUN go build -a -o ./bin/ ./app/InventoryService
 RUN go build -a -o ./bin/ ./tool/InventoryServiceAdmin
 
-FROM centos:latest
+FROM ubuntu:latest
 WORKDIR /opt/UniTAO/
 ENV PATH="/opt/UniTAO/:${PATH}"
 RUN mkdir ./config

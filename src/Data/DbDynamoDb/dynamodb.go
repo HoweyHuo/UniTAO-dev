@@ -164,6 +164,10 @@ func (db *dynamoDB) ListTable() ([]interface{}, error) {
 
 func (db *dynamoDB) CreateTable(name string, meta map[string]interface{}) error {
 	log.Printf("create table %s in dynamodb", name)
+	if meta == nil {
+		log.Printf("meta is nil, cannot create table %s in dynamodb", name)
+		return fmt.Errorf("meta is nil, cannot create table %s in dynamodb", name)
+	}
 	meta[TableName] = name
 	rawJson, _ := json.Marshal(meta)
 	input := &dynamodb.CreateTableInput{}
