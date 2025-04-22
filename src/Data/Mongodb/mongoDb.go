@@ -124,6 +124,11 @@ func (db *mongoDb) CreateTable(tableName string, data map[string]interface{}) er
 			currentIdxMap[IdxName] = result["v"].(int)
 		}
 	}
+	if data == nil {
+		log.Printf("no data to add additional attribute to table[%s]", tableName)
+		// if no data to add additional attribute to table, return
+		return nil
+	}
 	idxMap := data[Indexes].(map[string]interface{})
 	for idxName, idxData := range idxMap {
 		if _, ok := currentIdxMap[idxName]; ok {
