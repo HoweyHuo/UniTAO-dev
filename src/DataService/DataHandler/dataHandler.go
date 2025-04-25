@@ -199,14 +199,14 @@ func (h *Handler) querySchema(dataType string) (*Schema.SchemaOps, *Http.HttpErr
 	}
 	record, e := Record.LoadMap(data)
 	if e != nil {
-		errMsg := fmt.Sprintf("failed to load schema record. [type]=[%s]", dataType)
+		errMsg := fmt.Sprintf("failed to load schema record as record. [type]=[%s]", dataType)
 		h.Log(errMsg)
 		h.Log(e.Error())
 		return nil, Http.WrapError(e, errMsg, http.StatusInternalServerError)
 	}
 	schema, e = Schema.LoadSchemaOpsRecord(record)
 	if e != nil {
-		errMsg := fmt.Sprintf("failed to load Schema Record, [%s]=[%s]", Record.DataType, dataType)
+		errMsg := fmt.Sprintf("failed to load Schema Record as SchemaOpsRecord, [%s]=[%s]", Record.DataType, dataType)
 		h.Log(errMsg)
 		h.Log(e.Error())
 		return nil, Http.WrapError(e, errMsg, http.StatusInternalServerError)
@@ -469,6 +469,12 @@ func (h *Handler) Add(record *Record.Record) *Http.HttpError {
 			return Http.WrapError(ex, "failed to load new schema record as schema", http.StatusBadRequest)
 		}
 		h.archiveCurrentSchema(newSchema)
+	}
+	if record.Type == JsonKey.Schema {
+		_, ex := Schema.LoadSchemaOpsRecord(record)
+		if ex != nil {
+			return Http.WrapError(ex, "failed to load request record as schema", http.StatusBadRequest)
+		}
 	}
 	return h.addData(record)
 }
