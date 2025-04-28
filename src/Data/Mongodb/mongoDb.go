@@ -272,13 +272,17 @@ func (db *mongoDb) Update(table string, keys map[string]interface{}, data interf
 }
 
 func (db *mongoDb) Replace(tableName string, keys map[string]interface{}, data interface{}) error {
+	db.logger.Printf("Replace ops on Table[%s]", tableName)
 	database := db.client.Database(db.config.Mongodb.Database)
 	table := database.Collection(tableName)
 	if table == nil {
 		return fmt.Errorf("table [%s] does not exists", tableName)
 	}
 	opts := options.Replace().SetUpsert(true)
-	table.ReplaceOne(context.TODO(), keys, data, opts)
+	_, err := table.ReplaceOne(context.TODO(), keys, data, opts)
+	if err != nil {
+		return fmt.Errorf("faled to perform replace. Error: %s", err)
+	}
 	return nil
 }
 
@@ -301,6 +305,7 @@ func Connect(config DbConfig.DatabaseConfig, logger *log.Logger) (DbIface.Databa
 		Username:      config.Mongodb.UserName,
 		Password:      config.Mongodb.Password,
 	}
+	logger.Printf("Connect to database: %s", config.Mongodb.EndPoint)
 	clientOpts := options.Client().ApplyURI(config.Mongodb.EndPoint).SetAuth(credential)
 	client, err := mongo.Connect(context.TODO(), clientOpts)
 	if err != nil {

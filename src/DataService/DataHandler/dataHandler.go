@@ -597,6 +597,7 @@ func (h *Handler) Set(dataType string, dataId string, record *Record.Record) *Ht
 	defer h.Lock.Release(idKey, "HandlerSet")
 	data, err := h.LocalData(dataType, dataId)
 	if err != nil && err.Status != http.StatusNotFound {
+		h.Log(`Failed to get local data ${dataType}/${dataId}`)
 		return err
 	}
 	var before *Record.Record
@@ -606,20 +607,30 @@ func (h *Handler) Set(dataType string, dataId string, record *Record.Record) *Ht
 			return Http.WrapError(ex, fmt.Sprintf("failed to load data of [%s/%s] as record", record.Type, record.Id), http.StatusInternalServerError)
 		}
 		before = record
+		h.Log(`found previous record of ${dataType}/${dataId}`)
 	}
 	isSame, err := h.CompareRecords(before, record)
 	if err != nil {
+		h.Log(fmt.Sprintf("failed to compare record, Error: %s", err))
 		return err
 	}
 	if !isSame {
-		err = h.updateRecord(before.Type, before.Id, record)
+		h.Log(fmt.Sprintf("brefore and current %s/%s different", dataType, dataId))
+		err = h.updateRecord(record.Type, record.Id, record)
 		if err != nil {
+			h.Log(fmt.Sprintf("failed to update record, Error: %s", err))
 			return err
 		}
 		if h.AddJournal != nil {
-			h.AddJournal(record.Type, record.Id, before.Map(), record.Map())
+			if before != nil {
+				h.AddJournal(record.Type, record.Id, before.Map(), record.Map())
+			} else {
+				h.AddJournal(record.Type, record.Id, nil, record.Map())
+			}
+
 		}
 	}
+	h.Log(fmt.Sprintf("data %s/%s processed", dataType, dataId))
 	return nil
 }
 

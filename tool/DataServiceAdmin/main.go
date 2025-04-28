@@ -142,7 +142,7 @@ func CreateTables(db DbIface.Database, args AdminArgs, logger *log.Logger) {
 		logger.Printf("keep table as the same name: [%s]", key)
 		configMeta[key] = meta
 	}
-	log.Print("determine if we should remove existing table")
+	logger.Print("determine if we should remove existing table")
 	for _, table := range tableList {
 		logger.Printf("Match table [%s] with expected meta", table)
 		tableName := table.(string)

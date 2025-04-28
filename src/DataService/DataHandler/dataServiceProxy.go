@@ -62,7 +62,19 @@ func (i *DataServiceProxy) Log(message string) {
 	i.handler.log.Printf("DsInvProxy: %s", message)
 }
 
+func (i *DataServiceProxy) InvLinked() bool {
+	if i.Url == "" {
+		i.Log("inventory URL is empty")
+		return false
+	}
+	return true
+}
+
 func (i *DataServiceProxy) refresh() {
+	if !i.InvLinked() {
+		i.Log("No linked inventory to refresh")
+		return
+	}
 	schemaUrl, ex := Http.URLPathJoin(i.Url, JsonKey.Schema)
 	if ex != nil {
 		i.Log(fmt.Sprintf("failed to build inv schema url, Error:%s", ex))
