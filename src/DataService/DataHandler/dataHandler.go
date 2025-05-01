@@ -199,14 +199,14 @@ func (h *Handler) querySchema(dataType string) (*Schema.SchemaOps, *Http.HttpErr
 	}
 	record, e := Record.LoadMap(data)
 	if e != nil {
-		errMsg := fmt.Sprintf("failed to load schema record. [type]=[%s]", dataType)
+		errMsg := fmt.Sprintf("failed to load schema record as record. [type]=[%s]", dataType)
 		h.Log(errMsg)
 		h.Log(e.Error())
 		return nil, Http.WrapError(e, errMsg, http.StatusInternalServerError)
 	}
 	schema, e = Schema.LoadSchemaOpsRecord(record)
 	if e != nil {
-		errMsg := fmt.Sprintf("failed to load Schema Record, [%s]=[%s]", Record.DataType, dataType)
+		errMsg := fmt.Sprintf("failed to load Schema Record as SchemaOpsRecord, [%s]=[%s]", Record.DataType, dataType)
 		h.Log(errMsg)
 		h.Log(e.Error())
 		return nil, Http.WrapError(e, errMsg, http.StatusInternalServerError)
@@ -470,6 +470,12 @@ func (h *Handler) Add(record *Record.Record) *Http.HttpError {
 		}
 		h.archiveCurrentSchema(newSchema)
 	}
+	if record.Type == JsonKey.Schema {
+		_, ex := Schema.LoadSchemaOpsRecord(record)
+		if ex != nil {
+			return Http.WrapError(ex, "failed to load request record as schema", http.StatusBadRequest)
+		}
+	}
 	return h.addData(record)
 }
 
@@ -589,12 +595,15 @@ func (h *Handler) Set(dataType string, dataId string, record *Record.Record) *Ht
 	idKey := fmt.Sprintf("%s/%s", dataType, dataId)
 	h.Lock.Aquire(idKey, "HandlerSet")
 	defer h.Lock.Release(idKey, "HandlerSet")
+	h.Log(fmt.Sprintf("Query local data [%s/%s]", dataType, dataId))
 	data, err := h.LocalData(dataType, dataId)
 	if err != nil && err.Status != http.StatusNotFound {
+		h.Log(fmt.Sprintf("Failed to get local data %s/%s", dataType, dataId))
 		return err
 	}
 	var before *Record.Record
 	if data != nil {
+		h.Log(fmt.Sprintf("found previous record of %s/%s", dataType, dataId))
 		record, ex := Record.LoadMap(data)
 		if ex != nil {
 			return Http.WrapError(ex, fmt.Sprintf("failed to load data of [%s/%s] as record", record.Type, record.Id), http.StatusInternalServerError)
@@ -603,17 +612,26 @@ func (h *Handler) Set(dataType string, dataId string, record *Record.Record) *Ht
 	}
 	isSame, err := h.CompareRecords(before, record)
 	if err != nil {
+		h.Log(fmt.Sprintf("failed to compare record, Error: %s", err))
 		return err
 	}
 	if !isSame {
-		err = h.updateRecord(before.Type, before.Id, record)
+		h.Log(fmt.Sprintf("brefore and current %s/%s different", dataType, dataId))
+		err = h.updateRecord(record.Type, record.Id, record)
 		if err != nil {
+			h.Log(fmt.Sprintf("failed to update record, Error: %s", err))
 			return err
 		}
 		if h.AddJournal != nil {
-			h.AddJournal(record.Type, record.Id, before.Map(), record.Map())
+			if before != nil {
+				h.AddJournal(record.Type, record.Id, before.Map(), record.Map())
+			} else {
+				h.AddJournal(record.Type, record.Id, nil, record.Map())
+			}
+
 		}
 	}
+	h.Log(fmt.Sprintf("data %s/%s processed", dataType, dataId))
 	return nil
 }
 

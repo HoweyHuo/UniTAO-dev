@@ -111,7 +111,7 @@ func (h *Handler) init() error {
 
 func (h *Handler) List(dataType string) ([]interface{}, *Http.HttpError) {
 	if _, ok := InvTypes[dataType]; ok {
-		result, err := h.ListData(dataType)
+		result, err := h.InvListData(dataType)
 		if err != nil {
 			return nil, err
 		}
@@ -228,7 +228,8 @@ func (h *Handler) GetRecord(dataType string, dataId string) (*Record.Record, *Ht
 	return record, nil
 }
 
-func (h *Handler) ListData(dataType string) ([]map[string]interface{}, *Http.HttpError) {
+// List Data for Inventory Tables
+func (h *Handler) InvListData(dataType string) ([]map[string]interface{}, *Http.HttpError) {
 	if _, ok := InvTypes[dataType]; !ok {
 		return nil, Http.NewHttpError(fmt.Sprintf("[type]=[%s] is not supported", dataType), http.StatusBadRequest)
 	}
@@ -238,6 +239,7 @@ func (h *Handler) ListData(dataType string) ([]map[string]interface{}, *Http.Htt
 	}
 	args := make(map[string]interface{})
 	args[DbIface.Table] = dataType
+	args[Record.DataType] = dataType
 	result, err := h.Db.Get(args)
 	if err != nil {
 		return nil, Http.NewHttpError(err.Error(), http.StatusInternalServerError)

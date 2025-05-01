@@ -18,7 +18,7 @@
             "request": "launch",
             "mode": "debug",
             "program": "${workspaceFolder}/app/DataService/main.go",
-            "args": ["-id", "DataService01" ,"-config", "${workspaceFolder}/docker-compose/2data1inv/DataService01/extConfig.json"],
+            "args": ["-id", "DataService01" ,"-config", "${workspaceFolder}/docker-compose/2data1invMongo/DataService01/extConfig.json"],
         },
         {
             "name": "Debug Data Service 01 Admin init mongo table",
