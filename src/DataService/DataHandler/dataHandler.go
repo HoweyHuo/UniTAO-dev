@@ -595,19 +595,20 @@ func (h *Handler) Set(dataType string, dataId string, record *Record.Record) *Ht
 	idKey := fmt.Sprintf("%s/%s", dataType, dataId)
 	h.Lock.Aquire(idKey, "HandlerSet")
 	defer h.Lock.Release(idKey, "HandlerSet")
+	h.Log(fmt.Sprintf("Query local data [%s/%s]", dataType, dataId))
 	data, err := h.LocalData(dataType, dataId)
 	if err != nil && err.Status != http.StatusNotFound {
-		h.Log(`Failed to get local data ${dataType}/${dataId}`)
+		h.Log(fmt.Sprintf("Failed to get local data %s/%s", dataType, dataId))
 		return err
 	}
 	var before *Record.Record
 	if data != nil {
+		h.Log(fmt.Sprintf("found previous record of %s/%s", dataType, dataId))
 		record, ex := Record.LoadMap(data)
 		if ex != nil {
 			return Http.WrapError(ex, fmt.Sprintf("failed to load data of [%s/%s] as record", record.Type, record.Id), http.StatusInternalServerError)
 		}
 		before = record
-		h.Log(`found previous record of ${dataType}/${dataId}`)
 	}
 	isSame, err := h.CompareRecords(before, record)
 	if err != nil {
