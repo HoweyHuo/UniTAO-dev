@@ -304,6 +304,7 @@ func (h *Handler) GetData(dataType string, dataId string) (interface{}, *Http.Ht
 	}
 	args := make(map[string]interface{})
 	args[DbIface.Table] = dataType
+	args[Record.DataType] = dataType
 	args[Record.DataId] = dataId
 	recordList, err := h.Db.Get(args)
 	if err != nil {
@@ -429,7 +430,7 @@ func (h *Handler) DeleteData(dataType string, dataId string) *Http.HttpError {
 		}
 		return e
 	}
-	err = h.Db.Delete(dataType, map[string]interface{}{Record.DataId: dataId})
+	err = h.Db.Delete(dataType, map[string]interface{}{Record.DataType: dataType, Record.DataId: dataId})
 	if err != nil {
 		return Http.NewHttpError(err.Error(), http.StatusInternalServerError)
 	}

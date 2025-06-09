@@ -166,8 +166,9 @@ func (srv *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		Http.ResponseJson(w, err, err.Status, srv.config.Http)
 	}
-	if urlPath != "" {
-		err := Http.NewHttpError("for PUT method, no path allowed", http.StatusBadRequest)
+	if urlPath != "" && urlPath != "/" {
+		// PUT method should not have any path, it should be just "" or /
+		err := Http.NewHttpError(fmt.Sprintf("for PUT method, no path allowed, got [%s] instead.", urlPath), http.StatusBadRequest)
 		Http.ResponseJson(w, err, err.Status, srv.config.Http)
 		return
 	}
