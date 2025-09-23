@@ -34,6 +34,6 @@ docker pull node:alpine
 # Create the docker image with tag localbuild the image with same tag will be set as empty
 docker build --no-cache -t $IMAGE_NAME -f $SCRIPT_DIR/dockerfile .
 # remove the empty image from previous command
-docker rmi $(docker images --filter "dangling=true" -q --no-trunc)
+docker images --filter "dangling=true" -q --no-trunc | xargs -r docker rmi
 
 popd
