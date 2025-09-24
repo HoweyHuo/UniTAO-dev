@@ -31,6 +31,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"time"
 
 	"DataService/Common"
 	"DataService/Config"
@@ -77,6 +78,20 @@ func New() (Server, error) {
 	return srv, nil
 }
 
+func (srv *Server) WaitForDataHandler() error {
+	for {
+		handler, err := DataHandler.New(srv.config, srv.log, Data.ConnectDb)
+		if err == nil {
+			srv.data = handler
+			break
+		}
+		srv.log.Printf("failed to initialize data layer, Err:%s", err)
+		srv.log.Printf("retry to connect to database after 10 seconds")
+		time.Sleep(10 * time.Second)
+	}
+	return nil
+}
+
 func (srv *Server) Run() {
 	logFile, logger, ex := CustomLogger.FileLoger(srv.logPath, srv.Id)
 	if ex != nil {
@@ -90,19 +105,18 @@ func (srv *Server) Run() {
 		defer logFile.Close()
 	}
 	srv.BackendCtl = Thread.NewThreadController(srv.log)
-	handler, err := DataHandler.New(srv.config, srv.log, Data.ConnectDb)
-	if err != nil {
-		srv.log.Fatalf("failed to initialize data layer, Err:%s", err)
+	ex = srv.WaitForDataHandler()
+	if ex != nil {
+		srv.log.Fatalf("failed to connect to database, Err:%s", ex)
 	}
-	srv.data = handler
 	jLogFile, jLogger, ex := CustomLogger.FileLoger(srv.logPath, fmt.Sprintf("%s_Journal", srv.Id))
 	if ex != nil {
-		srv.log.Fatalf("failed to create file logger[%s_Journal], Error: %s", srv.Id, err)
+		srv.log.Fatalf("failed to create file logger[%s_Journal], Error: %s", srv.Id, ex)
 	}
 	if jLogFile != nil {
 		defer jLogFile.Close()
 	}
-	journal, err := DataJournal.NewJournalLib(handler.DB, srv.config.DataTable.Data, jLogger)
+	journal, err := DataJournal.NewJournalLib(srv.data.DB, srv.config.DataTable.Data, jLogger)
 	if err != nil {
 		srv.log.Fatalf("failed to create Journal Library. Error: %s", err)
 	}

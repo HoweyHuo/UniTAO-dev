@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"time"
 
 	"InventoryService/Config"
 	"InventoryService/DataHandler"
@@ -99,6 +100,20 @@ func New() Server {
 	return server
 }
 
+func (srv *Server) WaitForDataHandler() error {
+	for {
+		handler, err := DataHandler.New(srv.config.Database, srv.log)
+		if err == nil {
+			srv.data = handler
+			break
+		}
+		srv.log.Printf("failed to initialize data layer, Err:%s", err)
+		srv.log.Printf("retry to connect to database after 10 seconds")
+		time.Sleep(10 * time.Second)
+	}
+	return nil
+}
+
 func (srv *Server) Run() {
 	logFile, logger, err := CustomLogger.FileLoger(srv.args.logPath, "InventoryService")
 	if err != nil {
@@ -109,11 +124,10 @@ func (srv *Server) Run() {
 	}
 	srv.log = logger
 	srv.log.Printf("Server Listen on PORT:%s", srv.Port)
-	handler, err := DataHandler.New(srv.config.Database, srv.log)
+	err = srv.WaitForDataHandler()
 	if err != nil {
-		srv.log.Fatalf("failed to initialize data layer, Err:%s", err)
+		srv.log.Fatalf("failed to connect to database, Err:%s", err)
 	}
-	srv.data = handler
 	http.HandleFunc("/", srv.handler)
 	srv.log.Printf("Data Server Listen @%s://%s:%s", srv.config.Http.HttpType, srv.config.Http.DnsName, srv.Port)
 	srv.log.Fatal(http.ListenAndServe(fmt.Sprintf(":%s", srv.Port), nil))
