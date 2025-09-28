@@ -64,3 +64,10 @@ docker push "$tgtImageName"
 
 # remove the local image with tag localbuild
 docker rmi $srcImageName
+
+# remove the remote image with tag latest
+docker rmi $tgtImageName
+
+
+# remove the empty image from previous command
+sudo docker images --filter "dangling=true" -q --no-trunc | xargs -r sudo docker rmi
