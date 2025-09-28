@@ -1,0 +1,31 @@
+services:
+  unitao-data-service01:
+    image: unitao/dataservice:latest
+    container_name: unitao-data-service01
+    restart: always
+    stdin_open: true
+    tty: true
+    volumes:
+      -  ./DataService01:/opt/UniTAO/config
+      -  ./logs:/opt/UniTAO/log
+    ports:
+      - "8001:80"
+    command: "DataService -id DataService01 -config /opt/UniTAO/config/config.json -log /opt/UniTAO/log"
+
+  unitao-inv-service:
+    image: unitao/inventoryservice:latest
+    container_name: unitao-inv-service
+    restart: always
+    stdin_open: true
+    tty: true
+    volumes:
+      -  ./InventoryService/config:/opt/UniTAO/config
+      -  ./InventoryService/data:/opt/UniTAO/data
+      -  ./logs:/opt/UniTAO/log
+    ports:
+      - "8004:80"
+    command: "InventoryService -config /opt/UniTAO/config/config.json"
+
+networks:
+  mongo_net:
+    external: true
