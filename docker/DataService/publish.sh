@@ -46,27 +46,30 @@ fi
 
 # 2. 远程仓库不存在该镜像
 if [ -z "$id_remote" ]; then
-  echo "远程镜像不存在，直接打 tag"
-  docker tag "$LOCAL_IMG" "$REMOTE_REPO"
-  exit 0
-fi
-
-# 3. ID 比对
-if [ "$id_local" != "$id_remote" ]; then
-  echo "ID 不同，重新打 tag"
-  docker tag "$LOCAL_IMG" "$REMOTE_REPO"
+  echo "远程镜像不存在, 直接打 tag"
+  docker tag "$srcImageName" "$tgtImageName"
 else
-  echo "ID 相同，无需操作"
+  # 3. 远程镜像存在, ID 比对
+  if [ "$id_local" != "$id_remote" ]; then
+    echo "远程镜像存在,但是ID不同, 重新打 tag"
+    docker tag "$srcImageName" "$tgtImageName"
+  else
+    echo "远程镜像ID相同,已经是最新版,无需操作"
+  fi
 fi
 
+echo "Push to remote registry: $tgtImageName"
 # push to remote registry
 docker push "$tgtImageName"
 
+echo "remove local images: $srcImageName"
 # remove the local image with tag localbuild
 docker rmi $srcImageName
 
+echo "remove remote images: $tgtImageName"
 # remove the remote image with tag latest
 docker rmi $tgtImageName
 
+echo "remove dangling images"
 # remove the empty image from previous command
 sudo docker images --filter "dangling=true" -q --no-trunc | xargs -r sudo docker rmi
