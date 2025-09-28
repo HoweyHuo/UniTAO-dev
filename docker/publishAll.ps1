@@ -35,6 +35,6 @@ Get-ChildItem -Path $PSScriptRoot -Directory | Foreach-Object {
     $publishPath = "$($_.FullName)\publish.ps1"
     if (Test-Path -Path $publishPath) {
         Write-Host "run publish script: [$publishPath] to [$DockerRegUrl]"
-        &$publishPath -DockerRegUrl $DockerRegUrl
+        &$publishPath $DockerRegUrl
     }
 }
