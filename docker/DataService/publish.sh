@@ -58,14 +58,18 @@ else
   fi
 fi
 
+echo "Push to remote registry: $tgtImageName"
 # push to remote registry
 docker push "$tgtImageName"
 
+echo "remove local images: $srcImageName"
 # remove the local image with tag localbuild
 docker rmi $srcImageName
 
+echo "remove remote images: $tgtImageName"
 # remove the remote image with tag latest
 docker rmi $tgtImageName
 
+echo "remove dangling images"
 # remove the empty image from previous command
 sudo docker images --filter "dangling=true" -q --no-trunc | xargs -r sudo docker rmi
