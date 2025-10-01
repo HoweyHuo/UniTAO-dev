@@ -3,7 +3,7 @@
         "type": "mongodb",
         "mongodb": {
             "endpoint": "mongodb://mongodb:27017",
-            "database": "DataService02",
+            "database": "DataService01",
 	        "user": "root",
 	        "password": "rootpassword"
         }
@@ -15,7 +15,7 @@
         "type": "http",
         "dns": "localhost",
         "port": "80",
-        "id": "DataService02",
+        "id": "DataService01",
         "headers": {}
     },
     "inventory": {
