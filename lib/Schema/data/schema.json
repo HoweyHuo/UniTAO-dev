@@ -109,6 +109,10 @@
                             "required": {
                                 "type": "boolean",
                                 "required": false
+                            },
+                            "description": {
+                                "type": "string",
+                                "required": false
                             }
                         }
                     }

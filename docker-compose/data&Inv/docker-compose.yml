@@ -11,6 +11,8 @@ services:
     ports:
       - "8001:80"
     command: "DataService -id DataService01 -config /opt/UniTAO/config/config.json -log /opt/UniTAO/log"
+    networks:
+      - mongo_net
 
   unitao-inv-service:
     image: unitao/inventoryservice:latest
@@ -19,12 +21,13 @@ services:
     stdin_open: true
     tty: true
     volumes:
-      -  ./InventoryService/config:/opt/UniTAO/config
-      -  ./InventoryService/data:/opt/UniTAO/data
+      -  ./InventoryService:/opt/UniTAO/config
       -  ./logs:/opt/UniTAO/log
     ports:
       - "8004:80"
     command: "InventoryService -config /opt/UniTAO/config/config.json"
+    networks:
+      - mongo_net
 
 networks:
   mongo_net:

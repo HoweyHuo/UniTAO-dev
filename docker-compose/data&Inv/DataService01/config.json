@@ -1,0 +1,24 @@
+{
+    "database": {
+        "type": "mongodb",
+        "mongodb": {
+            "endpoint": "mongodb://mongodb:27017",
+            "database": "DataService01",
+	        "user": "root",
+	        "password": "rootpassword"
+        }
+    },
+    "table": {
+        "data": "Data"
+    },
+    "http": {
+        "type": "http",
+        "dns": "localhost",
+        "port": "80",
+        "id": "DataService01",
+        "headers": {}
+    },
+    "inventory": {
+        "url": "http://unitao-inv-service"
+    }
+}
