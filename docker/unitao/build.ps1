@@ -30,7 +30,7 @@ $imageName = "unitao:localbuild".ToLower()
 Push-Location $PSScriptRoot\..\..\
 Write-Host "run docker build @[$(Get-Location)] with image [$imageName]"
 
-docker pull golang:1.2
+docker pull golang:1.22
 docker pull ubuntu:24.04
 
 $dockerFilePath = "$scriptRoot\dockerfile" 

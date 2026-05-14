@@ -1,6 +1,8 @@
-FROM golang:1.2 AS build
+FROM golang:1.24-alpine3.21 AS build
 WORKDIR /go/src/github.com/salesforce/UniTAO/
+ENV CGO_ENABLED=0
 COPY . ./
+RUN apk update && apk add --no-cache ca-certificates && apk upgrade --no-cache && apk add --no-cache git
 RUN go build -a -o ./bin/ ./app/DataService
 RUN go build -a -o ./bin/ ./app/InventoryService
 RUN go build -a -o ./bin/ ./tool/DataServiceAdmin
@@ -8,16 +10,14 @@ RUN go build -a -o ./bin/ ./tool/InventoryServiceAdmin
 RUN sed 's/\r$//' ./tool/DataServiceAdmin/initDynamo.sh > ./bin/dataservice_init_dynamo.sh
 RUN sed 's/\r$//' ./tool/DataServiceAdmin/initMongo.sh > ./bin/dataservice_init_mongo.sh
 
-FROM ubuntu:24.04
+FROM alpine:3.21
 WORKDIR /opt/UniTAO/
 ENV PATH="/opt/UniTAO/:${PATH}"
+RUN apk add --no-cache bash ca-certificates && apk upgrade --no-cache
 COPY --from=build /go/src/github.com/salesforce/UniTAO/bin/. ./
 RUN chmod +x ./dataservice_init_dynamo.sh
 RUN chmod +x ./dataservice_init_mongo.sh
-RUN mkdir ./config
-RUN mkdir ./data
-RUN mkdir ./log
-RUN mkdir ./schema
+RUN mkdir -p ./config ./data ./log ./schema
 RUN echo 'alias ll="ls -alF"' >> ~/.bashrc
 
 COPY --from=build /go/src/github.com/salesforce/UniTAO/dbSchemas/DynamoDB/Tables.json ./schema/DataServiceDynamoDBTables.json
