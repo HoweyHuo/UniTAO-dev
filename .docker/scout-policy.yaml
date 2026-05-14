@@ -1,0 +1,6 @@
+policies:
+  - name: ignore-builder-stage
+    description: 构建阶段镜像的漏洞不影响运行时安全
+    rule: |
+      image.name contains "builder" or image.stage == "builder"
+    action: ignore
