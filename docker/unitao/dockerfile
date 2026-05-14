@@ -1,0 +1,25 @@
+FROM golang:1.2 AS build
+WORKDIR /go/src/github.com/salesforce/UniTAO/
+COPY . ./
+RUN go build -a -o ./bin/ ./app/DataService
+RUN go build -a -o ./bin/ ./app/InventoryService
+RUN go build -a -o ./bin/ ./tool/DataServiceAdmin
+RUN go build -a -o ./bin/ ./tool/InventoryServiceAdmin
+RUN sed 's/\r$//' ./tool/DataServiceAdmin/initDynamo.sh > ./bin/dataservice_init_dynamo.sh
+RUN sed 's/\r$//' ./tool/DataServiceAdmin/initMongo.sh > ./bin/dataservice_init_mongo.sh
+
+FROM ubuntu:24.04
+WORKDIR /opt/UniTAO/
+ENV PATH="/opt/UniTAO/:${PATH}"
+COPY --from=build /go/src/github.com/salesforce/UniTAO/bin/. ./
+RUN chmod +x ./dataservice_init_dynamo.sh
+RUN chmod +x ./dataservice_init_mongo.sh
+RUN mkdir ./config
+RUN mkdir ./data
+RUN mkdir ./log
+RUN mkdir ./schema
+RUN echo 'alias ll="ls -alF"' >> ~/.bashrc
+
+COPY --from=build /go/src/github.com/salesforce/UniTAO/dbSchemas/DynamoDB/Tables.json ./schema/DataServiceDynamoDBTables.json
+COPY --from=build /go/src/github.com/salesforce/UniTAO/dbSchemas/MongoDB/Tables.json ./schema/DataServiceMongoDBTables.json
+COPY --from=build /go/src/github.com/salesforce/UniTAO/lib/Schema/data/schema.json ./schema/
