@@ -4,3 +4,6 @@ __inventory
 __debug_bin
 node_modules/
 .DS_Store
+
+# docker compose runtime logs (keep README.md placeholder tracked)
+docker-compose/**/logs/*.log

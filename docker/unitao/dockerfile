@@ -1,6 +1,8 @@
 FROM golang:1.24-alpine3.21 AS build
 WORKDIR /go/src/github.com/salesforce/UniTAO/
 ENV CGO_ENABLED=0
+ARG GOPROXY=https://proxy.golang.org,direct
+ENV GOPROXY=${GOPROXY}
 COPY . ./
 RUN apk update && apk add --no-cache ca-certificates && apk upgrade --no-cache && apk add --no-cache git
 RUN go build -a -o ./bin/ ./app/DataService

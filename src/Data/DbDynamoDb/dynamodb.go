@@ -125,6 +125,14 @@ func (db *dynamoDB) Get(queryArgs map[string]interface{}) ([]map[string]interfac
 	return db.Query(tableName, "", args)
 }
 
+func (db *dynamoDB) DatabaseExists() (bool, error) {
+	tableList, err := db.ListTable()
+	if err != nil {
+		return false, err
+	}
+	return len(tableList) > 0, nil
+}
+
 func (db *dynamoDB) ListTable() ([]interface{}, error) {
 	tableList := []interface{}{}
 	input := &dynamodb.ListTablesInput{}
