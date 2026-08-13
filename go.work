@@ -21,7 +21,7 @@
 // This copyright notice and license applies to all files in this directory or sub-directories, except when stated otherwise explicitly.
 // ******************************************************************************************************************
 
-go 1.24.0
+go 1.25.0
 
 use (
 	./app/DataService
