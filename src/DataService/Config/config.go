@@ -43,10 +43,18 @@ const (
 )
 
 type Confuguration struct {
-	Database  DbConfig.DatabaseConfig `json:"database"`
-	DataTable DataTableConfig         `json:"table"`
-	Http      Http.Config             `json:"http"`
-	Inv       InvConfig               `json:"inventory"`
+	Database    DbConfig.DatabaseConfig `json:"database"`
+	DataTable   DataTableConfig         `json:"table"`
+	Http        Http.Config             `json:"http"`
+	Inv         InvConfig               `json:"inventory"`
+	Initialized bool                    `json:"initialized"`
+	ForceInit   bool                    `json:"force-init"`
+	Init        InitConfig              `json:"init"`
+}
+
+type InitConfig struct {
+	TablesFile string `json:"tablesFile"`
+	SchemaFile string `json:"schemaFile"`
 }
 
 type DataTableConfig struct {
@@ -73,6 +81,18 @@ func Read(configPath string, config *Confuguration) error {
 	json.Unmarshal([]byte(byteValue), config)
 	if config.DataTable.Data == "" {
 		return fmt.Errorf("missing field data in Config.DataTable")
+	}
+	return nil
+}
+
+func Write(configPath string, config *Confuguration) error {
+	data, err := json.MarshalIndent(config, "", "    ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal Config JSON, err:%s", err)
+	}
+	err = ioutil.WriteFile(configPath, data, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to write Config JSON file: [%s], err:%s", configPath, err)
 	}
 	return nil
 }

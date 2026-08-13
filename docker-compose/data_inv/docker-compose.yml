@@ -1,6 +1,6 @@
 services:
   unitao-data-service01:
-    image: unitao/dataservice:latest
+    image: ghcr.io/howeyhuo/unitao-dev:latest
     container_name: unitao-data-service01
     restart: always
     stdin_open: true
@@ -15,7 +15,7 @@ services:
       - mongo_net
 
   unitao-inv-service:
-    image: unitao/inventoryservice:latest
+    image: ghcr.io/howeyhuo/unitao-dev:latest
     container_name: unitao-inv-service
     restart: always
     stdin_open: true
@@ -25,7 +25,7 @@ services:
       -  ./logs:/opt/UniTAO/log
     ports:
       - "8004:80"
-    command: "InventoryService -config /opt/UniTAO/config/config.json"
+    command: "InventoryService -config /opt/UniTAO/config/config.json -log /opt/UniTAO/log"
     networks:
       - mongo_net
 

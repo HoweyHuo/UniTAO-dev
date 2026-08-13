@@ -36,6 +36,7 @@ import (
 	"DataService/Common"
 	"DataService/Config"
 	"DataService/DataHandler"
+	"DataService/DataInit"
 	"DataService/DataJournal"
 
 	"github.com/salesforce/UniTAO/lib/Schema/Record"
@@ -108,6 +109,15 @@ func (srv *Server) Run() {
 	ex = srv.WaitForDataHandler()
 	if ex != nil {
 		srv.log.Fatalf("failed to connect to database, Err:%s", ex)
+	}
+	if !srv.config.Initialized {
+		if err := DataInit.InitDatabase(srv.config, srv.data.DB, srv.log); err != nil {
+			srv.log.Fatalf("failed to initialize database, Err:%s", err)
+		}
+		srv.config.Initialized = true
+		if err := Config.Write(srv.args[CONFIG], &srv.config); err != nil {
+			srv.log.Printf("failed to persist initialized flag, Err:%s", err)
+		}
 	}
 	jLogFile, jLogger, ex := CustomLogger.FileLoger(srv.logPath, fmt.Sprintf("%s_Journal", srv.Id))
 	if ex != nil {

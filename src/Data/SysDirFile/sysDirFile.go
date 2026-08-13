@@ -54,6 +54,14 @@ func (db *Database) Name() string {
 	return Name
 }
 
+func (db *Database) DatabaseExists() (bool, error) {
+	tableList, err := db.ListTable()
+	if err != nil {
+		return false, err
+	}
+	return len(tableList) > 0, nil
+}
+
 func (db *Database) ListTable() ([]interface{}, error) {
 	result, err := DirTable.List(db.Path)
 	if err != nil {
