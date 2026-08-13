@@ -4,12 +4,16 @@
         "mongodb": {
             "endpoint": "mongodb://mongodb:27017",
             "database": "DataService01",
-	        "user": "root",
-	        "password": "rootpassword"
+            "user": "root",
+            "password": "rootpassword"
         }
     },
     "table": {
         "data": "Data"
+    },
+    "init": {
+        "tablesFile": "schema/DataServiceMongoDBTables.json",
+        "schemaFile": "schema/schema.json"
     },
     "http": {
         "type": "http",

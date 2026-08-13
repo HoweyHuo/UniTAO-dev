@@ -22,7 +22,7 @@ services:
       - dynamodb
 
   unitao-data-service01:
-    image: unitao/dataservice:localbuild
+    image: ghcr.io/howeyhuo/unitao-dev:latest
     container_name: unitao-data-service01
     restart: always
     stdin_open: true
@@ -37,7 +37,7 @@ services:
     command: "DataService -id DataService01 -config /opt/UniTAO/config/config.json -log /opt/UniTAO/log"
 
   unitao-data-service01-admin:
-    image: unitao/dataservice:localbuild
+    image: ghcr.io/howeyhuo/unitao-dev:latest
     container_name: unitao-data-service01-admin
     restart: "on-failure"
     volumes:
@@ -45,10 +45,10 @@ services:
       -  ./logs:/opt/UniTAO/log
     depends_on:
       - dynamodb
-    command: "initDynamo.sh /opt/UniTAO/log"
+    command: "DataServiceAdmin table -config config/config.json -table schema/DataServiceDynamoDBTables.json -reset true -log /opt/UniTAO/log && DataServiceAdmin data -config config/config.json -data schema/schema.json -log /opt/UniTAO/log"
 
   unitao-data-service02:
-    image: unitao/dataservice:localbuild
+    image: ghcr.io/howeyhuo/unitao-dev:latest
     container_name: unitao-data-service02
     restart: always
     stdin_open: true
@@ -63,7 +63,7 @@ services:
     command: "DataService -id DataService02 -config /opt/UniTAO/config/config.json -log /opt/UniTAO/log"
 
   unitao-data-service02-admin:
-    image: unitao/dataservice:localbuild
+    image: ghcr.io/howeyhuo/unitao-dev:latest
     container_name: unitao-data-service02-admin
     restart: "on-failure"
     stdin_open: true
@@ -73,10 +73,10 @@ services:
       -  ./logs:/opt/UniTAO/log
     depends_on:
       - dynamodb
-    command: "initDynamo.sh /opt/UniTAO/log"
+    command: "DataServiceAdmin table -config config/config.json -table schema/DataServiceDynamoDBTables.json -reset true -log /opt/UniTAO/log && DataServiceAdmin data -config config/config.json -data schema/schema.json -log /opt/UniTAO/log"
 
   unitao-inv-service:
-    image: unitao/inventoryservice:localbuild
+    image: ghcr.io/howeyhuo/unitao-dev:latest
     container_name: unitao-inv-service
     restart: always
     stdin_open: true
@@ -90,10 +90,10 @@ services:
       -  ./logs:/opt/UniTAO/log
     ports:
       - "8004:80"
-    command: "InventoryService -config /opt/UniTAO/config/config.json"
+    command: "InventoryService -config /opt/UniTAO/config/config.json -log /opt/UniTAO/log"
 
   unitao-inv-service-admin:
-    image: unitao/inventoryservice:localbuild
+    image: ghcr.io/howeyhuo/unitao-dev:latest
     container_name: unitao-inv-service-admin
     restart: "no"
     stdin_open: true
