@@ -44,6 +44,10 @@ func (db MockDatabase) Name() string {
 	return "MockDatabase"
 }
 
+func (db MockDatabase) DatabaseExists() (bool, error) {
+	return len(db.Data) > 0, nil
+}
+
 func NewMockDb(config DbConfig.DatabaseConfig, dataStr string, logger *log.Logger) (*MockDatabase, error) {
 	if logger == nil {
 		logger = log.Default()

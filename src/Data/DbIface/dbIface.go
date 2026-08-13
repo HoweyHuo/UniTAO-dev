@@ -43,6 +43,7 @@ const (
 
 type Database interface {
 	Name() string
+	DatabaseExists() (bool, error)
 	ListTable() ([]interface{}, error)
 	CreateTable(name string, data map[string]interface{}) error
 	DeleteTable(name string) error
