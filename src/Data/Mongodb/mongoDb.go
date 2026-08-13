@@ -62,6 +62,14 @@ func (db *mongoDb) Name() string {
 	return Name
 }
 
+func (db *mongoDb) DatabaseExists() (bool, error) {
+	database, err := db.Database()
+	if err != nil {
+		return false, err
+	}
+	return database != nil, nil
+}
+
 func (db *mongoDb) Database() (*mongo.Database, error) {
 	dbList, err := db.client.ListDatabaseNames(context.TODO(), bson.D{})
 	if err != nil {
