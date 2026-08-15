@@ -17,10 +17,17 @@
     },
     "http": {
         "type": "http",
-        "dns": "localhost",
+        "dns": "unitao-data-service01",
         "port": "80",
         "id": "DataService01",
         "headers": {}
+    },
+    "ds": {
+        "id": "DataService01",
+        "urls": [
+            "http://unitao-data-service01",
+            "http://localhost:8001"
+        ]
     },
     "inventory": {
         "url": "http://unitao-inv-service"

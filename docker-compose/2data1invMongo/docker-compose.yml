@@ -48,17 +48,6 @@ services:
       - mongodb
     command: "DataService -id DataService01 -config /opt/UniTAO/config/config.json -log /opt/UniTAO/log"
 
-  unitao-data-service01-admin:
-    image: ghcr.io/howeyhuo/unitao-dev:latest
-    container_name: unitao-data-service01-admin
-    restart: "on-failure"
-    volumes:
-      -  ./DataService01:/opt/UniTAO/config
-      -  ./logs:/opt/UniTAO/log
-    depends_on:
-      - mongodb
-    command: "DataServiceAdmin table -config config/config.json -table schema/DataServiceMongoDBTables.json -reset true -log /opt/UniTAO/log && DataServiceAdmin data -config config/config.json -data schema/schema.json -log /opt/UniTAO/log"
-  
   unitao-data-service02:
     image: ghcr.io/howeyhuo/unitao-dev:latest
     container_name: unitao-data-service02
@@ -73,17 +62,6 @@ services:
     depends_on:
       - mongodb
     command: "DataService -id DataService02 -config /opt/UniTAO/config/config.json -log /opt/UniTAO/log"
-
-  unitao-data-service02-admin:
-    image: ghcr.io/howeyhuo/unitao-dev:latest
-    container_name: unitao-data-service02-admin
-    restart: "on-failure"
-    volumes:
-      -  ./DataService02:/opt/UniTAO/config
-      -  ./logs:/opt/UniTAO/log
-    depends_on:
-      - mongodb
-    command: "DataServiceAdmin table -config config/config.json -table schema/DataServiceMongoDBTables.json -reset true -log /opt/UniTAO/log && DataServiceAdmin data -config config/config.json -data schema/schema.json -log /opt/UniTAO/log"
 
   unitao-inv-service:
     image: ghcr.io/howeyhuo/unitao-dev:latest
@@ -102,16 +80,3 @@ services:
       - "8004:80"
     command: "InventoryService -config /opt/UniTAO/config/config.json -log /opt/UniTAO/log"
 
-  unitao-inv-service-admin:
-    image: ghcr.io/howeyhuo/unitao-dev:latest
-    container_name: unitao-inv-service-admin
-    restart: "no"
-    stdin_open: true
-    tty: true
-    depends_on:
-      - "unitao-inv-service"
-    volumes:
-      -  ./InventoryService/config:/opt/UniTAO/config
-      -  ./InventoryService/data:/opt/UniTAO/data
-      -  ./logs:/opt/UniTAO/log
-    command: "InventoryServiceAdmin sync -config /opt/UniTAO/config/config.json -log /opt/UniTAO/log"

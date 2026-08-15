@@ -34,6 +34,7 @@ import (
 
 	"InventoryService/Config"
 	"InventoryService/DataHandler"
+	"InventoryService/DataSync"
 
 	"github.com/salesforce/UniTAO/lib/Util"
 	"github.com/salesforce/UniTAO/lib/Util/CustomLogger"
@@ -41,11 +42,13 @@ import (
 )
 
 type Server struct {
-	Port   string
-	args   ServerArgs
-	config Config.ServerConfig
-	data   *DataHandler.Handler
-	log    *log.Logger
+	Port     string
+	args     ServerArgs
+	config   Config.ServerConfig
+	data     *DataHandler.Handler
+	log      *log.Logger
+	syncChan chan string      // DS 注册/更新事件
+	syncer   *DataSync.Syncer // referral + schema 同步器
 }
 
 type ServerArgs struct {
@@ -55,9 +58,11 @@ type ServerArgs struct {
 }
 
 const (
-	CONFIG       = "config"
-	PORT         = "port"
-	PORT_DEFAULT = "8003"
+	CONFIG                 = "config"
+	PORT                   = "port"
+	PORT_DEFAULT           = "8003"
+	DefaultSyncIntervalSec = 300 // 后台全量对账默认间隔（秒）
+	SyncChanCap            = 16  // DS 注册事件缓冲大小
 )
 
 func argHandler() ServerArgs {
@@ -128,6 +133,16 @@ func (srv *Server) Run() {
 	if err != nil {
 		srv.log.Fatalf("failed to connect to database, Err:%s", err)
 	}
+	// 后台 schema sync：先于 HTTP 启动，注册事件驱动优先同步新 DS
+	intervalSec := srv.config.Sync.IntervalSec
+	if intervalSec <= 0 {
+		intervalSec = DefaultSyncIntervalSec
+	}
+	interval := time.Duration(intervalSec) * time.Second
+	srv.syncChan = make(chan string, SyncChanCap)
+	srv.data.SyncChan = srv.syncChan
+	srv.syncer = DataSync.New(srv.data, srv.log)
+	go srv.syncLoop(interval)
 	http.HandleFunc("/", srv.handler)
 	srv.log.Printf("Data Server Listen @%s://%s:%s", srv.config.Http.HttpType, srv.config.Http.DnsName, srv.Port)
 	srv.log.Fatal(http.ListenAndServe(fmt.Sprintf(":%s", srv.Port), nil))
@@ -222,4 +237,57 @@ func (srv *Server) handlerDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	result := fmt.Sprintf("[%s/%s] deleted", dataType, id)
 	Http.ResponseText(w, []byte(result), http.StatusAccepted, srv.config.Http)
+}
+
+// syncLoop 单 goroutine 串行执行同步，天然避免并发写 referral。
+// select 每次迭代重建 time.After → 事件处理后周期计时自然重置，不会立刻重复全量 sync。
+func (srv *Server) syncLoop(interval time.Duration) {
+	srv.log.Printf("start background schema sync loop, interval=%s", interval)
+	srv.runSync("startup", srv.syncer.Sync)
+	for {
+		select {
+		case dsId := <-srv.syncChan:
+			ids := srv.collectSyncEvents(dsId) // 合并突发事件、去重
+			srv.log.Printf("wake sync early for DS=%v", ids)
+			for _, id := range ids { // 新 DS 优先：先定向同步，再全量对账
+				srv.runSync(fmt.Sprintf("new DS=%s", id), func() error { return srv.syncer.SyncDs(id) })
+			}
+			srv.runSync("post-event full sync", srv.syncer.Sync)
+		case <-time.After(interval):
+			srv.log.Printf("periodic sync")
+			srv.runSync("periodic", srv.syncer.Sync)
+		}
+	}
+}
+
+// collectSyncEvents 排空同步通道中已缓冲的事件并去重，返回待优先同步的 DS 列表。
+func (srv *Server) collectSyncEvents(first string) []string {
+	seen := map[string]bool{}
+	ids := []string{}
+	add := func(id string) {
+		if id == "" || seen[id] {
+			return
+		}
+		seen[id] = true
+		ids = append(ids, id)
+	}
+	add(first)
+drain:
+	for {
+		select {
+		case id := <-srv.syncChan:
+			add(id)
+		default:
+			break drain
+		}
+	}
+	return ids
+}
+
+// runSync 执行同步并记录结果；错误仅记日志，循环不中断。
+func (srv *Server) runSync(what string, fn func() error) {
+	srv.log.Printf("start %s sync", what)
+	if err := fn(); err != nil {
+		srv.log.Printf("%s sync failed, Error: %s", what, err)
+	}
 }

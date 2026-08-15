@@ -47,8 +47,9 @@ import (
 )
 
 type Handler struct {
-	log *log.Logger
-	Db  DbIface.Database
+	log      *log.Logger
+	Db       DbIface.Database
+	SyncChan chan string // 非空时，inventory 记录写入成功后非阻塞投递 dsId 事件
 }
 
 var InvTypes = map[string]bool{
@@ -554,6 +555,14 @@ func (h *Handler) PutData(data map[string]interface{}) (string, *Http.HttpError)
 	err = h.Db.Replace(record.Type, args, record.Map())
 	if err != nil {
 		return "", Http.NewHttpError(err.Error(), http.StatusInternalServerError)
+	}
+	if record.Type == Schema.Inventory && h.SyncChan != nil {
+		// 非阻塞发送；channel 满则丢弃（全量 Sync 会重扫所有 DS 兜底）
+		select {
+		case h.SyncChan <- record.Id:
+		default:
+			h.Log(fmt.Sprintf("sync event channel full, drop sync event for DS=[%s]", record.Id))
+		}
 	}
 	return record.Id, nil
 }
