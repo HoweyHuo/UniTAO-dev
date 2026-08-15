@@ -26,7 +26,6 @@ This copyright notice and license applies to all files in this directory or sub-
 package main
 
 import (
-	"DataService/Common"
 	"flag"
 	"fmt"
 	"log"
@@ -35,15 +34,12 @@ import (
 
 	"InventoryService/Config"
 	"InventoryService/DataHandler"
+	"InventoryService/DataSync"
 	"InventoryService/InvRecord"
-	"InventoryService/RefRecord"
 
 	"github.com/salesforce/UniTAO/lib/Schema"
-	"github.com/salesforce/UniTAO/lib/Schema/JsonKey"
 	"github.com/salesforce/UniTAO/lib/Schema/Record"
-	"github.com/salesforce/UniTAO/lib/Util"
 	"github.com/salesforce/UniTAO/lib/Util/CustomLogger"
-	"github.com/salesforce/UniTAO/lib/Util/Http"
 	"github.com/salesforce/UniTAO/lib/Util/Json"
 )
 
@@ -189,179 +185,13 @@ func (a *Admin) addDsRecord() error {
 	return nil
 }
 
+// syncDsSchema 委托 DataSync 执行：指定 -id 时只定向同步该 DS，否则全量对账。
 func (a *Admin) syncDsSchema() error {
-	idList, err := a.handler.List(Schema.Inventory)
-	if err != nil {
-		return fmt.Errorf("failed to list all inventorys. Error: %s", err)
+	syncer := DataSync.New(a.handler, a.log)
+	if a.args.ops.id != "" {
+		return syncer.SyncDs(a.args.ops.id)
 	}
-
-	a.log.Printf("[%d] Data Services to sync", len(idList))
-	refTypes, ex := a.getReferralTypes()
-	if ex != nil {
-		a.log.Printf("failed to collect existing referral type from Inventory Service. Error: %s", ex)
-		return ex
-	}
-	dsTypes, ex := a.getDsTypes(idList)
-	if ex != nil {
-		a.log.Printf("failed to collect data type from Data Services. Error: %s", ex)
-		return ex
-	}
-	return a.SyncDataTypes(refTypes, dsTypes)
-}
-
-func (a *Admin) getReferralTypes() (map[string][]string, error) {
-	typeList, err := a.handler.List(RefRecord.Referral)
-	if err != nil {
-		a.log.Printf("failed to get list of [%s], Error: %s", RefRecord.Referral, err)
-		return nil, err
-	}
-	refTypes := map[string][]string{}
-	for _, dataType := range typeList {
-		// 直接读原始记录（GetReferral 会做可达性探测且对旧格式报错），
-		// 旧格式（仅 DataServiceId）解析出空数组，交由 SyncDataTypes 改写为数组。
-		record, err := a.handler.GetReferralRecord(dataType.(string))
-		if err != nil {
-			a.log.Printf("failed to get %s: [%s], Error: %s", RefRecord.Referral, dataType, err)
-			continue
-		}
-		referral, e := RefRecord.LoadMap(record.Data)
-		if e != nil {
-			a.log.Printf("failed to parse %s: [%s], Error: %s", RefRecord.Referral, dataType, e)
-			continue
-		}
-		a.log.Printf("record current Referral[%s] from DS[%v]", dataType, referral.DataServices)
-		refTypes[dataType.(string)] = dedupeStrings(referral.DataServices)
-	}
-	return refTypes, nil
-}
-
-func (a *Admin) getDsTypes(idList []interface{}) (map[string][]string, error) {
-	dsTypes := map[string][]string{}
-	for _, dsId := range idList {
-		ds, err := a.handler.GetDsInfo(dsId.(string))
-		if err != nil {
-			a.log.Printf("failed to get info of DataService[%s], Error: %s", dsId, err)
-			return nil, err
-		}
-		dsUrl, e := ds.GetUrl()
-		if e != nil {
-			a.log.Printf("failed to get URL for ds[%s], Error: %s", dsId, err)
-			return nil, e
-		}
-		schemaUrl, e := Http.URLPathJoin(dsUrl, JsonKey.Schema)
-		if e != nil {
-			return nil, fmt.Errorf("failed to parse url from DS record [%s]=[%s], Err:%s", Record.DataId, a.args.ops.id, err)
-		}
-		a.log.Printf("DataService[%s], schema URL=[%s]", dsId, *schemaUrl)
-		result, code, e := Http.GetRestData(*schemaUrl)
-		if e != nil {
-			return nil, fmt.Errorf("failed to Rest Data from [path]=[%s], Code:%d", *schemaUrl, code)
-		}
-		for _, dataTypeStr := range result.([]interface{}) {
-			dataType, _ := Util.ParseCustomPath(dataTypeStr.(string), JsonKey.ArchivedSchemaIdDiv)
-			if _, ok := Common.InternalTypes[dataType]; ok {
-				a.log.Printf("type[%s] @DS[%s] is internal type, skip", dataType, dsId)
-				continue
-			}
-			dsIdStr := dsId.(string)
-			if contains(dsTypes[dataType], dsIdStr) {
-				a.log.Printf("type[%s] @DS[%s] already recorded", dataType, dsId)
-				continue
-			}
-			a.log.Printf("record type[%s] from DS[%s]", dataType, dsId)
-			dsTypes[dataType] = append(dsTypes[dataType], dsIdStr)
-		}
-	}
-	return dsTypes, nil
-}
-
-func (a *Admin) SyncDataTypes(refTypes map[string][]string, dsTypes map[string][]string) error {
-	for dataType := range refTypes {
-		if _, ok := dsTypes[dataType]; !ok {
-			a.log.Printf("data type [%s] no longer exists on any DataService. remove referral", dataType)
-			err := a.removeType(dataType)
-			if err != nil {
-				a.log.Printf("remove referral [%s] failed. Error: %s", dataType, err)
-				return err
-			}
-		}
-	}
-	for dataType, dsIdList := range dsTypes {
-		current, exists := refTypes[dataType]
-		desired := dedupeStrings(dsIdList)
-		if !exists || !setEqual(current, desired) {
-			a.log.Printf("set referral for type[%s] to DS[%v]", dataType, desired)
-			err := a.setType(dataType, desired)
-			if err != nil {
-				a.log.Printf("set referral type [%s] failed. Error: %s", dataType, err)
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-func (a *Admin) setType(dataType string, dsIdList []string) error {
-	referral := RefRecord.ReferralData{
-		DataType:     dataType,
-		DataServices: dedupeStrings(dsIdList),
-	}
-	referralData, _ := Json.CopyToMap(referral.GetRecord())
-	// Db.Replace 为全量 upsert；keys 需含 DataType + DataId（DynamoDB 复合键必需）
-	keys := map[string]interface{}{
-		Record.DataType: RefRecord.Referral,
-		Record.DataId:   dataType,
-	}
-	if e := a.handler.Db.Replace(RefRecord.Referral, keys, referralData); e != nil {
-		return e
-	}
-	a.log.Printf("referral type[%s] to DS[%v] set", dataType, referral.DataServices)
-	return nil
-}
-
-// dedupeStrings 去重并剔除空串，保持首次出现顺序。
-func dedupeStrings(list []string) []string {
-	seen := map[string]bool{}
-	result := []string{}
-	for _, v := range list {
-		if v == "" || seen[v] {
-			continue
-		}
-		seen[v] = true
-		result = append(result, v)
-	}
-	return result
-}
-
-// setEqual 无序集合相等（输入不含重复）。
-func setEqual(a []string, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	set := make(map[string]bool, len(a))
-	for _, v := range a {
-		set[v] = true
-	}
-	for _, v := range b {
-		if !set[v] {
-			return false
-		}
-	}
-	return true
-}
-
-func contains(list []string, v string) bool {
-	for _, item := range list {
-		if item == v {
-			return true
-		}
-	}
-	return false
-}
-
-func (a *Admin) removeType(dataType string) error {
-	a.removeData(RefRecord.Referral, dataType)
-	return nil
+	return syncer.Sync()
 }
 
 func (a *Admin) removeDsRecord() error {
