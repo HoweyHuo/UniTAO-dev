@@ -15,5 +15,8 @@
                 "http://localhost:8005"
             ]
         }
+    },
+    "sync": {
+        "intervalSec": 300
     }
 }
