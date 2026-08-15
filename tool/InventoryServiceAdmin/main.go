@@ -209,28 +209,34 @@ func (a *Admin) syncDsSchema() error {
 	return a.SyncDataTypes(refTypes, dsTypes)
 }
 
-func (a *Admin) getReferralTypes() (map[string]string, error) {
+func (a *Admin) getReferralTypes() (map[string][]string, error) {
 	typeList, err := a.handler.List(RefRecord.Referral)
 	if err != nil {
 		a.log.Printf("failed to get list of [%s], Error: %s", RefRecord.Referral, err)
 		return nil, err
 	}
-	refTypes := map[string]string{}
+	refTypes := map[string][]string{}
 	for _, dataType := range typeList {
-		referral, err := a.handler.GetReferral(dataType.(string))
+		// 直接读原始记录（GetReferral 会做可达性探测且对旧格式报错），
+		// 旧格式（仅 DataServiceId）解析出空数组，交由 SyncDataTypes 改写为数组。
+		record, err := a.handler.GetReferralRecord(dataType.(string))
 		if err != nil {
 			a.log.Printf("failed to get %s: [%s], Error: %s", RefRecord.Referral, dataType, err)
-			a.removeType(dataType.(string))
 			continue
 		}
-		a.log.Printf("record current Referral[%s] from DS[%s]", dataType, referral.DsId)
-		refTypes[dataType.(string)] = referral.DsId
+		referral, e := RefRecord.LoadMap(record.Data)
+		if e != nil {
+			a.log.Printf("failed to parse %s: [%s], Error: %s", RefRecord.Referral, dataType, e)
+			continue
+		}
+		a.log.Printf("record current Referral[%s] from DS[%v]", dataType, referral.DataServices)
+		refTypes[dataType.(string)] = dedupeStrings(referral.DataServices)
 	}
 	return refTypes, nil
 }
 
-func (a *Admin) getDsTypes(idList []interface{}) (map[string]string, error) {
-	dsTypes := map[string]string{}
+func (a *Admin) getDsTypes(idList []interface{}) (map[string][]string, error) {
+	dsTypes := map[string][]string{}
 	for _, dsId := range idList {
 		ds, err := a.handler.GetDsInfo(dsId.(string))
 		if err != nil {
@@ -257,43 +263,37 @@ func (a *Admin) getDsTypes(idList []interface{}) (map[string]string, error) {
 				a.log.Printf("type[%s] @DS[%s] is internal type, skip", dataType, dsId)
 				continue
 			}
-			if _, ok := dsTypes[dataType]; ok {
-				a.log.Printf("type[%s] @DS[%s] already exists", dataType, dsId)
+			dsIdStr := dsId.(string)
+			if contains(dsTypes[dataType], dsIdStr) {
+				a.log.Printf("type[%s] @DS[%s] already recorded", dataType, dsId)
 				continue
 			}
 			a.log.Printf("record type[%s] from DS[%s]", dataType, dsId)
-			dsTypes[dataType] = dsId.(string)
+			dsTypes[dataType] = append(dsTypes[dataType], dsIdStr)
 		}
 	}
 	return dsTypes, nil
 }
 
-func (a *Admin) SyncDataTypes(refTypes map[string]string, dsTypes map[string]string) error {
+func (a *Admin) SyncDataTypes(refTypes map[string][]string, dsTypes map[string][]string) error {
 	for dataType := range refTypes {
 		if _, ok := dsTypes[dataType]; !ok {
-			a.removeType(dataType)
-		}
-	}
-	for dataType, dsId := range dsTypes {
-		if _, ok := refTypes[dataType]; !ok {
-			a.log.Printf("data type [%s] from DS[%s] does not exists. add", dataType, dsId)
-			err := a.addType(dsId, dataType)
-			if err != nil {
-				a.log.Printf("add data type [%s] from DS [%s] failed. Error: %s", dataType, dsId, err)
-				return err
-			}
-			continue
-		}
-		if refTypes[dataType] != dsId {
-			a.log.Printf("data type [%s] moved from DS[%s] -> DS[%s], replace", dataType, refTypes[dataType], dsId)
+			a.log.Printf("data type [%s] no longer exists on any DataService. remove referral", dataType)
 			err := a.removeType(dataType)
 			if err != nil {
-				a.log.Printf("remove data type [%s] from DS [%s] failed. Error: %s", dataType, dsId, err)
+				a.log.Printf("remove referral [%s] failed. Error: %s", dataType, err)
 				return err
 			}
-			err = a.addType(dsId, dataType)
+		}
+	}
+	for dataType, dsIdList := range dsTypes {
+		current, exists := refTypes[dataType]
+		desired := dedupeStrings(dsIdList)
+		if !exists || !setEqual(current, desired) {
+			a.log.Printf("set referral for type[%s] to DS[%v]", dataType, desired)
+			err := a.setType(dataType, desired)
 			if err != nil {
-				a.log.Printf("add data type [%s] from DS [%s] failed. Error: %s", dataType, dsId, err)
+				a.log.Printf("set referral type [%s] failed. Error: %s", dataType, err)
 				return err
 			}
 		}
@@ -301,20 +301,62 @@ func (a *Admin) SyncDataTypes(refTypes map[string]string, dsTypes map[string]str
 	return nil
 }
 
-func (a *Admin) addType(dsId string, dataType string) error {
-	a.log.Printf("get DsInfo [%s]", dsId)
+func (a *Admin) setType(dataType string, dsIdList []string) error {
 	referral := RefRecord.ReferralData{
-		DataType: dataType,
-		DsId:     dsId,
+		DataType:     dataType,
+		DataServices: dedupeStrings(dsIdList),
 	}
-	a.log.Printf("add referral for type[%s] to DS[%s]", dataType, dsId)
 	referralData, _ := Json.CopyToMap(referral.GetRecord())
-	e := a.handler.Db.Create(RefRecord.Referral, referralData)
-	if e != nil {
+	// Db.Replace 为全量 upsert；keys 需含 DataType + DataId（DynamoDB 复合键必需）
+	keys := map[string]interface{}{
+		Record.DataType: RefRecord.Referral,
+		Record.DataId:   dataType,
+	}
+	if e := a.handler.Db.Replace(RefRecord.Referral, keys, referralData); e != nil {
 		return e
 	}
-	a.log.Printf("referral type[%s] to DS[%s] added", dataType, dsId)
+	a.log.Printf("referral type[%s] to DS[%v] set", dataType, referral.DataServices)
 	return nil
+}
+
+// dedupeStrings 去重并剔除空串，保持首次出现顺序。
+func dedupeStrings(list []string) []string {
+	seen := map[string]bool{}
+	result := []string{}
+	for _, v := range list {
+		if v == "" || seen[v] {
+			continue
+		}
+		seen[v] = true
+		result = append(result, v)
+	}
+	return result
+}
+
+// setEqual 无序集合相等（输入不含重复）。
+func setEqual(a []string, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	set := make(map[string]bool, len(a))
+	for _, v := range a {
+		set[v] = true
+	}
+	for _, v := range b {
+		if !set[v] {
+			return false
+		}
+	}
+	return true
+}
+
+func contains(list []string, v string) bool {
+	for _, item := range list {
+		if item == v {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *Admin) removeType(dataType string) error {

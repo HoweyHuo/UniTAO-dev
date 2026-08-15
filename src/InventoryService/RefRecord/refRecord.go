@@ -54,8 +54,12 @@ const (
 				"DataType": {
 					"type": "string"
 				},
-				"DataServiceId": {
-					"type": "string"
+				"DataServices": {
+					"type": "array",
+					"items": {
+						"type": "string",
+						"contentMediaType": "inventory/inventory"
+					}
 				},
 				"AuthUrl": {
 					"type": "string"
@@ -69,12 +73,12 @@ const (
 )
 
 type ReferralData struct {
-	DataType string `json:"DataType"`
-	DsId     string `json:"DataServiceId"`
-	AuthUrl  string `json:"AuthUrl"`
-	AuthType string `json:"AuthType"`
-	Schema   map[string]interface{}
-	DsInfo   *InvRecord.DataServiceInfo
+	DataType     string   `json:"DataType"`
+	DataServices []string `json:"DataServices"`
+	AuthUrl      string   `json:"AuthUrl"`
+	AuthType     string   `json:"AuthType"`
+	Schema       map[string]interface{}
+	DsInfos      []*InvRecord.DataServiceInfo `json:"DsInfos"`
 }
 
 func LoadMap(data map[string]interface{}) (*ReferralData, error) {
@@ -90,41 +94,53 @@ func LoadMap(data map[string]interface{}) (*ReferralData, error) {
 	return &record, nil
 }
 
+// GetSchema 遍历所有 DsInfos，返回第一个成功获取的 schema（各分片 schema 一致）。
 func (r *ReferralData) GetSchema(dataType string, logger *log.Logger) (*Record.Record, *Http.HttpError) {
 	if logger == nil {
 		logger = log.Default()
 	}
-	if r.DsInfo == nil {
-		msg := fmt.Sprintf("failed to load DsInfo for type=[%s]", dataType)
-		logger.Print(msg)
-		return nil, Http.NewHttpError(msg, http.StatusInternalServerError)
-
-	}
-	dsUrl, err := r.DsInfo.GetUrl()
-	if err != nil {
-		msg := fmt.Sprintf("no good url to DS=[%s], error:%s", r.DsInfo.Id, err)
+	if len(r.DsInfos) == 0 {
+		msg := fmt.Sprintf("failed to load DsInfos for type=[%s]", dataType)
 		logger.Print(msg)
 		return nil, Http.NewHttpError(msg, http.StatusInternalServerError)
 	}
-	schemaUrl := fmt.Sprintf("%s/%s/%s", dsUrl, JsonKey.Schema, dataType)
-	schemaData, code, err := Http.GetRestData(schemaUrl)
-	if err != nil {
-		logger.Print(err.Error())
-		return nil, Http.NewHttpError(err.Error(), code)
+	var lastErr string
+	for _, dsInfo := range r.DsInfos {
+		if dsInfo == nil {
+			continue
+		}
+		dsUrl, err := dsInfo.GetUrl()
+		if err != nil {
+			logger.Printf("no good url to DS=[%s], error:%s", dsInfo.Id, err)
+			lastErr = err.Error()
+			continue
+		}
+		schemaUrl := fmt.Sprintf("%s/%s/%s", dsUrl, JsonKey.Schema, dataType)
+		schemaData, code, err := Http.GetRestData(schemaUrl)
+		if err != nil {
+			logger.Print(err.Error())
+			lastErr = fmt.Sprintf("%s (http code %d)", err.Error(), code)
+			continue
+		}
+		schema, ok := schemaData.(map[string]interface{})
+		if !ok {
+			msg := fmt.Sprintf("failed to parse schema record. from path=[%s]", schemaUrl)
+			logger.Print(msg)
+			lastErr = msg
+			continue
+		}
+		schemaRecord, err := Record.LoadMap(schema)
+		if err != nil {
+			msg := "schema from dataservice is not in Record format."
+			logger.Printf("%s, Error: %s", msg, err)
+			lastErr = msg
+			continue
+		}
+		return schemaRecord, nil
 	}
-	schema, ok := schemaData.(map[string]interface{})
-	if !ok {
-		msg := fmt.Sprintf("failed to parse schema record. from path=[%s]", schemaUrl)
-		logger.Print(msg)
-		return nil, Http.NewHttpError(msg, http.StatusInternalServerError)
-	}
-	schemaRecord, err := Record.LoadMap(schema)
-	if err != nil {
-		msg := "schema from dataservice is not in Record format."
-		logger.Printf("%s, Error: %s", msg, err)
-		return nil, Http.WrapError(err, msg, http.StatusInternalServerError)
-	}
-	return schemaRecord, nil
+	return nil, Http.NewHttpError(
+		fmt.Sprintf("failed to fetch schema for type=[%s] from any DataService, last error: %s", dataType, lastErr),
+		http.StatusInternalServerError)
 }
 
 func (r *ReferralData) GetRecord() *Record.Record {

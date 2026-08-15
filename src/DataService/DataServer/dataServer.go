@@ -133,6 +133,8 @@ func (srv *Server) Run() {
 	srv.journal = journal
 	srv.data.AddJournal = srv.journal.AddJournal
 	srv.RunJournalHandler()
+	// 自我注册：无 inventory.url 时 InvLinked() 为 false，StartSelfRegistration 直接返回
+	srv.StartSelfRegistration()
 	srv.RunHttp()
 }
 

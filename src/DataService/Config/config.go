@@ -42,10 +42,21 @@ const (
 	HTTP     = "http"
 )
 
+// DsConfig 描述本 DataService 自身的身份与对外可访问地址。
+// Id 为该 DataService 在 Inventory Service 中注册的标识（DsId），首次部署为空时
+// 自动生成 UUID 并回写 config；InstanceId 为稳定实例标识（UUID），用于区分"同 DS
+// 重注册"与"不同 DS 撞名"；Urls 为可被 Inventory Service 访问的 URL 列表。
+type DsConfig struct {
+	Id         string   `json:"id"`
+	InstanceId string   `json:"instanceId"`
+	Urls       []string `json:"urls"`
+}
+
 type Confuguration struct {
 	Database    DbConfig.DatabaseConfig `json:"database"`
 	DataTable   DataTableConfig         `json:"table"`
 	Http        Http.Config             `json:"http"`
+	Ds          DsConfig                `json:"ds"`
 	Inv         InvConfig               `json:"inventory"`
 	Initialized bool                    `json:"initialized"`
 	ForceInit   bool                    `json:"force-init"`

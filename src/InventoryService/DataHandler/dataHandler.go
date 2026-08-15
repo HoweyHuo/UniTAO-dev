@@ -59,6 +59,7 @@ var InvTypes = map[string]bool{
 
 var EditableTypes = map[string]bool{
 	SchemaPath.PathName: true,
+	Schema.Inventory:    true, // DS 自我注册写入 inventory 记录
 }
 
 func New(config DbConfig.DatabaseConfig, logger *log.Logger) (*Handler, error) {
@@ -139,20 +140,55 @@ func (h *Handler) List(dataType string) ([]interface{}, *Http.HttpError) {
 	if err != nil {
 		return nil, err
 	}
-	dsUrl, e := referral.DsInfo.GetUrl()
-	if e != nil {
-		return nil, Http.NewHttpError(e.Error(), http.StatusInternalServerError)
+	// 分片（多 DS）时返回 {ds_name}/{id} 限定 id，不去重；单 DS 返回裸 id
+	multiDs := len(referral.DsInfos) > 1
+	idList := []interface{}{}
+	anySuccess := false
+	var lastErr string
+	for _, ds := range referral.DsInfos {
+		dsUrl, e := ds.GetUrl()
+		if e != nil {
+			h.Log(fmt.Sprintf("skip DS=[%s] for list of [%s]: %s", ds.Id, dataType, e.Error()))
+			lastErr = e.Error()
+			continue
+		}
+		urlPath, e := Http.URLPathJoin(dsUrl, dataType)
+		if e != nil {
+			h.Log(fmt.Sprintf("failed to build list url for DS=[%s]: %s", ds.Id, e.Error()))
+			lastErr = e.Error()
+			continue
+		}
+		data, code, e := Http.GetRestData(*urlPath)
+		if e != nil {
+			h.Log(fmt.Sprintf("failed to list [%s] from DS=[%s], url=[%s], code=%d, error: %s", dataType, ds.Id, *urlPath, code, e.Error()))
+			lastErr = e.Error()
+			continue
+		}
+		dsIds, ok := data.([]interface{})
+		if !ok {
+			h.Log(fmt.Sprintf("bad list result from DS=[%s], url=[%s], not an array", ds.Id, *urlPath))
+			lastErr = fmt.Sprintf("list result from DS=[%s] is not an array", ds.Id)
+			continue
+		}
+		anySuccess = true
+		for _, id := range dsIds {
+			idStr, ok := id.(string)
+			if !ok || idStr == "" {
+				continue
+			}
+			if multiDs {
+				idList = append(idList, fmt.Sprintf("%s/%s", ds.Id, idStr))
+			} else {
+				idList = append(idList, idStr)
+			}
+		}
 	}
-	urlPath, e := Http.URLPathJoin(dsUrl, dataType)
-	if e != nil {
-		return nil, Http.WrapError(e, fmt.Sprintf("failed to parse url from data service [%s]=[%s], url=[%s]", Record.DataId, referral.DsInfo.Id, dsUrl), http.StatusInternalServerError)
+	if !anySuccess {
+		return nil, Http.NewHttpError(
+			fmt.Sprintf("failed to list [%s] from any DataService, last error: %s", dataType, lastErr),
+			http.StatusInternalServerError)
 	}
-	data, code, e := Http.GetRestData(*urlPath)
-	if e != nil {
-		return nil, Http.WrapError(e, fmt.Sprintf("failed to get data from REST URL=[%s]", *urlPath), code)
-
-	}
-	return data.([]interface{}), nil
+	return idList, nil
 }
 
 func (h *Handler) Get(dataType string, dataPath string) (interface{}, *Http.HttpError) {
@@ -163,6 +199,26 @@ func (h *Handler) Get(dataType string, dataPath string) (interface{}, *Http.Http
 			return nil, Http.NewHttpError(fmt.Sprintf("path=[%s] not supported on type=[%s]", dataPath, dataType), http.StatusBadRequest)
 		}
 		return h.GetRecord(dataType, dataId)
+	}
+	referral, err := h.GetReferral(dataType)
+	if err != nil {
+		return nil, err
+	}
+	if len(referral.DsInfos) > 1 {
+		// 分片 type：路径首段为 {ds_name} 前缀，路由到指定 DataService
+		dsName, rest := Util.ParsePath(dataPath)
+		var pinDs *InvRecord.DataServiceInfo
+		for _, ds := range referral.DsInfos {
+			if ds.Id == dsName {
+				pinDs = ds
+				break
+			}
+		}
+		if pinDs == nil {
+			return nil, Http.NewHttpError(fmt.Sprintf("unknown DataService=[%s] for type=[%s]", dsName, dataType), http.StatusBadRequest)
+		}
+		restId, restNext := Util.ParsePath(rest)
+		return h.getDataByPath(dataType, restId, restNext, pinDs)
 	}
 	return h.GetDataByPath(dataType, dataId, nextPath)
 }
@@ -248,8 +304,24 @@ func (h *Handler) InvListData(dataType string) ([]map[string]interface{}, *Http.
 }
 
 func (h *Handler) GetDataByPath(dataType string, idPath string, nextPath string) (interface{}, *Http.HttpError) {
+	return h.getDataByPath(dataType, idPath, nextPath, nil)
+}
+
+// getDataByPath 构建 SchemaPath 查询并执行。
+// pinDs 非空时，基础类型记录（dt==dataType && id==idPath）钉到指定分片获取；
+// schema 获取与跨类型 CMT 引用仍走 h.GetRecord 正常路由。
+func (h *Handler) getDataByPath(dataType string, idPath string, nextPath string, pinDs *InvRecord.DataServiceInfo) (interface{}, *Http.HttpError) {
 	conn := SchemaPathData.Connection{
 		FuncRecord: h.GetRecord,
+	}
+	if pinDs != nil {
+		baseId := idPath
+		conn.FuncRecord = func(dt string, id string) (*Record.Record, *Http.HttpError) {
+			if dt == dataType && id == baseId {
+				return h.getRecordFromDs(pinDs, dataType, id)
+			}
+			return h.GetRecord(dt, id)
+		}
 	}
 	dataPath := idPath
 	if nextPath != "" {
@@ -269,32 +341,76 @@ func (h *Handler) GetDataByPath(dataType string, idPath string, nextPath string)
 	return result, nil
 }
 
+// getRecordFromDs 直接从指定 DataService 获取单条记录（点查询按前缀路由用）。
+func (h *Handler) getRecordFromDs(ds *InvRecord.DataServiceInfo, dataType string, dataId string) (*Record.Record, *Http.HttpError) {
+	dsUrl, e := ds.GetUrl()
+	if e != nil {
+		return nil, Http.NewHttpError(e.Error(), http.StatusInternalServerError)
+	}
+	idPath, e := Http.URLPathJoin(dsUrl, dataType, dataId)
+	if e != nil {
+		return nil, Http.WrapError(e, "failed to build url", http.StatusInternalServerError)
+	}
+	data, code, e := Http.GetRestData(*idPath)
+	if e != nil {
+		return nil, Http.NewHttpError(e.Error(), code)
+	}
+	mapData, ok := data.(map[string]interface{})
+	if !ok {
+		return nil, Http.NewHttpError(fmt.Sprintf("data from [%s] is not a valid record map", *idPath), http.StatusInternalServerError)
+	}
+	record, e := Record.LoadMap(mapData)
+	if e != nil {
+		return nil, Http.WrapError(e, "failed to load data as Record", http.StatusInternalServerError)
+	}
+	return record, nil
+}
+
 func (h *Handler) GetDataServiceData(dataType string, dataId string) (interface{}, *Http.HttpError) {
 	referral, err := h.GetReferral(dataType)
 	if err != nil {
 		return nil, err
 	}
-	dsUrl, e := referral.DsInfo.GetUrl()
-	if e != nil {
-		return nil, Http.WrapError(e, fmt.Sprintf("no good url for DataService=[%s]", referral.DsId), http.StatusInternalServerError)
-	}
-	idPath, e := Http.URLPathJoin(dsUrl, dataType, dataId)
-	if e != nil {
-		return nil, Http.WrapError(e, fmt.Sprintf("failed to parse url from data service [%s]=[%s], url=[%s]", Record.DataId, referral.DsId, dsUrl), http.StatusInternalServerError)
-	}
-	data, code, e := Http.GetRestData(*idPath)
-	if e != nil {
-		if code == http.StatusNotFound {
-			return nil, Http.NewHttpError(e.Error(), code)
+	var last404 string
+	var lastReal string
+	for _, ds := range referral.DsInfos {
+		dsUrl, e := ds.GetUrl()
+		if e != nil {
+			h.Log(fmt.Sprintf("skip DS=[%s] for [%s/%s]: %s", ds.Id, dataType, dataId, e.Error()))
+			lastReal = fmt.Sprintf("DS=[%s]: %s", ds.Id, e.Error())
+			continue
 		}
-		return nil, Http.NewHttpError(fmt.Sprintf("failed to get data from REST URL=[%s]", *idPath), code)
-
+		idPath, e := Http.URLPathJoin(dsUrl, dataType, dataId)
+		if e != nil {
+			h.Log(fmt.Sprintf("failed to build url for DS=[%s]: %s", ds.Id, e.Error()))
+			lastReal = fmt.Sprintf("DS=[%s]: %s", ds.Id, e.Error())
+			continue
+		}
+		data, code, e := Http.GetRestData(*idPath)
+		if e == nil {
+			result, ok := data.(map[string]interface{})
+			if !ok {
+				h.Log(fmt.Sprintf("data from [%s] is not a valid record map", *idPath))
+				lastReal = fmt.Sprintf("DS=[%s]: invalid record data from [%s]", ds.Id, *idPath)
+				continue
+			}
+			return result, nil
+		}
+		if code == http.StatusNotFound {
+			last404 = fmt.Sprintf("DS=[%s]: %s", ds.Id, e.Error())
+			continue
+		}
+		h.Log(fmt.Sprintf("failed to get [%s/%s] from DS=[%s], url=[%s], code=%d, error: %s", dataType, dataId, ds.Id, *idPath, code, e.Error()))
+		lastReal = fmt.Sprintf("DS=[%s] code=%d: %s", ds.Id, code, e.Error())
 	}
-	result, ok := data.(map[string]interface{})
-	if !ok {
-		return nil, Http.NewHttpError(fmt.Sprintf("data from [%s] is not a validate record data map[string]interface{}", *idPath), http.StatusInternalServerError)
+	if lastReal != "" {
+		return nil, Http.NewHttpError(
+			fmt.Sprintf("failed to get [%s/%s] from any DataService, last error: %s", dataType, dataId, lastReal),
+			http.StatusInternalServerError)
 	}
-	return result, nil
+	return nil, Http.NewHttpError(
+		fmt.Sprintf("object of type [%s] with id [%s] not found on any DataService. %s", dataType, dataId, last404),
+		http.StatusNotFound)
 }
 
 func (h *Handler) GetData(dataType string, dataId string) (interface{}, *Http.HttpError) {
@@ -343,15 +459,40 @@ func (h *Handler) GetReferral(dataType string) (*RefRecord.ReferralData, *Http.H
 	if e != nil {
 		return nil, Http.NewHttpError(e.Error(), http.StatusBadRequest)
 	}
-	dsRecord, err := h.GetDsRecord(referral.DsId)
-	if err != nil {
-		return nil, err
+	if len(referral.DataServices) == 0 {
+		// 旧格式（仅 DataServiceId）尚未迁移：需运行一次 InventoryServiceAdmin sync 改写为数组
+		return nil, Http.NewHttpError(
+			fmt.Sprintf("referral for type=[%s] has no DataServices defined. run InventoryServiceAdmin sync to migrate", dataType),
+			http.StatusInternalServerError)
 	}
-	dsInfo, e := InvRecord.CreateDsInfo(dsRecord.Data)
-	if e != nil {
-		return nil, Http.NewHttpError(e.Error(), http.StatusBadRequest)
+	// 解析所有可解析的 DataService（不做可达性探测；探测留到查询扇出时逐分片进行）
+	var lastErr string
+	seen := map[string]bool{}
+	referral.DsInfos = []*InvRecord.DataServiceInfo{}
+	for _, dsId := range referral.DataServices {
+		if dsId == "" || seen[dsId] {
+			continue
+		}
+		seen[dsId] = true
+		dsRecord, err := h.GetDsRecord(dsId)
+		if err != nil {
+			h.Log(fmt.Sprintf("skip DS=[%s] for type=[%s]: %s", dsId, dataType, err.Error()))
+			lastErr = err.Error()
+			continue
+		}
+		dsInfo, e := InvRecord.CreateDsInfo(dsRecord.Data)
+		if e != nil {
+			h.Log(fmt.Sprintf("skip DS=[%s] for type=[%s]: invalid ds record, %s", dsId, dataType, e.Error()))
+			lastErr = e.Error()
+			continue
+		}
+		referral.DsInfos = append(referral.DsInfos, dsInfo)
 	}
-	referral.DsInfo = dsInfo
+	if len(referral.DsInfos) == 0 {
+		return nil, Http.NewHttpError(
+			fmt.Sprintf("no resolvable DataService for type=[%s], DataServices=%v, last error: %s", dataType, referral.DataServices, lastErr),
+			http.StatusInternalServerError)
+	}
 	return referral, nil
 }
 
@@ -402,6 +543,11 @@ func (h *Handler) PutData(data map[string]interface{}) (string, *Http.HttpError)
 			return "", e
 		}
 	}
+	if record.Type == Schema.Inventory {
+		if e := h.allocateDsId(record); e != nil {
+			return "", e
+		}
+	}
 	args := make(map[string]interface{})
 	args[DbIface.Table] = record.Type
 	args[Record.DataId] = record.Id
@@ -410,6 +556,57 @@ func (h *Handler) PutData(data map[string]interface{}) (string, *Http.HttpError)
 		return "", Http.NewHttpError(err.Error(), http.StatusInternalServerError)
 	}
 	return record.Id, nil
+}
+
+// allocateDsId 确保 inventory 记录的 id（short name）全局唯一。
+// 目标 id 空闲 → 直接用；被相同 instanceId 的记录占用 → 同 DS 重注册，原地更新；
+// 被其它（或 legacy 空 instanceId）记录占用 → 撞名，分配 {name}_{n} 并改写 record.Id 与 data.dsId。
+func (h *Handler) allocateDsId(record *Record.Record) *Http.HttpError {
+	dsInfo, e := InvRecord.CreateDsInfo(record.Data)
+	if e != nil {
+		return Http.NewHttpError(e.Error(), http.StatusBadRequest)
+	}
+	existing, err := h.GetData(Schema.Inventory, record.Id)
+	if err != nil {
+		if err.Status == http.StatusNotFound {
+			return nil // 名字空闲
+		}
+		return err
+	}
+	existingMap, ok := existing.(map[string]interface{})
+	if !ok {
+		return Http.NewHttpError(fmt.Sprintf("inventory record [%s] invalid data", record.Id), http.StatusInternalServerError)
+	}
+	existingInfo, e := InvRecord.CreateDsInfo(existingMap)
+	if e != nil {
+		return Http.NewHttpError(e.Error(), http.StatusInternalServerError)
+	}
+	// 同 DS 重注册，或现有记录为 legacy（无 instanceId）由首个带 instanceId 的注册原地接管
+	if dsInfo.InstanceId != "" && (existingInfo.InstanceId == "" || existingInfo.InstanceId == dsInfo.InstanceId) {
+		return nil
+	}
+	newId, allocErr := h.nextFreeDsId(record.Id)
+	if allocErr != nil {
+		return allocErr
+	}
+	record.Id = newId
+	record.Data["dsId"] = newId
+	h.Log(fmt.Sprintf("DataService short name [%s] taken, allocated [%s]", dsInfo.Id, newId))
+	return nil
+}
+
+// nextFreeDsId 返回 {name}_1、{name}_2… 中第一个空闲的 inventory id。
+func (h *Handler) nextFreeDsId(name string) (string, *Http.HttpError) {
+	for i := 1; ; i++ {
+		candidate := fmt.Sprintf("%s_%d", name, i)
+		_, err := h.GetData(Schema.Inventory, candidate)
+		if err != nil && err.Status == http.StatusNotFound {
+			return candidate, nil
+		}
+		if err != nil {
+			return "", err
+		}
+	}
 }
 
 func (h *Handler) DeleteData(dataType string, dataId string) *Http.HttpError {
