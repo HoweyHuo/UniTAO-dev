@@ -45,14 +45,14 @@ import (
 type DataServiceProxy struct {
 	handler *Handler
 	Url     string
-	DsInfo  map[string]*InvRecord.DataServiceInfo
+	DsInfo  map[string][]*InvRecord.DataServiceInfo
 }
 
 func CreateDsProxy(hdl *Handler) *DataServiceProxy {
 	inv := DataServiceProxy{
 		handler: hdl,
 		Url:     hdl.Config.Inv.Url,
-		DsInfo:  map[string]*InvRecord.DataServiceInfo{},
+		DsInfo:  map[string][]*InvRecord.DataServiceInfo{},
 	}
 	inv.refresh()
 	return &inv
@@ -98,7 +98,7 @@ func (i *DataServiceProxy) refresh() {
 	}
 }
 
-func (i *DataServiceProxy) GetDsInfo(dataType string) (*InvRecord.DataServiceInfo, *Http.HttpError) {
+func (i *DataServiceProxy) GetDsInfo(dataType string) ([]*InvRecord.DataServiceInfo, *Http.HttpError) {
 	if dataType == "" {
 		errMsg := "dataType is empty, failed to get Data Source"
 		i.Log(errMsg)
@@ -117,13 +117,13 @@ func (i *DataServiceProxy) GetDsInfo(dataType string) (*InvRecord.DataServiceInf
 	if _, ok := i.DsInfo[schemaId]; !ok {
 		i.refresh()
 	}
-	dsInfo, ok := i.DsInfo[schemaId]
+	dsInfoList, ok := i.DsInfo[schemaId]
 	if !ok {
 		errMsg := fmt.Sprintf("unknwon data type of [%s] for inventory", schemaId)
 		i.Log(errMsg)
 		return nil, Http.NewHttpError(errMsg, http.StatusBadRequest)
 	}
-	if dsInfo == nil {
+	if dsInfoList == nil {
 		refUrl, _ := Http.URLPathJoin(i.Url, RefRecord.Referral, schemaId)
 		dsReferralInfo, status, err := Http.GetRestData(*refUrl)
 		if err != nil {
@@ -153,31 +153,49 @@ func (i *DataServiceProxy) GetDsInfo(dataType string) (*InvRecord.DataServiceInf
 			i.Log(err.Error())
 			return nil, Http.WrapError(err, errMsg, http.StatusInternalServerError)
 		}
-		i.DsInfo[schemaId] = dsRef.DsInfo
-		dsInfo = dsRef.DsInfo
+		i.DsInfo[schemaId] = dsRef.DsInfos
+		dsInfoList = dsRef.DsInfos
 	}
-	i.Log(fmt.Sprintf("DataService[%s] for dataType[%s]", dsInfo.Id, schemaId))
-	return dsInfo, nil
+	if len(dsInfoList) == 0 {
+		errMsg := fmt.Sprintf("no DataService found for dataType=[%s]", schemaId)
+		i.Log(errMsg)
+		return nil, Http.NewHttpError(errMsg, http.StatusInternalServerError)
+	}
+	dsIds := make([]string, 0, len(dsInfoList))
+	for _, ds := range dsInfoList {
+		dsIds = append(dsIds, ds.Id)
+	}
+	i.Log(fmt.Sprintf("DataService[%v] for dataType[%s]", dsIds, schemaId))
+	return dsInfoList, nil
 }
 
+// getDsUrl 返回第一个可达的 DataService URL（用于写入与 getIdUrl；多分片读取请用 Get）。
 func (i *DataServiceProxy) getDsUrl(dataType string, dataId string) (string, *Http.HttpError) {
 	queryType := dataType
 	if dataType == CmtIndex.KeyCmtIdx || dataType == JsonKey.Schema {
 		queryType = dataId
 	}
-	dsInfo, ex := i.GetDsInfo(queryType)
+	dsInfoList, ex := i.GetDsInfo(queryType)
 	if ex != nil {
 		return "", ex
 	}
-	dsUrl, err := dsInfo.GetUrl()
-	if err != nil {
-		errMsg := "failed to get Data Service [working] Url"
-		i.Log(errMsg)
-		i.Log(err.Error())
-		return "", Http.WrapError(err, errMsg, http.StatusInternalServerError)
+	var lastErr string
+	for _, dsInfo := range dsInfoList {
+		dsUrl, err := dsInfo.GetUrl()
+		if err != nil {
+			lastErr = err.Error()
+			i.Log(fmt.Sprintf("DS=[%s] not reachable: %s", dsInfo.Id, err.Error()))
+			continue
+		}
+		i.Log(fmt.Sprintf("Data Service: %s[%s] for [%s/%s]", dsInfo.Id, dsUrl, dataType, dataId))
+		return dsUrl, nil
 	}
-	i.Log(fmt.Sprintf("Data Service: %s[%s] for [%s/%s]", dsInfo.Id, dsUrl, dataType, dataId))
-	return dsUrl, nil
+	errMsg := "failed to get a reachable Data Service Url"
+	i.Log(errMsg)
+	if lastErr != "" {
+		i.Log(lastErr)
+	}
+	return "", Http.NewHttpError(errMsg, http.StatusInternalServerError)
 }
 
 func (i *DataServiceProxy) getIdUrl(dataType string, dataId string) (string, *Http.HttpError) {
@@ -263,47 +281,77 @@ func (i *DataServiceProxy) Get(dataType string, dataId string) (*Record.Record, 
 		}
 		i.Log(fmt.Sprintf("%s/%s is local data", dataType, dataId))
 		data, err := i.handler.LocalData(dataType, dataId)
-		if err != nil {
-			i.Log(fmt.Sprintf("local GET failed. [%s/%s]", dataType, dataId))
-			i.Log(err.Error())
+		if err == nil {
+			record, ex := Record.LoadMap(data)
+			if ex != nil {
+				i.Log(fmt.Sprintf("local data load as record failed. [%s/%s]", dataType, dataId))
+				i.Log(ex.Error())
+				return nil, Http.WrapError(ex, "failed to load data as Record", http.StatusInternalServerError)
+			}
+			return record, nil
+		}
+		if err.Status != http.StatusNotFound {
 			return nil, err
 		}
-		record, ex := Record.LoadMap(data)
-		if ex != nil {
-			i.Log(fmt.Sprintf("local data load as record failed. [%s/%s]", dataType, dataId))
-			i.Log(ex.Error())
-			return nil, Http.WrapError(ex, "failed to load data as Record", http.StatusInternalServerError)
-		}
-		return record, nil
+		// 本分片无此记录（分片数据不相交），尝试其它分片
+		i.Log(fmt.Sprintf("local GET 404 for [%s/%s], trying all shards", dataType, dataId))
 	}
-	i.Log(fmt.Sprintf("%s/%s is not local data", dataType, dataId))
-	queryUrl, err := i.getIdUrl(dataType, dataId)
-	if err != nil {
-		i.Log(fmt.Sprintf("failed get url for [%s/%s]", dataType, dataId))
-		i.Log(err.Error())
-		return nil, err
+	i.Log(fmt.Sprintf("%s/%s is not local data, query all shards", dataType, dataId))
+	queryType := dataType
+	if dataType == CmtIndex.KeyCmtIdx || dataType == JsonKey.Schema {
+		queryType = dataId
 	}
-	i.Log(fmt.Sprintf("Request GET from [%s]", queryUrl))
-	data, code, ex := Http.GetRestData(queryUrl)
-	if ex == nil {
-		mapData, ok := data.(map[string]interface{})
-		if !ok {
-			errMsg := fmt.Sprintf("return data is not an object. [url]=[%s]", queryUrl)
-			i.Log(errMsg)
-			return nil, Http.NewHttpError(errMsg, http.StatusBadRequest)
-		}
-		record, ex := Record.LoadMap(mapData)
-		if ex != nil {
-			errMsg := fmt.Sprintf("failed to load data as record. url=[%s]", queryUrl)
-			i.Log(errMsg)
-			i.Log(ex.Error())
-			return nil, Http.WrapError(ex, errMsg, http.StatusInternalServerError)
-		}
-		return record, nil
+	dsInfoList, ex := i.GetDsInfo(queryType)
+	if ex != nil {
+		return nil, ex
 	}
-	i.Log(fmt.Sprintf("Get failed. code[%d], Error: %s", code, ex.Error()))
-	i.Log(ex.Error())
-	return nil, Http.NewHttpError(ex.Error(), code)
+	var lastReal string
+	for _, dsInfo := range dsInfoList {
+		dsUrl, err := dsInfo.GetUrl()
+		if err != nil {
+			i.Log(fmt.Sprintf("DS=[%s] not reachable: %s", dsInfo.Id, err.Error()))
+			lastReal = fmt.Sprintf("DS=[%s]: %s", dsInfo.Id, err.Error())
+			continue
+		}
+		idUrl, err := Http.URLPathJoin(dsUrl, dataType, dataId)
+		if err != nil {
+			i.Log(fmt.Sprintf("failed to build url for DS=[%s]: %s", dsInfo.Id, err.Error()))
+			lastReal = fmt.Sprintf("DS=[%s]: %s", dsInfo.Id, err.Error())
+			continue
+		}
+		i.Log(fmt.Sprintf("Request GET from [%s]", *idUrl))
+		data, code, ex := Http.GetRestData(*idUrl)
+		if ex == nil {
+			mapData, ok := data.(map[string]interface{})
+			if !ok {
+				errMsg := fmt.Sprintf("return data is not an object. [url]=[%s]", *idUrl)
+				i.Log(errMsg)
+				lastReal = fmt.Sprintf("DS=[%s]: %s", dsInfo.Id, errMsg)
+				continue
+			}
+			record, ex := Record.LoadMap(mapData)
+			if ex != nil {
+				errMsg := fmt.Sprintf("failed to load data as record. url=[%s]", *idUrl)
+				i.Log(errMsg)
+				i.Log(ex.Error())
+				lastReal = fmt.Sprintf("DS=[%s]: %s", dsInfo.Id, ex.Error())
+				continue
+			}
+			return record, nil
+		}
+		i.Log(fmt.Sprintf("Get failed on DS=[%s]. code[%d], Error: %s", dsInfo.Id, code, ex.Error()))
+		if code != http.StatusNotFound {
+			lastReal = fmt.Sprintf("DS=[%s] code=%d: %s", dsInfo.Id, code, ex.Error())
+		}
+	}
+	if lastReal != "" {
+		return nil, Http.NewHttpError(
+			fmt.Sprintf("failed to get [%s/%s] from any DataService. last error: %s", dataType, dataId, lastReal),
+			http.StatusInternalServerError)
+	}
+	return nil, Http.NewHttpError(
+		fmt.Sprintf("object of type [%s] with id [%s] not found on any DataService", dataType, dataId),
+		http.StatusNotFound)
 }
 
 func (i *DataServiceProxy) Post(record *Record.Record) *Http.HttpError {

@@ -4,8 +4,8 @@
         "mongodb": {
             "endpoint": "mongodb://mongodb:27017",
             "database": "DataService02",
-	        "user": "root",
-	        "password": "rootpassword"
+            "user": "root",
+            "password": "rootpassword"
         }
     },
     "table": {
@@ -13,10 +13,17 @@
     },
     "http": {
         "type": "http",
-        "dns": "localhost",
+        "dns": "unitao-data-service02",
         "port": "80",
         "id": "DataService02",
         "headers": {}
+    },
+    "ds": {
+        "id": "DataService02",
+        "urls": [
+            "http://unitao-data-service02",
+            "http://localhost:8002"
+        ]
     },
     "inventory": {
         "url": "http://unitao-inv-service"

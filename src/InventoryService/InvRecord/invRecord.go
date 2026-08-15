@@ -49,6 +49,9 @@ const (
 				"dsId": {
 					"type": "string"
 				},
+				"instanceId": {
+					"type": "string"
+				},
 				"url": {
 					"type": "array",
 					"items": {
@@ -65,6 +68,7 @@ const (
 
 type DataServiceInfo struct {
 	Id           string   `json:"dsId"`
+	InstanceId   string   `json:"instanceId"`
 	URL          []string `json:"url"`
 	LastSyncTime string   `json:"lastSynctime"`
 	goodUrl      string
