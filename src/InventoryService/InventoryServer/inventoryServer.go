@@ -35,11 +35,18 @@ import (
 	"InventoryService/Config"
 	"InventoryService/DataHandler"
 	"InventoryService/DataSync"
+	"InventoryService/RefRecord"
 
 	"github.com/salesforce/UniTAO/lib/Util"
 	"github.com/salesforce/UniTAO/lib/Util/CustomLogger"
 	"github.com/salesforce/UniTAO/lib/Util/Http"
+	"github.com/salesforce/UniTAO/lib/Util/Json"
 )
+
+type TypeEvent struct {
+	DsId     string
+	DataType string
+}
 
 type Server struct {
 	Port     string
@@ -48,6 +55,7 @@ type Server struct {
 	data     *DataHandler.Handler
 	log      *log.Logger
 	syncChan chan string      // DS 注册/更新事件
+	typeChan chan TypeEvent   // DS 新增 data type 事件（单类型，仅验证+合并，不扫描）
 	syncer   *DataSync.Syncer // referral + schema 同步器
 }
 
@@ -141,6 +149,7 @@ func (srv *Server) Run() {
 	interval := time.Duration(intervalSec) * time.Second
 	srv.syncChan = make(chan string, SyncChanCap)
 	srv.data.SyncChan = srv.syncChan
+	srv.typeChan = make(chan TypeEvent, SyncChanCap)
 	srv.syncer = DataSync.New(srv.data, srv.log)
 	go srv.syncLoop(interval)
 	http.HandleFunc("/", srv.handler)
@@ -156,6 +165,8 @@ func (srv *Server) handler(w http.ResponseWriter, r *http.Request) {
 		srv.handleUpdate(w, r)
 	case http.MethodDelete:
 		srv.handlerDelete(w, r)
+	case http.MethodPost:
+		srv.handleTypeEvent(w, r)
 	default:
 		err := Http.NewHttpError(fmt.Sprintf("method=[%s] not supported. only support method=[%s, %s]", r.Method, http.MethodPut, http.MethodDelete), http.StatusMethodNotAllowed)
 		Http.ResponseJson(w, err, err.Status, srv.config.Http)
@@ -239,6 +250,48 @@ func (srv *Server) handlerDelete(w http.ResponseWriter, r *http.Request) {
 	Http.ResponseText(w, []byte(result), http.StatusAccepted, srv.config.Http)
 }
 
+// handleTypeEvent 接收 DS 新增 data type 事件：POST /referral，body={"dsId","dataType"}。
+// 只校验路径与 body 并非阻塞入队 typeChan；referral 写入由 syncLoop 单 goroutine 执行。
+func (srv *Server) handleTypeEvent(w http.ResponseWriter, r *http.Request) {
+	urlPath, err := Http.GetUrl(r)
+	if err != nil {
+		Http.ResponseJson(w, err, err.Status, srv.config.Http)
+		return
+	}
+	dataType, dataPath := Util.ParsePath(urlPath)
+	if dataType != RefRecord.Referral || dataPath != "" {
+		err := Http.NewHttpError(fmt.Sprintf("invalid url for type event, expected=[%s]", RefRecord.Referral), http.StatusBadRequest)
+		Http.ResponseJson(w, err, err.Status, srv.config.Http)
+		return
+	}
+	reqBody, e := Http.LoadRequest(r)
+	if e != nil {
+		Http.ResponseJson(w, e, e.Status, srv.config.Http)
+		return
+	}
+	payload, ok := reqBody.(map[string]interface{})
+	if !ok {
+		Http.ResponseJson(w, "failed to parse request into JSON object", http.StatusBadRequest, srv.config.Http)
+		return
+	}
+	var ev TypeEvent
+	if ex := Json.CopyTo(payload, &ev); ex != nil {
+		Http.ResponseJson(w, ex.Error(), http.StatusBadRequest, srv.config.Http)
+		return
+	}
+	if ev.DsId == "" || ev.DataType == "" {
+		Http.ResponseJson(w, "missing dsId or dataType in type event", http.StatusBadRequest, srv.config.Http)
+		return
+	}
+	// 非阻塞发送；channel 满则丢弃（周期全量 Sync 兜底）
+	select {
+	case srv.typeChan <- ev:
+	default:
+		srv.log.Printf("type event channel full, drop event for DS=[%s] type=[%s]", ev.DsId, ev.DataType)
+	}
+	Http.ResponseText(w, []byte("accepted"), http.StatusAccepted, srv.config.Http)
+}
+
 // syncLoop 单 goroutine 串行执行同步，天然避免并发写 referral。
 // select 每次迭代重建 time.After → 事件处理后周期计时自然重置，不会立刻重复全量 sync。
 func (srv *Server) syncLoop(interval time.Duration) {
@@ -253,6 +306,10 @@ func (srv *Server) syncLoop(interval time.Duration) {
 				srv.runSync(fmt.Sprintf("new DS=%s", id), func() error { return srv.syncer.SyncDs(id) })
 			}
 			srv.runSync("post-event full sync", srv.syncer.Sync)
+		case ev := <-srv.typeChan:
+			srv.runSync(fmt.Sprintf("type event %s/%s", ev.DsId, ev.DataType), func() error {
+				return srv.syncer.SyncType(ev.DsId, ev.DataType)
+			})
 		case <-time.After(interval):
 			srv.log.Printf("periodic sync")
 			srv.runSync("periodic", srv.syncer.Sync)
