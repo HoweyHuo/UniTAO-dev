@@ -62,7 +62,10 @@ type Handler struct {
 	Lock       *HashLock.HashLock
 	Inventory  *DataServiceProxy
 	AddJournal JournalAdd
-	log        *log.Logger
+	// NewTypeNotify 在新增一个 data type（全新 schema，非版本升级）时被调用。
+	// 由 DataServer 接线：通常以 goroutine 向 Inventory 推送单类型事件，best-effort。
+	NewTypeNotify func(dataType string)
+	log           *log.Logger
 }
 
 func New(config Config.Confuguration, logger *log.Logger, connectDb func(db DbConfig.DatabaseConfig, logger *log.Logger) (DbIface.Database, error)) (*Handler, *Http.HttpError) {
@@ -476,7 +479,16 @@ func (h *Handler) Add(record *Record.Record) *Http.HttpError {
 			return Http.WrapError(ex, "failed to load request record as schema", http.StatusBadRequest)
 		}
 	}
-	return h.addData(record)
+	err = h.addData(record)
+	if err != nil {
+		return err
+	}
+	// 仅"新增全新 data type"时通知（版本升级走 archiveCurrentSchema，recordList>0，天然排除）。
+	if record.Type == JsonKey.Schema && len(recordList) == 0 && h.NewTypeNotify != nil {
+		h.Log(fmt.Sprintf("HandlerAdd: new data type [%s], notify inventory", record.Id))
+		h.NewTypeNotify(record.Id)
+	}
+	return nil
 }
 
 func CompareVersion(currentVersion string, newVersion string) (int, *Http.HttpError) {

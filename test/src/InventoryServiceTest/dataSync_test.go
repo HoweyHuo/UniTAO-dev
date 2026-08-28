@@ -30,6 +30,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"UniTao/Test/DataServiceTest"
@@ -38,23 +39,39 @@ import (
 	"InventoryService/DataSync"
 )
 
-// fakeDs 启动一个假 DataService /schema 端点，返回指定的类型数组。
+// fakeDs 启动一个假 DataService：
+// GET /schema → 类型数组；GET /schema/{type} → 类型存在（去掉归档后缀 "__" 后匹配）返回 200、否则 404。
 func fakeDs(types ...string) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/schema" {
+		if r.URL.Path == "/schema" {
+			w.Header().Set("Content-Type", "application/json")
+			resp := "["
+			for i, ty := range types {
+				if i > 0 {
+					resp += ","
+				}
+				resp += fmt.Sprintf("%q", ty)
+			}
+			resp += "]"
+			fmt.Fprint(w, resp)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/schema/") {
+			ty := strings.TrimPrefix(r.URL.Path, "/schema/")
+			if idx := strings.Index(ty, "__"); idx >= 0 {
+				ty = ty[:idx]
+			}
+			for _, known := range types {
+				if known == ty {
+					w.Header().Set("Content-Type", "application/json")
+					fmt.Fprintf(w, `{"__id":%q,"__type":"schema"}`, ty)
+					return
+				}
+			}
 			http.NotFound(w, r)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		resp := "["
-		for i, ty := range types {
-			if i > 0 {
-				resp += ","
-			}
-			resp += fmt.Sprintf("%q", ty)
-		}
-		resp += "]"
-		fmt.Fprint(w, resp)
+		http.NotFound(w, r)
 	}))
 }
 
@@ -231,5 +248,107 @@ func TestSyncAbortsOnUnreachableDs(t *testing.T) {
 	// 严格中止语义：现有 referral 保持不变
 	if got := referralServices(t, db, "Server"); len(got) != 1 || got[0] != "ds1" {
 		t.Fatalf("referral[Server] should remain [ds1], got %v", got)
+	}
+}
+
+func TestSyncTypeCreatesReferral(t *testing.T) {
+	ds := fakeDs("Server", "schema")
+	defer ds.Close()
+	db := &DataServiceTest.MockDatabase{Data: map[string]interface{}{}}
+	seedInventory(db, "ds1", ds.URL)
+	handler := &DataHandler.Handler{Db: db}
+	syncer := DataSync.New(handler, log.Default())
+
+	if err := syncer.SyncType("ds1", "Server"); err != nil {
+		t.Fatalf("SyncType failed: %s", err)
+	}
+	if got := referralServices(t, db, "Server"); len(got) != 1 || got[0] != "ds1" {
+		t.Fatalf("referral[Server] = %v, want [ds1]", got)
+	}
+}
+
+func TestSyncTypeSkipsWhenAlreadyRegistered(t *testing.T) {
+	ds := fakeDs("Server")
+	defer ds.Close()
+	db := &DataServiceTest.MockDatabase{Data: map[string]interface{}{}}
+	seedReferral(db, "Server", []string{"ds1"})
+	seedInventory(db, "ds1", ds.URL)
+	handler := &DataHandler.Handler{Db: db}
+	syncer := DataSync.New(handler, log.Default())
+
+	if err := syncer.SyncType("ds1", "Server"); err != nil {
+		t.Fatalf("SyncType failed: %s", err)
+	}
+	got := referralServices(t, db, "Server")
+	if len(got) != 1 || got[0] != "ds1" {
+		t.Fatalf("referral[Server] = %v, want [ds1] unchanged", got)
+	}
+}
+
+func TestSyncTypeAppendsSecondDs(t *testing.T) {
+	ds1 := fakeDs("Server")
+	defer ds1.Close()
+	ds2 := fakeDs("Server")
+	defer ds2.Close()
+	db := &DataServiceTest.MockDatabase{Data: map[string]interface{}{}}
+	seedReferral(db, "Server", []string{"ds1"})
+	seedInventory(db, "ds1", ds1.URL)
+	seedInventory(db, "ds2", ds2.URL)
+	handler := &DataHandler.Handler{Db: db}
+	syncer := DataSync.New(handler, log.Default())
+
+	if err := syncer.SyncType("ds2", "Server"); err != nil {
+		t.Fatalf("SyncType failed: %s", err)
+	}
+	got := referralServices(t, db, "Server")
+	if len(got) != 2 || got[0] != "ds1" || got[1] != "ds2" {
+		t.Fatalf("referral[Server] = %v, want [ds1 ds2]", got)
+	}
+}
+
+func TestSyncTypeSkipsUnknownType(t *testing.T) {
+	ds := fakeDs("Server")
+	defer ds.Close()
+	db := &DataServiceTest.MockDatabase{Data: map[string]interface{}{}}
+	seedInventory(db, "ds1", ds.URL)
+	handler := &DataHandler.Handler{Db: db}
+	syncer := DataSync.New(handler, log.Default())
+
+	if err := syncer.SyncType("ds1", "Rack"); err != nil {
+		t.Fatalf("SyncType failed: %s", err)
+	}
+	if _, err := handler.GetData("referral", "Rack"); err == nil {
+		t.Fatalf("referral[Rack] should not be created (type not on DS)")
+	}
+}
+
+func TestSyncTypeSkipsUnregisteredDs(t *testing.T) {
+	ds := fakeDs("Server")
+	defer ds.Close()
+	db := &DataServiceTest.MockDatabase{Data: map[string]interface{}{}}
+	handler := &DataHandler.Handler{Db: db}
+	syncer := DataSync.New(handler, log.Default())
+
+	if err := syncer.SyncType("nope", "Server"); err != nil {
+		t.Fatalf("SyncType failed: %s", err)
+	}
+	if _, err := handler.GetData("referral", "Server"); err == nil {
+		t.Fatalf("referral[Server] should not be created (DS not registered)")
+	}
+}
+
+func TestSyncTypeNormalizesArchivedId(t *testing.T) {
+	ds := fakeDs("Server")
+	defer ds.Close()
+	db := &DataServiceTest.MockDatabase{Data: map[string]interface{}{}}
+	seedInventory(db, "ds1", ds.URL)
+	handler := &DataHandler.Handler{Db: db}
+	syncer := DataSync.New(handler, log.Default())
+
+	if err := syncer.SyncType("ds1", "Server__1.0.0"); err != nil {
+		t.Fatalf("SyncType failed: %s", err)
+	}
+	if got := referralServices(t, db, "Server"); len(got) != 1 || got[0] != "ds1" {
+		t.Fatalf("referral[Server] = %v, want [ds1]", got)
 	}
 }

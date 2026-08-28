@@ -34,6 +34,7 @@ import (
 
 	"DataService/Config"
 	"InventoryService/InvRecord"
+	"InventoryService/RefRecord"
 
 	"github.com/google/uuid"
 	"github.com/salesforce/UniTAO/lib/Schema"
@@ -118,6 +119,34 @@ func (srv *Server) readAssignedId(resp *http.Response) string {
 		return ""
 	}
 	return strings.TrimSpace(string(body))
+}
+
+// notifyNewType 在新增一个 data type 时向 Inventory 推送单类型事件：
+// POST {invUrl}/referral，body={"dsId","dataType"}。
+// best-effort：失败仅记日志，由 Inventory 周期全量 Sync 兜底，绝不影响 schema 创建。
+func (srv *Server) notifyNewType(dataType string) {
+	if !srv.data.Inventory.InvLinked() {
+		srv.log.Printf("inventory not linked, skip new type notify for [%s]", dataType)
+		return
+	}
+	payload := map[string]interface{}{
+		"dsId":     srv.config.Ds.Id,
+		"dataType": dataType,
+	}
+	eventUrl, err := Http.URLPathJoin(srv.config.Inv.Url, RefRecord.Referral)
+	if err != nil {
+		srv.log.Printf("failed to build referral event url. Err:%s", err)
+		return
+	}
+	resp, status, err := Http.SubmitPayload(*eventUrl, http.MethodPost, nil, payload)
+	if resp != nil && resp.Body != nil {
+		defer resp.Body.Close()
+	}
+	if err != nil {
+		srv.log.Printf("notify new type [%s] to inventory failed. Code:%d, Err:%s", dataType, status, err)
+		return
+	}
+	srv.log.Printf("notified inventory of new type [%s] as ds.id=[%s], status=%d", dataType, srv.config.Ds.Id, status)
 }
 
 // checkRegistration 查询 Inventory 中本 DS 的 inventory 记录。

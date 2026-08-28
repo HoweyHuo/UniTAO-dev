@@ -123,6 +123,44 @@ func (s *Syncer) SyncDs(dsId string) error {
 	return nil
 }
 
+// SyncType 处理单类型事件：确认 DS 已注册、类型在该 DS 上确实存在后，
+// 把 dsId 并入该类型的 referral。类型不存在/DS 未注册时跳过（交由周期全量对账兜底）。
+// 只处理单个类型，不触发全量扫描。
+func (s *Syncer) SyncType(dsId string, dataType string) error {
+	dataType, _ = Util.ParseCustomPath(dataType, JsonKey.ArchivedSchemaIdDiv)
+	if _, ok := Common.InternalTypes[dataType]; ok {
+		s.log.Printf("[sync-type] type[%s] is internal type, skip", dataType)
+		return nil
+	}
+	s.log.Printf("[sync-type] event DS=[%s] type=[%s]", dsId, dataType)
+	ds, err := s.handler.GetDsInfo(dsId)
+	if err != nil {
+		if err.Status == http.StatusNotFound {
+			s.log.Printf("[sync-type] DS=[%s] not registered, skip (periodic sync will reconcile)", dsId)
+			return nil
+		}
+		return fmt.Errorf("failed to get info of DataService[%s], Error: %s", dsId, err)
+	}
+	dsUrl, e := ds.GetUrl()
+	if e != nil {
+		return fmt.Errorf("failed to get URL for ds[%s], Error: %s", dsId, e)
+	}
+	schemaUrl, e := Http.URLPathJoin(dsUrl, JsonKey.Schema, dataType)
+	if e != nil {
+		return fmt.Errorf("failed to build schema url for ds[%s] type[%s], Error: %s", dsId, dataType, e)
+	}
+	_, code, e := Http.GetRestData(*schemaUrl)
+	if e != nil {
+		if code == http.StatusNotFound {
+			s.log.Printf("[sync-type] type[%s] not found on DS=[%s], skip (periodic sync will reconcile)", dataType, dsId)
+			return nil
+		}
+		return fmt.Errorf("failed to verify schema[%s] on DS=[%s], Code:%d, Error: %s", dataType, dsId, code, e)
+	}
+	s.log.Printf("[sync-type] verified type[%s] on DS=[%s], merge referral", dataType, dsId)
+	return s.mergeType(dsId, dataType)
+}
+
 // mergeType 读现有 referral（不存在则新建），把 dsId 并入 DataServices 后写回。
 // 仅追加、不删除其它 DS，天然幂等。
 func (s *Syncer) mergeType(dsId string, dataType string) error {
