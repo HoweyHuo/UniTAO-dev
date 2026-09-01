@@ -34,18 +34,29 @@ import (
 
 	"InventoryService/Config"
 	"InventoryService/DataHandler"
+	"InventoryService/DataSync"
+	"InventoryService/RefRecord"
 
 	"github.com/salesforce/UniTAO/lib/Util"
 	"github.com/salesforce/UniTAO/lib/Util/CustomLogger"
 	"github.com/salesforce/UniTAO/lib/Util/Http"
+	"github.com/salesforce/UniTAO/lib/Util/Json"
 )
 
+type TypeEvent struct {
+	DsId     string
+	DataType string
+}
+
 type Server struct {
-	Port   string
-	args   ServerArgs
-	config Config.ServerConfig
-	data   *DataHandler.Handler
-	log    *log.Logger
+	Port     string
+	args     ServerArgs
+	config   Config.ServerConfig
+	data     *DataHandler.Handler
+	log      *log.Logger
+	syncChan chan string      // DS 注册/更新事件
+	typeChan chan TypeEvent   // DS 新增 data type 事件（单类型，仅验证+合并，不扫描）
+	syncer   *DataSync.Syncer // referral + schema 同步器
 }
 
 type ServerArgs struct {
@@ -55,9 +66,11 @@ type ServerArgs struct {
 }
 
 const (
-	CONFIG       = "config"
-	PORT         = "port"
-	PORT_DEFAULT = "8003"
+	CONFIG                 = "config"
+	PORT                   = "port"
+	PORT_DEFAULT           = "8003"
+	DefaultSyncIntervalSec = 300 // 后台全量对账默认间隔（秒）
+	SyncChanCap            = 16  // DS 注册事件缓冲大小
 )
 
 func argHandler() ServerArgs {
@@ -128,6 +141,17 @@ func (srv *Server) Run() {
 	if err != nil {
 		srv.log.Fatalf("failed to connect to database, Err:%s", err)
 	}
+	// 后台 schema sync：先于 HTTP 启动，注册事件驱动优先同步新 DS
+	intervalSec := srv.config.Sync.IntervalSec
+	if intervalSec <= 0 {
+		intervalSec = DefaultSyncIntervalSec
+	}
+	interval := time.Duration(intervalSec) * time.Second
+	srv.syncChan = make(chan string, SyncChanCap)
+	srv.data.SyncChan = srv.syncChan
+	srv.typeChan = make(chan TypeEvent, SyncChanCap)
+	srv.syncer = DataSync.New(srv.data, srv.log)
+	go srv.syncLoop(interval)
 	http.HandleFunc("/", srv.handler)
 	srv.log.Printf("Data Server Listen @%s://%s:%s", srv.config.Http.HttpType, srv.config.Http.DnsName, srv.Port)
 	srv.log.Fatal(http.ListenAndServe(fmt.Sprintf(":%s", srv.Port), nil))
@@ -141,6 +165,8 @@ func (srv *Server) handler(w http.ResponseWriter, r *http.Request) {
 		srv.handleUpdate(w, r)
 	case http.MethodDelete:
 		srv.handlerDelete(w, r)
+	case http.MethodPost:
+		srv.handleTypeEvent(w, r)
 	default:
 		err := Http.NewHttpError(fmt.Sprintf("method=[%s] not supported. only support method=[%s, %s]", r.Method, http.MethodPut, http.MethodDelete), http.StatusMethodNotAllowed)
 		Http.ResponseJson(w, err, err.Status, srv.config.Http)
@@ -222,4 +248,103 @@ func (srv *Server) handlerDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	result := fmt.Sprintf("[%s/%s] deleted", dataType, id)
 	Http.ResponseText(w, []byte(result), http.StatusAccepted, srv.config.Http)
+}
+
+// handleTypeEvent 接收 DS 新增 data type 事件：POST /referral，body={"dsId","dataType"}。
+// 只校验路径与 body 并非阻塞入队 typeChan；referral 写入由 syncLoop 单 goroutine 执行。
+func (srv *Server) handleTypeEvent(w http.ResponseWriter, r *http.Request) {
+	urlPath, err := Http.GetUrl(r)
+	if err != nil {
+		Http.ResponseJson(w, err, err.Status, srv.config.Http)
+		return
+	}
+	dataType, dataPath := Util.ParsePath(urlPath)
+	if dataType != RefRecord.Referral || dataPath != "" {
+		err := Http.NewHttpError(fmt.Sprintf("invalid url for type event, expected=[%s]", RefRecord.Referral), http.StatusBadRequest)
+		Http.ResponseJson(w, err, err.Status, srv.config.Http)
+		return
+	}
+	reqBody, e := Http.LoadRequest(r)
+	if e != nil {
+		Http.ResponseJson(w, e, e.Status, srv.config.Http)
+		return
+	}
+	payload, ok := reqBody.(map[string]interface{})
+	if !ok {
+		Http.ResponseJson(w, "failed to parse request into JSON object", http.StatusBadRequest, srv.config.Http)
+		return
+	}
+	var ev TypeEvent
+	if ex := Json.CopyTo(payload, &ev); ex != nil {
+		Http.ResponseJson(w, ex.Error(), http.StatusBadRequest, srv.config.Http)
+		return
+	}
+	if ev.DsId == "" || ev.DataType == "" {
+		Http.ResponseJson(w, "missing dsId or dataType in type event", http.StatusBadRequest, srv.config.Http)
+		return
+	}
+	// 非阻塞发送；channel 满则丢弃（周期全量 Sync 兜底）
+	select {
+	case srv.typeChan <- ev:
+	default:
+		srv.log.Printf("type event channel full, drop event for DS=[%s] type=[%s]", ev.DsId, ev.DataType)
+	}
+	Http.ResponseText(w, []byte("accepted"), http.StatusAccepted, srv.config.Http)
+}
+
+// syncLoop 单 goroutine 串行执行同步，天然避免并发写 referral。
+// select 每次迭代重建 time.After → 事件处理后周期计时自然重置，不会立刻重复全量 sync。
+func (srv *Server) syncLoop(interval time.Duration) {
+	srv.log.Printf("start background schema sync loop, interval=%s", interval)
+	srv.runSync("startup", srv.syncer.Sync)
+	for {
+		select {
+		case dsId := <-srv.syncChan:
+			ids := srv.collectSyncEvents(dsId) // 合并突发事件、去重
+			srv.log.Printf("wake sync early for DS=%v", ids)
+			for _, id := range ids { // 新 DS 优先：先定向同步，再全量对账
+				srv.runSync(fmt.Sprintf("new DS=%s", id), func() error { return srv.syncer.SyncDs(id) })
+			}
+			srv.runSync("post-event full sync", srv.syncer.Sync)
+		case ev := <-srv.typeChan:
+			srv.runSync(fmt.Sprintf("type event %s/%s", ev.DsId, ev.DataType), func() error {
+				return srv.syncer.SyncType(ev.DsId, ev.DataType)
+			})
+		case <-time.After(interval):
+			srv.log.Printf("periodic sync")
+			srv.runSync("periodic", srv.syncer.Sync)
+		}
+	}
+}
+
+// collectSyncEvents 排空同步通道中已缓冲的事件并去重，返回待优先同步的 DS 列表。
+func (srv *Server) collectSyncEvents(first string) []string {
+	seen := map[string]bool{}
+	ids := []string{}
+	add := func(id string) {
+		if id == "" || seen[id] {
+			return
+		}
+		seen[id] = true
+		ids = append(ids, id)
+	}
+	add(first)
+drain:
+	for {
+		select {
+		case id := <-srv.syncChan:
+			add(id)
+		default:
+			break drain
+		}
+	}
+	return ids
+}
+
+// runSync 执行同步并记录结果；错误仅记日志，循环不中断。
+func (srv *Server) runSync(what string, fn func() error) {
+	srv.log.Printf("start %s sync", what)
+	if err := fn(); err != nil {
+		srv.log.Printf("%s sync failed, Error: %s", what, err)
+	}
 }

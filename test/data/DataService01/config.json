@@ -16,6 +16,12 @@
         "id": "DataService01",
         "headers": {}
     },
+    "ds": {
+        "id": "DataService01",
+        "urls": [
+            "http://localhost:8001"
+        ]
+    },
     "inventory": {
         "url": "http://localhost:8004"
     }

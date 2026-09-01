@@ -26,7 +26,6 @@ This copyright notice and license applies to all files in this directory or sub-
 package main
 
 import (
-	"DataService/Common"
 	"flag"
 	"fmt"
 	"log"
@@ -35,15 +34,12 @@ import (
 
 	"InventoryService/Config"
 	"InventoryService/DataHandler"
+	"InventoryService/DataSync"
 	"InventoryService/InvRecord"
-	"InventoryService/RefRecord"
 
 	"github.com/salesforce/UniTAO/lib/Schema"
-	"github.com/salesforce/UniTAO/lib/Schema/JsonKey"
 	"github.com/salesforce/UniTAO/lib/Schema/Record"
-	"github.com/salesforce/UniTAO/lib/Util"
 	"github.com/salesforce/UniTAO/lib/Util/CustomLogger"
-	"github.com/salesforce/UniTAO/lib/Util/Http"
 	"github.com/salesforce/UniTAO/lib/Util/Json"
 )
 
@@ -189,137 +185,13 @@ func (a *Admin) addDsRecord() error {
 	return nil
 }
 
+// syncDsSchema 委托 DataSync 执行：指定 -id 时只定向同步该 DS，否则全量对账。
 func (a *Admin) syncDsSchema() error {
-	idList, err := a.handler.List(Schema.Inventory)
-	if err != nil {
-		return fmt.Errorf("failed to list all inventorys. Error: %s", err)
+	syncer := DataSync.New(a.handler, a.log)
+	if a.args.ops.id != "" {
+		return syncer.SyncDs(a.args.ops.id)
 	}
-
-	a.log.Printf("[%d] Data Services to sync", len(idList))
-	refTypes, ex := a.getReferralTypes()
-	if ex != nil {
-		a.log.Printf("failed to collect existing referral type from Inventory Service. Error: %s", ex)
-		return ex
-	}
-	dsTypes, ex := a.getDsTypes(idList)
-	if ex != nil {
-		a.log.Printf("failed to collect data type from Data Services. Error: %s", ex)
-		return ex
-	}
-	return a.SyncDataTypes(refTypes, dsTypes)
-}
-
-func (a *Admin) getReferralTypes() (map[string]string, error) {
-	typeList, err := a.handler.List(RefRecord.Referral)
-	if err != nil {
-		a.log.Printf("failed to get list of [%s], Error: %s", RefRecord.Referral, err)
-		return nil, err
-	}
-	refTypes := map[string]string{}
-	for _, dataType := range typeList {
-		referral, err := a.handler.GetReferral(dataType.(string))
-		if err != nil {
-			a.log.Printf("failed to get %s: [%s], Error: %s", RefRecord.Referral, dataType, err)
-			a.removeType(dataType.(string))
-			continue
-		}
-		a.log.Printf("record current Referral[%s] from DS[%s]", dataType, referral.DsId)
-		refTypes[dataType.(string)] = referral.DsId
-	}
-	return refTypes, nil
-}
-
-func (a *Admin) getDsTypes(idList []interface{}) (map[string]string, error) {
-	dsTypes := map[string]string{}
-	for _, dsId := range idList {
-		ds, err := a.handler.GetDsInfo(dsId.(string))
-		if err != nil {
-			a.log.Printf("failed to get info of DataService[%s], Error: %s", dsId, err)
-			return nil, err
-		}
-		dsUrl, e := ds.GetUrl()
-		if e != nil {
-			a.log.Printf("failed to get URL for ds[%s], Error: %s", dsId, err)
-			return nil, e
-		}
-		schemaUrl, e := Http.URLPathJoin(dsUrl, JsonKey.Schema)
-		if e != nil {
-			return nil, fmt.Errorf("failed to parse url from DS record [%s]=[%s], Err:%s", Record.DataId, a.args.ops.id, err)
-		}
-		a.log.Printf("DataService[%s], schema URL=[%s]", dsId, *schemaUrl)
-		result, code, e := Http.GetRestData(*schemaUrl)
-		if e != nil {
-			return nil, fmt.Errorf("failed to Rest Data from [path]=[%s], Code:%d", *schemaUrl, code)
-		}
-		for _, dataTypeStr := range result.([]interface{}) {
-			dataType, _ := Util.ParseCustomPath(dataTypeStr.(string), JsonKey.ArchivedSchemaIdDiv)
-			if _, ok := Common.InternalTypes[dataType]; ok {
-				a.log.Printf("type[%s] @DS[%s] is internal type, skip", dataType, dsId)
-				continue
-			}
-			if _, ok := dsTypes[dataType]; ok {
-				a.log.Printf("type[%s] @DS[%s] already exists", dataType, dsId)
-				continue
-			}
-			a.log.Printf("record type[%s] from DS[%s]", dataType, dsId)
-			dsTypes[dataType] = dsId.(string)
-		}
-	}
-	return dsTypes, nil
-}
-
-func (a *Admin) SyncDataTypes(refTypes map[string]string, dsTypes map[string]string) error {
-	for dataType := range refTypes {
-		if _, ok := dsTypes[dataType]; !ok {
-			a.removeType(dataType)
-		}
-	}
-	for dataType, dsId := range dsTypes {
-		if _, ok := refTypes[dataType]; !ok {
-			a.log.Printf("data type [%s] from DS[%s] does not exists. add", dataType, dsId)
-			err := a.addType(dsId, dataType)
-			if err != nil {
-				a.log.Printf("add data type [%s] from DS [%s] failed. Error: %s", dataType, dsId, err)
-				return err
-			}
-			continue
-		}
-		if refTypes[dataType] != dsId {
-			a.log.Printf("data type [%s] moved from DS[%s] -> DS[%s], replace", dataType, refTypes[dataType], dsId)
-			err := a.removeType(dataType)
-			if err != nil {
-				a.log.Printf("remove data type [%s] from DS [%s] failed. Error: %s", dataType, dsId, err)
-				return err
-			}
-			err = a.addType(dsId, dataType)
-			if err != nil {
-				a.log.Printf("add data type [%s] from DS [%s] failed. Error: %s", dataType, dsId, err)
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-func (a *Admin) addType(dsId string, dataType string) error {
-	a.log.Printf("get DsInfo [%s]", dsId)
-	referral := RefRecord.ReferralData{
-		DataType: dataType,
-		DsId:     dsId,
-	}
-	a.log.Printf("add referral for type[%s] to DS[%s]", dataType, dsId)
-	referralData, _ := Json.CopyToMap(referral.GetRecord())
-	e := a.handler.Db.Create(RefRecord.Referral, referralData)
-	if e != nil {
-		return e
-	}
-	a.log.Printf("referral type[%s] to DS[%s] added", dataType, dsId)
-	return nil
-}
-
-func (a *Admin) removeType(dataType string) error {
-	a.removeData(RefRecord.Referral, dataType)
-	return nil
+	return syncer.Sync()
 }
 
 func (a *Admin) removeDsRecord() error {

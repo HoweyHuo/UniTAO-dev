@@ -13,8 +13,14 @@
         "type": "http",
         "dns": "localhost",
         "port": "8002",
-        "id": "DataService01",
+        "id": "DataService02",
         "headers": {}
+    },
+    "ds": {
+        "id": "DataService02",
+        "urls": [
+            "http://localhost:8002"
+        ]
     },
     "inventory": {
         "url": "http://localhost:8004"

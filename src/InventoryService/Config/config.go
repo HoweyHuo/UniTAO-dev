@@ -36,9 +36,16 @@ import (
 	"github.com/salesforce/UniTAO/lib/Util/Http"
 )
 
+// SyncConfig 后台 schema sync 循环配置。
+// IntervalSec 为全量对账间隔（秒），<=0 时使用默认值。
+type SyncConfig struct {
+	IntervalSec int `json:"intervalSec"`
+}
+
 type ServerConfig struct {
 	Database DbConfig.DatabaseConfig `json:"database"`
 	Http     Http.Config             `json:"http"`
+	Sync     SyncConfig              `json:"sync"`
 }
 
 func Read(configPath string, config *ServerConfig) error {
