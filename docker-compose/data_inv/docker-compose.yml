@@ -1,6 +1,6 @@
 services:
   unitao-data-service01:
-    image: ghcr.io/howeyhuo/unitao-dev:latest
+    image: ghcr.io/howeyhuo/unitao-dev:1.0.3
     container_name: unitao-data-service01
     restart: always
     stdin_open: true
@@ -15,7 +15,7 @@ services:
       - mongo_net
 
   unitao-inv-service:
-    image: ghcr.io/howeyhuo/unitao-dev:latest
+    image: ghcr.io/howeyhuo/unitao-dev:1.0.3
     container_name: unitao-inv-service
     restart: always
     stdin_open: true
