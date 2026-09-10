@@ -73,7 +73,7 @@ UniTAO 由两类服务组成：
    - **只认 `inventory/` 前缀**。标准 JSON Schema 的取值（`json`、`application/json`、`text/plain`）和裸类型名（`actor`）都会在 schema 预处理阶段被拒——`[contentMediaType]=[json] not supported`，schema 根本注册不上去。值按第一个 `/` 切分，所以 `application/json` 报的是 `[application]`。
    - **只能挂在 `type: "string"` 的字段上**（`SchemaDoc.IsCmtRef`）；数组引用写成 `items` 下的字符串。
    - **写入时校验**：保存前会经 Inventory Service 查目标记录，不存在则 400 `reference inventory:{type} with value=[{id}] does not exists`。所以**被引用的记录必须先存在**；两个记录互相引用时，若两侧字段都是必填就会死锁（字段**默认必填**，不写 `required` 就是必填），需把至少一侧设为 `"required": false` 再分步补写。
-   - **依赖 referral 表**：类型要先被 Inventory Service 的 sync 登记才能被引用。sync 在启动时、新 DS 注册事件、以及周期（`sync.intervalSec`，默认 300 秒）触发，所以刚注册的 schema 不能立即被引用；手动触发用 `InventoryServiceAdmin sync`。
+   - **依赖 referral 表**：类型要先被 Inventory Service 的 sync 登记才能被引用。sync 在启动时、新 DS 注册事件、以及周期（`sync.intervalSec`，默认 300 秒）触发，所以刚注册的 schema 不能立即被引用；手动触发用 `InventoryServiceAdmin sync`。referral 记录存在 Inventory Service 自己的库里（`dataSync.go` 的 `Db.Replace`），**重启不会丢失**，所以这个等待只在首次引入某类型时出现，重启任一服务都不会重新引入。
 
    完整用法与 demo 实例见 `README.md` 的 contentMediaType 一节。
 

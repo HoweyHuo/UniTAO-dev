@@ -209,6 +209,8 @@ the sync runs at Inventory Service startup, when a new Data Service registers it
 go run ./tool/InventoryServiceAdmin sync -config <config.json> [-id <ds-id>]
 ```
 
+the referral entries live in the Inventory Service's own database, so they survive restarts: once a type has been synced it stays referenceable, and restarting either service does **not** re-introduce the wait. the gap above only shows up the first time a type is introduced.
+
 **2, the reference is validated on write**
 
 because the target type is declared, DataService validates the value before saving. a reference to an entity that does not exist yet is rejected:
