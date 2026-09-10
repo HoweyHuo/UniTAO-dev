@@ -126,6 +126,8 @@ docker compose -f docker-compose/2data1inv/docker-compose.yml up -d
 # Build image via CI (GitHub Actions pushes to ghcr.io)
 ```
 
+The tag rules for what CI publishes to `ghcr.io/howeyhuo/unitao-dev` (when `latest` / `<version>` / `sha-<short>` each advance, and why an un-bumped version tag is not a rollback target), plus the digest behind each tag, are documented in `docker/README.md`.
+
 ## Project Architecture
 
 UniTAO is a schema-driven, multi-node heterogeneous infrastructure inventory system. Data is JSON-schema defined; services provide CRUD + cross-reference queries with zero coding for new data types.

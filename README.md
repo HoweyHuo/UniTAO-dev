@@ -49,6 +49,8 @@ to build all images, run one of the following command based on your target envir
 ./docker/buildAll.sh
 ```
 
+these are local builds. the images published by CI to **ghcr.io** — their tags (`latest`, `<version>`, `sha-<short>`), how the tags move, and the digests behind them — are documented in [`docker/README.md`](./docker/README.md).
+
 #### **Environment**
 after all docker images build successfully. we can bring a set of docker instances up as demo environment.
  - Data Service 01
