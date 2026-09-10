@@ -188,6 +188,20 @@ javascript/Schema/             # Schema 库的 JavaScript 移植版
 docker compose -f docker-compose/2data1inv/docker-compose.yml up -d
 ```
 
+**注意：Data Service 会回写自己的配置文件。** 启动时 `Config.Write`（`src/DataService/Config/config.go`）会把整个配置结构体序列化回 `config.json`，所以 `docker-compose/**/DataService01/config.json` 在首次启动后就会变脏。写回的是运行时状态，不是配置：
+
+- `initialized: true` — 数据库已初始化。**这个字段不应该被提交**：`InitDatabase` 在它为真时直接返回（`src/DataService/DataInit/init.go`），一旦提交，别人全新克隆后会跳过建表和导入元 schema。
+- `ds.instanceId` — 自动生成的实例 UUID，用于区分「同 DS 重注册」与「不同 DS 撞名」。
+- 多出的空 `dynamodb` / `sysdirfile` 段、字段重排、末尾换行消失，也都是同一次回写造成的：`MarshalIndent` 会输出结构体的全部字段（含零值），顺序按结构体定义。
+
+这些文件是 bind-mount 进容器的（compose 把 `./DataService01` 挂到 `/opt/UniTAO/config`），所以回写直接落在工作区。用 skip-worktree 让 git 忽略这类本地改写：
+
+```bash
+git update-index --skip-worktree docker-compose/data_inv/DataService01/config.json
+```
+
+该标记只存在于本地 index，**新克隆需要重新执行一次**；撤销用 `--no-skip-worktree`。若上游确实修改了这个文件，先撤销标记再拉取，改动落地后重新加上。InventoryService 不写回自己的配置，只有 Data Service 需要这样处理。
+
 ### Go 构建（所有目标）
 ```bash
 # 构建 Data Service 二进制

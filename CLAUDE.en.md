@@ -28,6 +28,34 @@ This means:
 
 ## Build & Run Commands
 
+### Prerequisites
+
+The following are needed before you start:
+
+- **Go 1.18+** (some modules need 1.24) — to build all Go binaries
+- **Docker** — to run the demo environment (docker-compose) or build images
+- **DynamoDB Local** (optional) — the default database for running a Data Service locally; MongoDB or file mode (`SysDirFile`, good for testing) also work
+- **Node.js** (optional) — to run `ui/WebServer/` or `schemaVisualizer/`
+
+Quick start for the demo environment (brings up DynamoDB Local + two Data Services + one Inventory Service):
+```bash
+docker compose -f docker-compose/2data1inv/docker-compose.yml up -d
+```
+
+**Note: a Data Service rewrites its own config file.** At startup, `Config.Write` (`src/DataService/Config/config.go`) serializes the whole configuration struct back to `config.json`, so `docker-compose/**/DataService01/config.json` goes dirty after the first start. What it writes is runtime state, not configuration:
+
+- `initialized: true` — the database has been initialized. **This field must not be committed**: `InitDatabase` returns immediately when it is true (`src/DataService/DataInit/init.go`), so once committed, a fresh clone would skip table creation and base meta-schema import.
+- `ds.instanceId` — the auto-generated instance UUID, used to tell "same DS re-registering" apart from "a different DS colliding on the name".
+- The extra empty `dynamodb` / `sysdirfile` blocks, the reordered fields, and the lost trailing newline all come from the same write-back: `MarshalIndent` emits every field of the struct (zero values included), in struct-definition order.
+
+These files are bind-mounted into the container (compose mounts `./DataService01` at `/opt/UniTAO/config`), so the write-back lands directly in the working tree. Use skip-worktree to make git ignore that local modification:
+
+```bash
+git update-index --skip-worktree docker-compose/data_inv/DataService01/config.json
+```
+
+The flag lives in the local index only, so **a fresh clone must run it again**; undo it with `--no-skip-worktree`. If upstream genuinely changes this file, drop the flag before pulling, then re-add it once the change has landed. The InventoryService does not rewrite its config — only Data Services need this.
+
 ### Go (all targets)
 ```bash
 # Build Data Service binary
@@ -102,6 +130,18 @@ docker compose -f docker-compose/2data1inv/docker-compose.yml up -d
 
 UniTAO is a schema-driven, multi-node heterogeneous infrastructure inventory system. Data is JSON-schema defined; services provide CRUD + cross-reference queries with zero coding for new data types.
 
+### Data Service and Inventory Service
+
+UniTAO is made of two kinds of service:
+
+- **Data Service** — the data node. It owns CRUD for concrete data, schema validation, change journaling, and per-record locks. Each Data Service instance connects to one database (DynamoDB, MongoDB, or local files) and manages its own domain of data. It is where data is *stored*.
+- **Inventory Service** — the aggregation/query node. It registers multiple Data Services, syncs their schemas, and provides cross-Data-Service reference queries. Upper-layer applications only ever talk to the Inventory Service and do not need to know how many Data Services the data is spread over. It is where data is *queried*.
+
+This split brings a few key advantages:
+- **Data Services scale horizontally** — each DS owns its own data domain, independently of the others
+- **The Inventory Service gives a unified view**, hiding the storage details underneath
+- **Cross-DS references** are expressed with the `contentMediaType: "inventory/{type}"` extension, which the Inventory Service resolves and routes
+
 ### Go workspace (go.work)
 
 ```
@@ -167,6 +207,23 @@ javascript/Schema/             # JavaScript port of schema library (jsonSchema.j
    - `__ver` — schema version
    - `data` — the payload (validated against the type's schema)
 
+   Example:
+
+   ```json
+   {
+     "__type": "Server",
+     "__id": "srv-001",
+     "__ver": "0.0.1",
+     "data": {
+       "hostname": "web-01.example.com",
+       "ip": "10.0.1.10",
+       "rack": "rack-a1"
+     }
+   }
+   ```
+
+   `__ver` is a `xxx.xxx.xxx` version string (at least three numeric parts), not an integer. A cross-type reference stores the target record's `__id` string directly — there is no extra reference wrapper structure.
+
 3. **JSON Schema extensions**: Two custom extensions on JSON Schema.
 
    **`contentMediaType: "inventory/{type}"`** — marks a field as referencing data of another type managed by Inventory Service. Key points:
@@ -185,6 +242,32 @@ javascript/Schema/             # JavaScript port of schema library (jsonSchema.j
 5. **Data Service + Inventory Service**: Data Services handle local CRUD. The Inventory Service aggregates schema registrations from multiple Data Services and enables cross-service data references via the `DataServiceProxy`.
 
 6. **Journaling**: Data changes are journaled for audit trail and cross-service synchronization.
+
+### REST API Overview
+
+Both the Data Service and the Inventory Service expose an HTTP JSON API.
+
+Both services route as `/{type}[/{id}]` — there is **no `/data` or `/inv` prefix**, and no `/ds/...` admin endpoints.
+
+| Service | Method | Endpoint | Description |
+|---------|--------|----------|-------------|
+| Data Service | `POST` | `/` | Create a Record; the type comes from `__type` in the body |
+| Data Service | `GET` | `/{type}` | List all `__id` of that type |
+| Data Service | `GET` | `/{type}/{id}[/{attrPath}]` | Query a Record, optionally deep into an attribute path |
+| Data Service | `PUT` | `/{type}/{id}` | Replace a Record |
+| Data Service | `PATCH` | `/{type}/{id}[/{attrPath}]` | Partially update a Record |
+| Data Service | `DELETE` | `/{type}/{id}` | Delete a Record |
+| Data Service | `GET` | `/schema[/{type}]` | List / query registered Schemas |
+| Inventory Service | `GET` | `/{type}[/{id}]` | Cross-DS Record query; routes automatically and expands references |
+| Inventory Service | `GET` | `/schema` | List all synced types |
+| Inventory Service | `GET` | `/referral[/{type}]` | Query the type-to-Data-Service mapping |
+| Inventory Service | `PUT` | `/` | Register / update a Data Service (body is an `inventory` Record) |
+| Inventory Service | `POST` | `/referral` | A Data Service reports a type change event, triggering sync |
+| Inventory Service | `DELETE` | `/{type}/{id}` | Delete a local Inventory record (e.g. `inventory/{ds-id}`) |
+
+The Data Service path query engine also supports `?schema` (show the schema at the current path), `?flat` (show only the current layer), and `?iterator` (list the options at each leaf), plus `[*]` to wildcard an array/map index.
+
+A Data Service registers itself with the Inventory Service via `PUT /` at startup (`DataServer/selfRegister.go`); there is no `POST /ds/register` endpoint on the Inventory side.
 
 ### Go module layout
 
