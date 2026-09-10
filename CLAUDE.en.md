@@ -167,9 +167,18 @@ javascript/Schema/             # JavaScript port of schema library (jsonSchema.j
    - `__ver` — schema version
    - `data` — the payload (validated against the type's schema)
 
-3. **JSON Schema extensions**: Two custom extensions on JSON Schema:
-   - `contentMediaType: "inventory/{type}"` — marks a field as referencing data of another type managed by Inventory Service
-   - `indexTemplate` — auto-populates registry/back-reference attributes when a referenced record is created
+3. **JSON Schema extensions**: Two custom extensions on JSON Schema.
+
+   **`contentMediaType: "inventory/{type}"`** — marks a field as referencing data of another type managed by Inventory Service. Key points:
+
+   - **Only the `inventory/` prefix is accepted.** Standard JSON Schema values (`json`, `application/json`, `text/plain`) and bare type names (`actor`) are rejected during schema preprocess — `[contentMediaType]=[json] not supported` — so the schema cannot even be registered. The value is split on the first `/`, so `application/json` is reported as `[application]`.
+   - **Only on `type: "string"` attributes** (`SchemaDoc.IsCmtRef`); an array of references is a string array under `items`.
+   - **Validated on write**: before saving, the target record is looked up through the Inventory Service; if missing, the write fails with 400 `reference inventory:{type} with value=[{id}] does not exists`. The referenced record must therefore exist first, and two records referencing each other deadlock when both fields are required (attributes are **required by default** — omit `required` and it is required). Set at least one side to `"required": false` and PATCH the value in afterwards.
+   - **Depends on the referral table**: a type is referenceable only after the Inventory Service sync has registered it. The sync runs at startup, on new-Data-Service events, and periodically (`sync.intervalSec`, 300s by default), so a freshly registered schema is not immediately referenceable; trigger it manually with `InventoryServiceAdmin sync`.
+
+   See the contentMediaType section of `README.md` for full usage and the demo examples.
+
+   **`indexTemplate`** — auto-populates registry/back-reference attributes when a referenced record is created
 
 4. **Pluggable data layer**: `src/Data/DbIface.Database` interface with DynamoDB, MongoDB, and file-based implementations. The factory in `src/Data/data.go` switches by config.
 
