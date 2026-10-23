@@ -57,6 +57,7 @@ type Server struct {
 	Port           string
 	args           map[string]string
 	config         Config.Confuguration
+	state          *Config.State
 	data           *DataHandler.Handler
 	journal        *DataJournal.JournalLib
 	journalHandler *DataJournal.JournalHandler
@@ -115,7 +116,7 @@ func (srv *Server) Run() {
 			srv.log.Fatalf("failed to initialize database, Err:%s", err)
 		}
 		srv.config.Initialized = true
-		if err := Config.Write(srv.args[CONFIG], &srv.config); err != nil {
+		if err := srv.state.Save(&srv.config); err != nil {
 			srv.log.Printf("failed to persist initialized flag, Err:%s", err)
 		}
 	}
@@ -187,6 +188,10 @@ func (srv *Server) init() error {
 	}
 	srv.args[CONFIG] = configPath
 	err := Config.Read(srv.args[CONFIG], &srv.config)
+	if err != nil {
+		return err
+	}
+	srv.state, err = Config.LoadState(srv.args[CONFIG], &srv.config)
 	if err != nil {
 		return err
 	}
@@ -342,6 +347,7 @@ func (srv *Server) handlePut(w http.ResponseWriter, r *http.Request, dataType st
 	payload, ok := reqBody.(map[string]interface{})
 	if !ok {
 		Http.ResponseJson(w, "failed to parse request into JSON object", http.StatusBadRequest, srv.config.Http)
+		return
 	}
 	var record *Record.Record
 	var ex error

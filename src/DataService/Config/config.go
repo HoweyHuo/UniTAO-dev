@@ -44,14 +44,17 @@ const (
 
 // DsConfig 描述本 DataService 自身的身份与对外可访问地址。
 // Id 为该 DataService 在 Inventory Service 中注册的标识（DsId），首次部署为空时
-// 自动生成 UUID 并回写 config；InstanceId 为稳定实例标识（UUID），用于区分"同 DS
+// 自动生成 UUID；InstanceId 为稳定实例标识（UUID），用于区分"同 DS
 // 重注册"与"不同 DS 撞名"；Urls 为可被 Inventory Service 访问的 URL 列表。
+// 运行时产生的 Id / InstanceId 保存在 state.json（见 State），不回写 config。
 type DsConfig struct {
 	Id         string   `json:"id"`
 	InstanceId string   `json:"instanceId"`
 	Urls       []string `json:"urls"`
 }
 
+// Confuguration 是 config.json 的内容，DataService 只读不写。Initialized 的权威值在
+// state.json，config.json 中的同名字段只在首次迁移时读取。
 type Confuguration struct {
 	Database    DbConfig.DatabaseConfig `json:"database"`
 	DataTable   DataTableConfig         `json:"table"`
@@ -92,18 +95,6 @@ func Read(configPath string, config *Confuguration) error {
 	json.Unmarshal([]byte(byteValue), config)
 	if config.DataTable.Data == "" {
 		return fmt.Errorf("missing field data in Config.DataTable")
-	}
-	return nil
-}
-
-func Write(configPath string, config *Confuguration) error {
-	data, err := json.MarshalIndent(config, "", "    ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal Config JSON, err:%s", err)
-	}
-	err = ioutil.WriteFile(configPath, data, 0644)
-	if err != nil {
-		return fmt.Errorf("failed to write Config JSON file: [%s], err:%s", configPath, err)
 	}
 	return nil
 }

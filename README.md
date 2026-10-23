@@ -107,6 +107,15 @@ to run demo:
  brew install go
  ```
  - follow src/README.md to init and run the Inventory Service
+ - build all Go targets and run the unit tests with the script for your region (add `--all` to run every test under `test/src`):
+ ```
+ # in China: GOPROXY=https://goproxy.cn,direct
+ ./scripts/build-cn.sh
+
+ # in the US: goproxy.cn and proxy.golang.org may be unreachable, use GOPROXY=https://goproxy.io,direct
+ ./scripts/build-us.sh
+ ```
+ - a schema cannot be updated with **PUT** or **PATCH** (both return 400). To change a schema, **POST** a schema record with the same id and a higher version; the current version is archived automatically, so data written under it still validates
 
 ## Network Security Model
 

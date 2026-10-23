@@ -738,6 +738,10 @@ func (h *Handler) deleteData(dataType string, dataId string) *Http.HttpError {
 }
 
 func (h *Handler) Patch(dataType string, idPath string, headers map[string]interface{}, data interface{}) (map[string]interface{}, *Http.HttpError) {
+	// schema 只能通过 POST 新版本升级（旧版本自动归档），不允许原地修改
+	if dataType == JsonKey.Schema {
+		return nil, Http.NewHttpError(fmt.Sprintf("method[%s] on type[%s] is not allowed", http.MethodPatch, dataType), http.StatusBadRequest)
+	}
 	dataId, nextPath := Util.ParsePath(idPath)
 	if dataId == "" {
 		errMsg := fmt.Sprintf("invalid path=[%s/%s], expect format=[{dataType}/{dataId}/{dataPath}]", dataType, dataId)

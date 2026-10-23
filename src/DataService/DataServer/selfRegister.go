@@ -32,7 +32,6 @@ import (
 	"strings"
 	"time"
 
-	"DataService/Config"
 	"InventoryService/InvRecord"
 	"InventoryService/RefRecord"
 
@@ -48,7 +47,7 @@ const (
 )
 
 // StartSelfRegistration 启动后台自我注册 goroutine。
-// 无 Inventory 链接（Inv.Url 为空）时直接返回；ds.id/ds.instanceId 为空时生成 UUID 并回写 config。
+// 无 Inventory 链接（Inv.Url 为空）时直接返回；ds.id/ds.instanceId 为空时生成 UUID 并写入 state.json。
 func (srv *Server) StartSelfRegistration() {
 	if !srv.data.Inventory.InvLinked() {
 		srv.log.Printf("inventory not linked, skip self registration")
@@ -64,7 +63,7 @@ func (srv *Server) StartSelfRegistration() {
 		persist = true
 	}
 	if persist {
-		if err := Config.Write(srv.args[CONFIG], &srv.config); err != nil {
+		if err := srv.state.Save(&srv.config); err != nil {
 			srv.log.Printf("failed to persist generated ds.id/ds.instanceId, Err:%s", err)
 		}
 	}
@@ -98,7 +97,7 @@ func (srv *Server) selfRegister() {
 		if assignedId != "" && assignedId != srv.config.Ds.Id {
 			srv.log.Printf("self registration assigned new ds.id=[%s]", assignedId)
 			srv.config.Ds.Id = assignedId
-			if err := Config.Write(srv.args[CONFIG], &srv.config); err != nil {
+			if err := srv.state.Save(&srv.config); err != nil {
 				srv.log.Printf("failed to persist assigned ds.id=[%s], Err:%s", assignedId, err)
 			}
 		}
