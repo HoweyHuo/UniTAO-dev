@@ -55,18 +55,29 @@ UniTAO 由两类服务组成：
    {
      "__type": "Server",
      "__id": "srv-001",
-     "__ver": 1,
+     "__ver": "0.0.1",
      "data": {
        "hostname": "web-01.example.com",
        "ip": "10.0.1.10",
-       "rack": { "__ref__": { "__type": "Rack", "__id": "rack-a1" } }
+       "rack": "rack-a1"
      }
    }
    ```
 
-3. **JSON Schema 扩展**：对 JSON Schema 的两项自定义扩展：
-   - `contentMediaType: "inventory/{type}"` — 标记字段引用由 Inventory Service 管理的另一类型的数据
-   - `indexTemplate` — 在被引用的 Record 创建时自动填充注册/反向引用属性
+   `__ver` 是 `xxx.xxx.xxx` 形式的版本串（至少三段数字），不是整数。跨类型引用直接存目标记录的 `__id` 字符串，没有额外的引用包装结构。
+
+3. **JSON Schema 扩展**：对 JSON Schema 的两项自定义扩展。
+
+   **`contentMediaType: "inventory/{type}"`** — 标记字段引用由 Inventory Service 管理的另一类型的数据。要点：
+
+   - **只认 `inventory/` 前缀**。标准 JSON Schema 的取值（`json`、`application/json`、`text/plain`）和裸类型名（`actor`）都会在 schema 预处理阶段被拒——`[contentMediaType]=[json] not supported`，schema 根本注册不上去。值按第一个 `/` 切分，所以 `application/json` 报的是 `[application]`。
+   - **只能挂在 `type: "string"` 的字段上**（`SchemaDoc.IsCmtRef`）；数组引用写成 `items` 下的字符串。
+   - **写入时校验**：保存前会经 Inventory Service 查目标记录，不存在则 400 `reference inventory:{type} with value=[{id}] does not exists`。所以**被引用的记录必须先存在**；两个记录互相引用时，若两侧字段都是必填就会死锁（字段**默认必填**，不写 `required` 就是必填），需把至少一侧设为 `"required": false` 再分步补写。
+   - **依赖 referral 表**：类型要先被 Inventory Service 的 sync 登记才能被引用。sync 在启动时、新 DS 注册事件、以及周期（`sync.intervalSec`，默认 300 秒）触发，所以刚注册的 schema 不能立即被引用；手动触发用 `InventoryServiceAdmin sync`。referral 记录存在 Inventory Service 自己的库里（`dataSync.go` 的 `Db.Replace`），**重启不会丢失**，所以这个等待只在首次引入某类型时出现，重启任一服务都不会重新引入。
+
+   完整用法与 demo 实例见 `README.md` 的 contentMediaType 一节。
+
+   **`indexTemplate`** — 在被引用的 Record 创建时自动填充注册/反向引用属性
 
 4. **可插拔数据层**：`src/Data/DbIface.Database` 接口，具有 DynamoDB、MongoDB 和基于文件的实现。工厂函数在 `src/Data/data.go` 中根据配置切换。
 
@@ -78,18 +89,27 @@ UniTAO 由两类服务组成：
 
 Data Service 和 Inventory Service 均通过 HTTP JSON API 对外暴露。
 
+两个服务的 URL 都是 `/{type}[/{id}]` 形式，**没有 `/data` 或 `/inv` 前缀**，也无 `/ds/...` 之类的管理端点。
+
 | 服务 | 方法 | 端点 | 说明 |
 |------|------|------|------|
-| Data Service | `POST` | `/data/{type}` | 创建 Record |
-| Data Service | `GET` | `/data/{type}/{id}` | 查询 Record |
-| Data Service | `PUT` | `/data/{type}/{id}` | 替换 Record |
-| Data Service | `DELETE` | `/data/{type}/{id}` | 删除 Record |
-| Data Service | `PATCH` | `/data/{type}/{id}` | 部分更新 Record |
-| Data Service | `GET` | `/schema/{type}` | 查询已注册的 Schema |
-| Inventory Service | `GET` | `/inv/{type}/{id}` | 跨 DS 查询 Record |
-| Inventory Service | `GET` | `/inv/schemas` | 列出所有已同步的 Schema |
-| Inventory Service | `POST` | `/ds/register` | 注册新的 Data Service |
-| Inventory Service | `POST` | `/ds/sync` | 同步所有 DS 的 Schema |
+| Data Service | `POST` | `/` | 创建 Record，类型取自 body 的 `__type` |
+| Data Service | `GET` | `/{type}` | 列出该类型的所有 `__id` |
+| Data Service | `GET` | `/{type}/{id}[/{attrPath}]` | 查询 Record，可带属性路径深入 |
+| Data Service | `PUT` | `/{type}/{id}` | 替换 Record |
+| Data Service | `PATCH` | `/{type}/{id}[/{attrPath}]` | 部分更新 Record |
+| Data Service | `DELETE` | `/{type}/{id}` | 删除 Record |
+| Data Service | `GET` | `/schema[/{type}]` | 列出 / 查询已注册的 Schema |
+| Inventory Service | `GET` | `/{type}[/{id}]` | 跨 DS 查询 Record，自动路由并沿引用展开 |
+| Inventory Service | `GET` | `/schema` | 列出所有已同步的类型 |
+| Inventory Service | `GET` | `/referral[/{type}]` | 查询类型到 Data Service 的映射 |
+| Inventory Service | `PUT` | `/` | 注册 / 更新 Data Service（body 为 `inventory` 类型的 Record） |
+| Inventory Service | `POST` | `/referral` | Data Service 上报类型变更事件，触发同步 |
+| Inventory Service | `DELETE` | `/{type}/{id}` | 删除 Inventory 本地记录（如 `inventory/{ds-id}`） |
+
+Data Service 的路径查询引擎还支持 `?schema`（显示当前路径的 schema）、`?flat`（只显示当前层）、`?iterator`（列出各叶子可选值），以及用 `[*]` 通配数组/映射的下标。
+
+Data Service 启动时会通过 `PUT /` 把自身注册到 Inventory Service（`DataServer/selfRegister.go`）；Inventory 侧不必也不存在 `POST /ds/register` 端点。
 
 ### Go 工作区 (go.work)
 
@@ -168,6 +188,20 @@ javascript/Schema/             # Schema 库的 JavaScript 移植版
 docker compose -f docker-compose/2data1inv/docker-compose.yml up -d
 ```
 
+**注意：Data Service 会回写自己的配置文件。** 启动时 `Config.Write`（`src/DataService/Config/config.go`）会把整个配置结构体序列化回 `config.json`，所以 `docker-compose/**/DataService01/config.json` 在首次启动后就会变脏。写回的是运行时状态，不是配置：
+
+- `initialized: true` — 数据库已初始化。**这个字段不应该被提交**：`InitDatabase` 在它为真时直接返回（`src/DataService/DataInit/init.go`），一旦提交，别人全新克隆后会跳过建表和导入元 schema。
+- `ds.instanceId` — 自动生成的实例 UUID，用于区分「同 DS 重注册」与「不同 DS 撞名」。
+- 多出的空 `dynamodb` / `sysdirfile` 段、字段重排、末尾换行消失，也都是同一次回写造成的：`MarshalIndent` 会输出结构体的全部字段（含零值），顺序按结构体定义。
+
+这些文件是 bind-mount 进容器的（compose 把 `./DataService01` 挂到 `/opt/UniTAO/config`），所以回写直接落在工作区。用 skip-worktree 让 git 忽略这类本地改写：
+
+```bash
+git update-index --skip-worktree docker-compose/data_inv/DataService01/config.json
+```
+
+该标记只存在于本地 index，**新克隆需要重新执行一次**；撤销用 `--no-skip-worktree`。若上游确实修改了这个文件，先撤销标记再拉取，改动落地后重新加上。InventoryService 不写回自己的配置，只有 Data Service 需要这样处理。
+
 ### Go 构建（所有目标）
 ```bash
 # 构建 Data Service 二进制
@@ -237,4 +271,6 @@ docker compose -f docker-compose/2data1inv/docker-compose.yml up -d
 
 # CI 构建（GitHub Actions 推送到 ghcr.io）
 ```
+
+CI 发布到 `ghcr.io/howeyhuo/unitao-dev` 的 tag 规则（`latest` / `<version>` / `sha-<short>` 各自何时前移、为什么未 bump 的 version tag 不能当回滚点）、以及各 tag 的镜像摘要，见 `docker/README.md`。
 
