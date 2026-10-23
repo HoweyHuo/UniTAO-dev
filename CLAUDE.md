@@ -109,6 +109,8 @@ Data Service 和 Inventory Service 均通过 HTTP JSON API 对外暴露。
 
 Data Service 的路径查询引擎还支持 `?schema`（显示当前路径的 schema）、`?flat`（只显示当前层）、`?iterator`（列出各叶子可选值），以及用 `[*]` 通配数组/映射的下标。
 
+**Schema 不能 PUT 或 PATCH，只能 POST 新版本升级。** 对 `/schema/...` 发 PUT（`Handler.Set` 拒绝所有 `InternalTypes`）或 PATCH（`Handler.Patch` 单独拦 `schema`）都会返回 400 `method[...] on type[schema] is not allowed`。要修改 schema，用 `POST /` 提交同 id、更高 `version` 的 schema record：`Handler.Add` 会把当前版本归档为 archived id 再写入新版本；版本相同或更低都会被拒，也不能直接 POST 一个 archived id。这样按旧版本写入的数据仍能找到它的 schema。`Handler.Patch` 不能拦全部 `InternalTypes`，因为日志处理器要经它（可能跨 DS 走 HTTP）PATCH `CmtIdx`。
+
 Data Service 启动时会通过 `PUT /` 把自身注册到 Inventory Service（`DataServer/selfRegister.go`）；Inventory 侧不必也不存在 `POST /ds/register` 端点。
 
 ### 网络安全模型与访问控制
@@ -223,9 +225,21 @@ go build ./app/InventoryService
 go build ./tool/DataServiceAdmin
 go build ./tool/InventoryServiceAdmin
 
-# 构建全部
-go build ./app/...
+# 构建全部（每个 app / tool 是独立 module，`./app/...` 跨不了 module，必须逐个列出）
+go build ./app/DataService ./app/InventoryService ./tool/DataServiceAdmin ./tool/InventoryServiceAdmin
 ```
+
+### 按地区选 GOPROXY 的构建脚本
+
+`scripts/build-cn.sh` 和 `scripts/build-us.sh` 只设置 `GOPROXY`，再调用公共的 `scripts/build.sh`。`build.sh` 编译上面四个目标，并跑无外部依赖的单元测试；加 `--all` 跑 `test/src` 下的全部测试。
+
+```bash
+./scripts/build-cn.sh        # 在中国：GOPROXY=https://goproxy.cn,direct
+./scripts/build-us.sh        # 在美国：GOPROXY=https://goproxy.io,direct
+./scripts/build-us.sh --all
+```
+
+在美国，goproxy.cn、proxy.golang.org、golang.org 都可能连不上（`golang.org/x/*` 用 `GOPROXY=direct` 也拉不到），表现为 `TLS handshake timeout`。这是代理的问题，不是代码的问题，换 goproxy.io 即可。`GOPROXY` 只在脚本进程内生效，不改 shell 环境。
 
 ### 运行服务
 ```bash

@@ -68,9 +68,21 @@ go build ./app/InventoryService
 go build ./tool/DataServiceAdmin
 go build ./tool/InventoryServiceAdmin
 
-# Build all
-go build ./app/...
+# Build all (each app / tool is its own module; `./app/...` cannot span modules, so list them)
+go build ./app/DataService ./app/InventoryService ./tool/DataServiceAdmin ./tool/InventoryServiceAdmin
 ```
+
+### Build scripts with per-region GOPROXY
+
+`scripts/build-cn.sh` and `scripts/build-us.sh` only set `GOPROXY` and call the shared `scripts/build.sh`, which builds the four targets above and runs the unit tests that need no external services; pass `--all` to run everything under `test/src`.
+
+```bash
+./scripts/build-cn.sh        # in China: GOPROXY=https://goproxy.cn,direct
+./scripts/build-us.sh        # in the US: GOPROXY=https://goproxy.io,direct
+./scripts/build-us.sh --all
+```
+
+From the US, goproxy.cn, proxy.golang.org and golang.org may all be unreachable (`golang.org/x/*` cannot be fetched with `GOPROXY=direct` either), which shows up as `TLS handshake timeout`. That is a proxy problem, not a code problem; switch to goproxy.io. `GOPROXY` is set only inside the script process and does not change your shell.
 
 ### Run services
 ```bash
@@ -268,6 +280,8 @@ Both services route as `/{type}[/{id}]` — there is **no `/data` or `/inv` pref
 | Inventory Service | `DELETE` | `/{type}/{id}` | Delete a local Inventory record (e.g. `inventory/{ds-id}`) |
 
 The Data Service path query engine also supports `?schema` (show the schema at the current path), `?flat` (show only the current layer), and `?iterator` (list the options at each leaf), plus `[*]` to wildcard an array/map index.
+
+**A schema cannot be PUT or PATCHed; it is upgraded by POSTing a new version.** PUT (`Handler.Set` rejects every `InternalTypes` entry) and PATCH (`Handler.Patch` blocks `schema` explicitly) on `/schema/...` both return 400 `method[...] on type[schema] is not allowed`. To change a schema, `POST /` a schema record with the same id and a higher `version`: `Handler.Add` archives the current version under its archived id, then writes the new one. An equal or lower version is rejected, and an archived id cannot be POSTed directly. This keeps data written under an older version tied to its schema. `Handler.Patch` cannot block all `InternalTypes`, because journal processing PATCHes `CmtIdx` through it (possibly across DSs over HTTP).
 
 A Data Service registers itself with the Inventory Service via `PUT /` at startup (`DataServer/selfRegister.go`); there is no `POST /ds/register` endpoint on the Inventory side.
 
