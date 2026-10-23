@@ -342,6 +342,7 @@ func (srv *Server) handlePut(w http.ResponseWriter, r *http.Request, dataType st
 	payload, ok := reqBody.(map[string]interface{})
 	if !ok {
 		Http.ResponseJson(w, "failed to parse request into JSON object", http.StatusBadRequest, srv.config.Http)
+		return
 	}
 	var record *Record.Record
 	var ex error
