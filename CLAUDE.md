@@ -111,6 +111,15 @@ Data Service 的路径查询引擎还支持 `?schema`（显示当前路径的 sc
 
 Data Service 启动时会通过 `PUT /` 把自身注册到 Inventory Service（`DataServer/selfRegister.go`）；Inventory 侧不必也不存在 `POST /ds/register` 端点。
 
+### 网络安全模型与访问控制
+
+Inventory 系统（Inventory Service 与所有 Data Service）**必须完全部署在受保护的内网中，不能通过外网访问**。因此 Inventory 系统**信任内网中的其它系统**：
+
+- **当前开发阶段：不做任何访问限制。** 没有认证/鉴权；两个服务的 REST API 对**任意来源开放 CORS**（`Access-Control-Allow-Origin: *`，`OPTIONS` 预检直接返回 204），内网的 UI（如不同端口上的 schema designer / 仪表盘）可直接从浏览器调用。
+- **生产阶段：用白名单限制访问**，只允许名单内的内网系统调用。访问控制靠白名单，不靠 CORS，CORS 保持全开。
+
+实现：`lib/Util/Http/cors.go` 的 `Http.Cors` 中间件包住两个服务的根 handler（`http.HandleFunc("/", Http.Cors(srv.handler))`）。**不要**再在服务配置的 `http.headers` 里设置 `Access-Control-Allow-Origin`——那里的值只会覆盖普通响应上的 `*`，预检响应仍是 `*`，浏览器会拿到不一致的结果。不要在代码里新增认证或来源校验，除非是在实现生产阶段的白名单。
+
 ### Go 工作区 (go.work)
 
 ```

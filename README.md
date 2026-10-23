@@ -108,6 +108,19 @@ to run demo:
  ```
  - follow src/README.md to init and run the Inventory Service
 
+## Network Security Model
+
+the Inventory system (Inventory Service + every Data Service) is meant to live **entirely inside a protected internal network**. it must **never be reachable from the public internet**.
+
+because of that, the Inventory system **trusts the other systems on the internal network**:
+
+ - **development stage (now)**: there is no access restriction at all. no authentication, no authorization, and the REST API of both services answers **CORS from any origin** (`Access-Control-Allow-Origin: *`, `OPTIONS` pre-flight answered with `204`). any internal UI or tool, e.g. the schema designer / dashboard served from a different port, can call it directly from the browser.
+ - **production stage (later)**: access will be limited by an **allow-list (whitelist)** of the internal systems that may call it. CORS is not the access control mechanism and stays open; the allow-list is.
+
+the CORS handling is a middleware in `lib/Util/Http/cors.go` (`Http.Cors`) that wraps the root handler of both servers. do not restrict `Access-Control-Allow-Origin` through the `http.headers` section of a service config - a value set there overrides the `*` on normal responses but not on pre-flight, which leaves the browser with an inconsistent answer.
+
+**do not expose either service to the internet** (no public load balancer, no public port mapping) - with the current open model, anyone who can reach the port can read and change all data.
+
 ## JSON Schema Extensions
 the JSON schema of schema to define data format is the key feature of this Data Service.
 it give enough flexibility to define JSON data in order to support any coding requirement.
