@@ -10,11 +10,7 @@
         "dns": "localhost",
         "port": "80",
         "id": "Inventory",
-        "headers": {
-            "Access-Control-Allow-Origin": [
-                "http://localhost:8005"
-            ]
-        }
+        "headers": {}
     },
     "sync": {
         "intervalSec": 300
