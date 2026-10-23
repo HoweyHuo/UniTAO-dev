@@ -152,7 +152,7 @@ func (srv *Server) Run() {
 	srv.typeChan = make(chan TypeEvent, SyncChanCap)
 	srv.syncer = DataSync.New(srv.data, srv.log)
 	go srv.syncLoop(interval)
-	http.HandleFunc("/", srv.handler)
+	http.HandleFunc("/", Http.Cors(srv.handler))
 	srv.log.Printf("Data Server Listen @%s://%s:%s", srv.config.Http.HttpType, srv.config.Http.DnsName, srv.Port)
 	srv.log.Fatal(http.ListenAndServe(fmt.Sprintf(":%s", srv.Port), nil))
 }
