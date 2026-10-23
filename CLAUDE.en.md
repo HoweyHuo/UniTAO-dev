@@ -42,19 +42,15 @@ Quick start for the demo environment (brings up DynamoDB Local + two Data Servic
 docker compose -f docker-compose/2data1inv/docker-compose.yml up -d
 ```
 
-**Note: a Data Service rewrites its own config file.** At startup, `Config.Write` (`src/DataService/Config/config.go`) serializes the whole configuration struct back to `config.json`, so `docker-compose/**/DataService01/config.json` goes dirty after the first start. What it writes is runtime state, not configuration:
+**A Data Service never writes `config.json`; its runtime state lives in `state.json` next to it.** Three values are produced by the DS itself and must survive restarts. `Config.LoadState` / `State.Save` (`src/DataService/Config/state.go`) read and write them in `state.json` in the config directory:
 
-- `initialized: true` — the database has been initialized. **This field must not be committed**: `InitDatabase` returns immediately when it is true (`src/DataService/DataInit/init.go`), so once committed, a fresh clone would skip table creation and base meta-schema import.
-- `ds.instanceId` — the auto-generated instance UUID, used to tell "same DS re-registering" apart from "a different DS colliding on the name".
-- The extra empty `dynamodb` / `sysdirfile` blocks, the reordered fields, and the lost trailing newline all come from the same write-back: `MarshalIndent` emits every field of the struct (zero values included), in struct-definition order.
+- `initialized` — the database has been initialized. `InitDatabase` returns immediately when it is true (`src/DataService/DataInit/init.go`). To create tables and import the meta-schema again, set `initialized` to `false` in `state.json`; **do not delete the whole file**, or `instanceId` is lost too. `force-init` only takes effect while `initialized` is false.
+- `instanceId` — the auto-generated instance UUID that tells "the same DS re-registering" apart from "a different DS with a clashing name". **Lose it and the Inventory treats this DS as a clashing one** and assigns it a new, suffixed ds.id.
+- `dsId` / `dsIdFrom` — the ds.id generated when `ds.id` is empty in config, or the one the Inventory assigned on a name clash. It applies only while config's `ds.id` still equals `dsIdFrom`; edit `ds.id` in config and the old value is dropped.
 
-These files are bind-mounted into the container (compose mounts `./DataService01` at `/opt/UniTAO/config`), so the write-back lands directly in the working tree. Use skip-worktree to make git ignore that local modification:
+**Migration**: older versions wrote these values back into `config.json`. When `state.json` does not exist, `LoadState` seeds it from `initialized` / `ds.instanceId` in config and writes it out right away; after that those two config fields have no effect. So for a local `config.json` dirtied by an older version, **start the new version once first** to create `state.json`, then `git checkout` the file. If you added skip-worktree earlier, undo it first with `git update-index --no-skip-worktree <file>`.
 
-```bash
-git update-index --skip-worktree docker-compose/data_inv/DataService01/config.json
-```
-
-The flag lives in the local index only, so **a fresh clone must run it again**; undo it with `--no-skip-worktree`. If upstream genuinely changes this file, drop the flag before pulling, then re-add it once the change has landed. The InventoryService does not rewrite its config — only Data Services need this.
+Compose bind-mounts `./DataService01` at `/opt/UniTAO/config`, so `state.json` shows up in the working tree; `.gitignore` already ignores `docker-compose/**/state.json`. The InventoryService does not write its config either.
 
 ### Go (all targets)
 ```bash

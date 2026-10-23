@@ -199,19 +199,15 @@ javascript/Schema/             # Schema 库的 JavaScript 移植版
 docker compose -f docker-compose/2data1inv/docker-compose.yml up -d
 ```
 
-**注意：Data Service 会回写自己的配置文件。** 启动时 `Config.Write`（`src/DataService/Config/config.go`）会把整个配置结构体序列化回 `config.json`，所以 `docker-compose/**/DataService01/config.json` 在首次启动后就会变脏。写回的是运行时状态，不是配置：
+**Data Service 不写 `config.json`，运行时状态存在旁边的 `state.json`。** 三个值由 DS 自己产生、需要跨重启保留，由 `Config.LoadState` / `State.Save`（`src/DataService/Config/state.go`）读写 config 同目录下的 `state.json`：
 
-- `initialized: true` — 数据库已初始化。**这个字段不应该被提交**：`InitDatabase` 在它为真时直接返回（`src/DataService/DataInit/init.go`），一旦提交，别人全新克隆后会跳过建表和导入元 schema。
-- `ds.instanceId` — 自动生成的实例 UUID，用于区分「同 DS 重注册」与「不同 DS 撞名」。
-- 多出的空 `dynamodb` / `sysdirfile` 段、字段重排、末尾换行消失，也都是同一次回写造成的：`MarshalIndent` 会输出结构体的全部字段（含零值），顺序按结构体定义。
+- `initialized` — 数据库已初始化。`InitDatabase` 在它为真时直接返回（`src/DataService/DataInit/init.go`）。想重新建表、导入元 schema，把 `state.json` 里的 `initialized` 改成 `false`；**不要删整个文件**，否则 `instanceId` 也会丢。`force-init` 只在 `initialized` 为 false 时才会生效。
+- `instanceId` — 自动生成的实例 UUID，用于区分「同 DS 重注册」与「不同 DS 撞名」。**丢了它，Inventory 会把这个 DS 当成撞名的另一个 DS**，分配带后缀的新 ds.id。
+- `dsId` / `dsIdFrom` — config 中 `ds.id` 为空时自动生成的 id，或 Inventory 撞名时分配的 id。只有 config 的 `ds.id` 仍等于 `dsIdFrom` 时才生效；人工改了 config 的 `ds.id`，旧值自动作废。
 
-这些文件是 bind-mount 进容器的（compose 把 `./DataService01` 挂到 `/opt/UniTAO/config`），所以回写直接落在工作区。用 skip-worktree 让 git 忽略这类本地改写：
+**迁移**：旧版本把这些值回写进了 `config.json`。`state.json` 不存在时，`LoadState` 会以 config 里的 `initialized` / `ds.instanceId` 为初值，立即写出 `state.json`，之后 `config.json` 里这两个字段不再起作用。所以本地被旧版本改脏的 `config.json`，**要先用新版本启动一次**、生成 `state.json`，再 `git checkout` 还原；以前加过 skip-worktree 的，先用 `git update-index --no-skip-worktree <file>` 撤销。
 
-```bash
-git update-index --skip-worktree docker-compose/data_inv/DataService01/config.json
-```
-
-该标记只存在于本地 index，**新克隆需要重新执行一次**；撤销用 `--no-skip-worktree`。若上游确实修改了这个文件，先撤销标记再拉取，改动落地后重新加上。InventoryService 不写回自己的配置，只有 Data Service 需要这样处理。
+compose 把 `./DataService01` bind-mount 到 `/opt/UniTAO/config`，所以 `state.json` 会出现在工作区里，`.gitignore` 已忽略 `docker-compose/**/state.json`。InventoryService 也不写自己的配置。
 
 ### Go 构建（所有目标）
 ```bash
