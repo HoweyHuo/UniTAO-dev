@@ -143,7 +143,7 @@ func (srv *Server) Run() {
 }
 
 func (srv *Server) RunHttp() {
-	http.HandleFunc("/", srv.handler)
+	http.HandleFunc("/", Http.Cors(srv.handler))
 	srv.log.Printf("Data Server Listen @%s://%s:%s", srv.config.Http.HttpType, srv.config.Http.DnsName, srv.Port)
 	srv.log.Fatal(http.ListenAndServe(fmt.Sprintf(":%s", srv.Port), nil))
 }
