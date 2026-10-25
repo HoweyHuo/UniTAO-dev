@@ -47,19 +47,23 @@ const (
 			"version": "0.0.1",
 			"properties": {
 				"dsId": {
-					"type": "string"
+					"type": "string",
+					"description": "id assigned to the Data Service, unique within the Inventory Service"
 				},
 				"instanceId": {
-					"type": "string"
+					"type": "string",
+					"description": "UUID generated on first start; distinguishes a re-registration of the same Data Service from another one using the same dsId"
 				},
 				"url": {
 					"type": "array",
 					"items": {
 						"type": "string"
-					}
+					},
+					"description": "URLs the Inventory Service can use to reach this Data Service; the first reachable one is used"
 				},
 				"lastSynctime": {
-					"type": "string"
+					"type": "string",
+					"description": "timestamp of the last schema sync reported for this Data Service"
 				}
 			}
 		}

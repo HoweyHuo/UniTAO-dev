@@ -48,10 +48,12 @@ const (
 			"version": "0.0.1",
 			"properties": {
 				"name": {
-					"type": "string"
+					"type": "string",
+					"description": "alias name, selected in the URL with ?pathName={name}"
 				},
 				"path": {
-					"type": "string"
+					"type": "string",
+					"description": "attribute path appended to {type}/{id}; a leading ? makes it a command path used as-is"
 				}
 			}
 		}

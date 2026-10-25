@@ -52,20 +52,24 @@ const (
 			"version": "0.0.1",
 			"properties": {
 				"DataType": {
-					"type": "string"
+					"type": "string",
+					"description": "data type name this referral maps to one or more Data Services"
 				},
 				"DataServices": {
 					"type": "array",
 					"items": {
 						"type": "string",
 						"contentMediaType": "inventory/inventory"
-					}
+					},
+					"description": "ids of the Data Services that hold this type; each value references an inventory record"
 				},
 				"AuthUrl": {
-					"type": "string"
+					"type": "string",
+					"description": "authentication endpoint for this data type; reserved, not used yet"
 				},
 				"AuthType": {
-					"type": "string"
+					"type": "string",
+					"description": "authentication scheme for this data type; reserved, not used yet"
 				}
 			}
 		}
