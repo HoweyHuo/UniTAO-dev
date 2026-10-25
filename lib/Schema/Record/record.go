@@ -61,11 +61,11 @@ const (
 				},
 				"__ver": {
 					"type": "string",
-					"description": "schema version the record was written with, in xxx.xxx.xxx form (at least three numeric parts)"
+					"description": "version of the schema named by __type that the data is validated against, in xxx.xxx.xxx form; e.g. __type=schema with __ver=0.0.1 means this is a schema record validated by schema-of-schema 0.0.1"
 				},
 				"data": {
 					"type": "object",
-					"description": "record payload, validated against the schema named by __type"
+					"description": "record payload, validated against version __ver of the schema named by __type"
 				}
 			}
 		}            
