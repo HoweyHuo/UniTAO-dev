@@ -137,6 +137,45 @@ func TestAddSchema(t *testing.T) {
 	}
 }
 
+// /schema 列表必须包含 record：它是所有数据记录信封 __id/__type/__ver/data 的框架 schema。
+func TestSchemaListIncludesRecordFramework(t *testing.T) {
+	handler, ex := MockHandler()
+	if ex != nil {
+		t.Fatalf(ex.Error())
+	}
+	schemaList, err := handler.List(JsonKey.Schema)
+	if err != nil {
+		t.Fatalf(err.Error())
+	}
+	found := false
+	for _, idObj := range schemaList {
+		if id, ok := idObj.(string); ok && id == Record.KeyRecord {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("schema list %v should include [%s]", schemaList, Record.KeyRecord)
+	}
+	raw, err := handler.Get(JsonKey.Schema, Record.KeyRecord)
+	if err != nil {
+		t.Fatalf("failed to get schema of [%s]. Error:%s", Record.KeyRecord, err)
+	}
+	record, e := Record.LoadMap(raw.(map[string]interface{}))
+	if e != nil {
+		t.Fatalf("failed to load [%s] schema as record. Error:%s", Record.KeyRecord, e)
+	}
+	props, ok := record.Data[JsonKey.Properties].(map[string]interface{})
+	if !ok {
+		t.Fatalf("[%s] schema should declare properties", Record.KeyRecord)
+	}
+	for _, key := range []string{Record.DataId, Record.DataType, Record.Version} {
+		if _, ok := props[key]; !ok {
+			t.Fatalf("[%s] schema should declare [%s]", Record.KeyRecord, key)
+		}
+	}
+}
+
 func TestAddData(t *testing.T) {
 	handler, ex := MockHandler()
 	if ex != nil {
