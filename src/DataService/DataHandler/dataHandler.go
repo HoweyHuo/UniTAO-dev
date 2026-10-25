@@ -470,7 +470,10 @@ func (h *Handler) Add(record *Record.Record) *Http.HttpError {
 		if ex != nil {
 			return Http.WrapError(ex, "failed to load new schema record as schema", http.StatusBadRequest)
 		}
-		h.archiveCurrentSchema(newSchema)
+		if archiveErr := h.archiveCurrentSchema(newSchema); archiveErr != nil {
+			h.Log(fmt.Sprintf("HandlerAdd: failed to archive current schema. Error:%s", archiveErr.Error()))
+			return archiveErr
+		}
 	}
 	if record.Type == JsonKey.Schema {
 		_, ex := Schema.LoadSchemaOpsRecord(record)
