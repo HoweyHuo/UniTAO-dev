@@ -32,6 +32,7 @@ const (
 	ContentMediaType     = "contentMediaType"
 	Definitions          = "definitions"
 	DefinitionPrefix     = "#/definitions/"
+	Description          = "description"
 	DocRoot              = "#"
 	IndexTemplate        = "indexTemplate"
 	Inventory            = "inventory"

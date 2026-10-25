@@ -52,16 +52,20 @@ const (
 			"description": "schema of data record",
 			"properties": {
 				"__id": {
-					"type": "string"
+					"type": "string",
+					"description": "record identifier, unique within __type"
 				},
 				"__type": {
-					"type": "string"
+					"type": "string",
+					"description": "data type name of the record; selects the schema used to validate data"
 				},
 				"__ver": {
-					"type": "string"         
+					"type": "string",
+					"description": "schema version the record was written with, in xxx.xxx.xxx form (at least three numeric parts)"
 				},
 				"data": {
-					"type": "object"
+					"type": "object",
+					"description": "record payload, validated against the schema named by __type"
 				}
 			}
 		}            

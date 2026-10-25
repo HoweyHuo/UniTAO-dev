@@ -10,19 +10,23 @@
                 "description": "schema of data record",
                 "properties": {
                     "__id": {
-                        "type": "string"
+                        "type": "string",
+                        "description": "record identifier, unique within __type"
                     },
                     "__type": {
-                        "type": "string"
+                        "type": "string",
+                        "description": "data type name of the record; selects the schema used to validate data"
                     },
                     "__ver": {
-                        "type": "string"         
+                        "type": "string",
+                        "description": "schema version the record was written with, in xxx.xxx.xxx form (at least three numeric parts)"
                     },
                     "data": {
-                        "type": "object"
+                        "type": "object",
+                        "description": "record payload, validated against the schema named by __type"
                     }
                 }
-            }            
+            }
         },
         {
             "__id": "schema",
@@ -36,37 +40,44 @@
                 "properties": {
                     "name": {
                         "type": "string",
-                        "required": false
+                        "required": false,
+                        "description": "data type name; required at the schema root and must equal the schema record __id, optional on a definition where it must equal the definition key"
                     },
                     "version": {
                         "type": "string",
-                        "required": false
+                        "required": false,
+                        "description": "schema version in xxx.xxx.xxx form; required at the schema root, optional on a definition"
                     },
                     "description": {
                         "type": "string",
-                        "required": false
+                        "required": false,
+                        "description": "human readable description of the data type"
                     },
                     "key": {
                         "type": "string",
-                        "required": false
+                        "required": false,
+                        "description": "template that builds the record id from data attributes, e.g. vm-{name}; when set, __id must equal the built value. definitions use it to build the index key of nested objects"
                     },
                     "additionalProperties": {
                         "type": "boolean",
-                        "required": false
+                        "required": false,
+                        "description": "whether a record may carry attributes not declared in properties; defaults to true when omitted"
                     },
                     "required": {
                         "type": "array",
                         "items": {
                             "type": "string"
                         },
-                        "required": false
+                        "required": false,
+                        "description": "names of attributes that must be present in every record; recomputed during schema preprocessing from each property's required flag, do not author it directly"
                     },
                     "properties": {
                         "type": "map",
                         "items": {
                             "type": "object",
                             "$ref": "#/definitions/prop"
-                        }
+                        },
+                        "description": "map of attribute name to its definition"
                     },
                     "definitions": {
                         "type": "map",
@@ -74,7 +85,8 @@
                             "type": "object",
                             "$ref": "#"
                         },
-                        "required": false
+                        "required": false,
+                        "description": "named reusable definitions referenced from properties via $ref, e.g. #/definitions/nic"
                     }
                 },
                 "definitions": {
@@ -82,37 +94,45 @@
                         "additionalProperties": false,
                         "properties": {
                             "type": {
-                                "type": "string"
+                                "type": "string",
+                                "description": "attribute value type: string, integer, number, boolean, array, object, or map (an object used as a free-form hash)"
                             },
                             "items": {
                                 "type": "object",
                                 "$ref": "#/definitions/prop",
-                                "required": false
+                                "required": false,
+                                "description": "definition of array elements; for type=map, the definition of map values"
                             },
                             "additionalProperties": {
                                 "type": "object",
                                 "$ref": "#/definitions/prop",
-                                "required": false
+                                "required": false,
+                                "description": "definition of the entries of a free-form object/map; produced from a map's items during preprocessing"
                             },
                             "$ref": {
                                 "type": "string",
-                                "required": false
+                                "required": false,
+                                "description": "reference to a definition in the same schema, e.g. #/definitions/nic"
                             },
                             "contentMediaType": {
                                 "type": "string",
-                                "required": false
+                                "required": false,
+                                "description": "cross-type reference marker; only inventory/{type} is accepted, requires type=string, and the value must be the id of an existing record of that type"
                             },
                             "indexTemplate": {
                                 "type": "string",
-                                "required": false
+                                "required": false,
+                                "description": "template that auto-fills this attribute on records of the referenced type when they are created"
                             },
                             "required": {
                                 "type": "boolean",
-                                "required": false
+                                "required": false,
+                                "description": "whether the attribute must be present in every record; defaults to true when omitted"
                             },
                             "description": {
                                 "type": "string",
-                                "required": false
+                                "required": false,
+                                "description": "human readable description of the attribute"
                             }
                         }
                     }
@@ -129,27 +149,32 @@
                 "key": "dataType:{dataType}_dataId:{dataId}_page:{idx}",
                 "properties": {
                     "dataType": {
-                        "type": "string"
+                        "type": "string",
+                        "description": "data type whose change history this journal page tracks"
                     },
                     "dataId": {
-                        "type": "string"
+                        "type": "string",
+                        "description": "id of the record whose change history this journal page tracks"
                     },
                     "idx": {
-                        "type": "integer"
+                        "type": "integer",
+                        "description": "journal page number; each page holds up to MaxEntryPerPage change entries"
                     },
                     "active": {
                         "type": "array",
                         "items": {
                             "type": "object",
                             "$ref": "#/definitions/entry"
-                        }
+                        },
+                        "description": "change entries not yet consumed by subscribers/processors"
                     },
                     "archived": {
                         "type": "array",
                         "items": {
                             "type": "object",
                             "$ref": "#/definitions/entry"
-                        }
+                        },
+                        "description": "change entries already consumed by subscribers/processors"
                     }
                 },
                 "definitions": {
@@ -158,21 +183,26 @@
                         "key": "{page}_{idx}",
                         "properties": {
                             "page": {
-                                "type": "integer"
+                                "type": "integer",
+                                "description": "journal page number this entry belongs to"
                             },
                             "idx": {
-                                "type": "integer"
+                                "type": "integer",
+                                "description": "position of the entry within its page"
                             },
                             "time": {
-                                "type": "string"
+                                "type": "string",
+                                "description": "timestamp recorded when the change happened"
                             },
                             "before": {
                                 "type": "object",
-                                "required": false
+                                "required": false,
+                                "description": "full record envelope before the change; absent when the record was created"
                             },
                             "after": {
                                 "type": "object",
-                                "required": false
+                                "required": false,
+                                "description": "full record envelope after the change; absent when the record was deleted"
                             }
                         }
                     }
@@ -189,14 +219,16 @@
                 "key": "{dataType}",
                 "properties": {
                     "dataType": {
-                        "type": "string"
+                        "type": "string",
+                        "description": "target data type whose records receive the auto-filled reference index"
                     },
                     "cmtSubscriber": {
                         "type": "map",
                         "items": {
                             "type": "object",
                             "$ref": "#/definitions/cmtSubscriber"
-                        }
+                        },
+                        "description": "map keyed by the referencing data type name; each entry describes how that type subscribes to this type"
                     }
                 },
                 "definitions": {
@@ -205,14 +237,16 @@
                         "key": "{dataType}",
                         "properties": {
                             "dataType": {
-                                "type": "string"
+                                "type": "string",
+                                "description": "name of the referencing (subscriber) data type"
                             },
                             "versionIndex": {
                                 "type": "map",
                                 "items": {
                                     "type": "object",
                                     "$ref": "#/definitions/versionIndex"
-                                }                                
+                                },
+                                "description": "map keyed by subscriber schema version; each version may declare its own index templates"
                             }
                         }
                     },
@@ -221,13 +255,15 @@
                         "key": "{version}",
                         "properties": {
                             "version": {
-                                "type": "string"
+                                "type": "string",
+                                "description": "subscriber schema version this index applies to"
                             },
                             "indexTemplate": {
                                 "type": "array",
                                 "items": {
                                     "type": "string"
-                                }
+                                },
+                                "description": "attribute paths to maintain on records of the target type for this subscriber version"
                             }
                         }
                     }
