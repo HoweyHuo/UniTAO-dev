@@ -121,10 +121,9 @@ func (h *Handler) List(dataType string) ([]interface{}, *Http.HttpError) {
 	}
 	result := make([]interface{}, 0, len(recordList))
 	for _, record := range recordList {
-		// not record schema is only for schema.
-		if record[Record.DataId] != Record.KeyRecord {
-			result = append(result, record[Record.DataId].(string))
-		}
+		// record 是描述 Record 信封（__id/__type/__ver/data）的框架 schema，
+		// 一并列出，REST /schema 才会报告它。
+		result = append(result, record[Record.DataId].(string))
 	}
 	return result, nil
 }

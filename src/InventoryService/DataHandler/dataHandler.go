@@ -135,6 +135,9 @@ func (h *Handler) List(dataType string) ([]interface{}, *Http.HttpError) {
 		for key := range InvTypes {
 			refList = append(refList, key)
 		}
+		// record 是描述所有数据记录信封（__id/__type/__ver/data）的框架 schema。
+		// 它不是 referral 类型（sync 会跳过内部类型），但 schema 端点必须能列出来。
+		refList = append(refList, Record.KeyRecord)
 		return refList, nil
 	}
 	referral, err := h.GetReferral(dataType)
@@ -225,6 +228,12 @@ func (h *Handler) Get(dataType string, dataPath string) (interface{}, *Http.Http
 }
 
 func (h *Handler) GetSchemaRecord(dataType string) (*Record.Record, *Http.HttpError) {
+	// record 不是 referral 类型，而是所有数据记录共有的信封框架 schema，
+	// 直接由 lib 提供（与各 Data Service 初始化时导入的 record schema 一致）。
+	if dataType == Record.KeyRecord {
+		record, _ := Record.LoadStr(Record.Schema)
+		return record, nil
+	}
 	if _, ok := InvTypes[dataType]; ok {
 		var record *Record.Record
 		switch dataType {
