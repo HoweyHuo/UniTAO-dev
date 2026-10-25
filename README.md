@@ -115,7 +115,7 @@ to run demo:
  # in the US: goproxy.cn and proxy.golang.org may be unreachable, use GOPROXY=https://goproxy.io,direct
  ./scripts/build-us.sh
  ```
- - a schema cannot be updated with **PUT** or **PATCH** (both return 400). To change a schema, **POST** a schema record with the same id and a higher version; the current version is archived automatically, so data written under it still validates
+ - a schema cannot be changed in place: **PUT** or **PATCH** on `schema` returns 400. to upgrade, **POST** a schema record with the same `__id` and a **strictly higher** `data.version` (equal or lower is rejected). the current version is archived automatically as `__id = <type>__<old version>`; archived ids cannot be POSTed directly, and records that declare the old `__ver` keep validating against the archived schema. the schema record's own `__ver` is the current version of the schema of schema (not `data.version`), while a data record's `__ver` is the version of its type's schema at write time. the same contract is documented on `GET /schema/schema`
 
 ## Network Security Model
 

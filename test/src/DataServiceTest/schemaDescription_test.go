@@ -27,6 +27,7 @@ package DataServiceTest
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"InventoryService/InvRecord"
@@ -80,6 +81,57 @@ func TestBuiltinSchemaFieldsHaveDescription(t *testing.T) {
 			t.Fatalf("%s: failed to load embedded schema record: %s", src.label, e)
 		}
 		checkFieldDescriptions(t, src.label+"/"+record.Id, record.Data)
+	}
+}
+
+// schema-of-schema 的 description 必须把升级契约写清楚：严格更高版本、归档 id、
+// 旧版本数据继续可校验，以及 __ver 到底是谁的版本。
+func TestSchemaUpgradeContractDocumented(t *testing.T) {
+	rootDir, err := Util.RootDir()
+	if err != nil {
+		t.Fatalf("failed to get running dir: %s", err)
+	}
+	schemaFile, err := filepath.Abs(filepath.Join(rootDir, "lib/Schema/data/schema.json"))
+	if err != nil {
+		t.Fatalf("failed to resolve schema file path: %s", err)
+	}
+	raw, err := Json.LoadJSONMap(schemaFile)
+	if err != nil {
+		t.Fatalf("failed to load [%s]: %s", schemaFile, err)
+	}
+	var schemaRecord *Record.Record
+	for _, recObj := range raw["data"].([]interface{}) {
+		record, e := Record.LoadMap(recObj.(map[string]interface{}))
+		if e != nil {
+			t.Fatalf("failed to load schema record from [%s]: %s", schemaFile, e)
+		}
+		if record.Id == JsonKey.Schema {
+			schemaRecord = record
+			break
+		}
+	}
+	if schemaRecord == nil {
+		t.Fatalf("[%s] does not contain the [%s] schema record", schemaFile, JsonKey.Schema)
+	}
+
+	schemaDesc, _ := schemaRecord.Data[JsonKey.Description].(string)
+	if !strings.Contains(schemaDesc, "upgrade") {
+		t.Errorf("schema description should mention the upgrade contract, got: %s", schemaDesc)
+	}
+
+	props, ok := schemaRecord.Data[JsonKey.Properties].(map[string]interface{})
+	if !ok {
+		t.Fatalf("[%s] schema should declare properties", JsonKey.Schema)
+	}
+	versionDef, ok := props["version"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("[%s] schema should declare [version]", JsonKey.Schema)
+	}
+	versionDesc, _ := versionDef[JsonKey.Description].(string)
+	for _, want := range []string{"strictly higher", "<type>__<old version>", "archived", "__ver", "No-Record-Framework"} {
+		if !strings.Contains(versionDesc, want) {
+			t.Errorf("[version] description should mention [%s], got: %s", want, versionDesc)
+		}
 	}
 }
 
