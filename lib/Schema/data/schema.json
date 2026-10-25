@@ -35,7 +35,7 @@
             "data": {
                 "name": "schema",
                 "version": "0.0.1",
-                "description": "schema of schema",
+                "description": "schema of schema; also defines the schema upgrade contract: a schema is changed only by POSTing a new version of the same __id, never by PUT or PATCH",
                 "additionalProperties": false,
                 "properties": {
                     "name": {
@@ -46,7 +46,7 @@
                     "version": {
                         "type": "string",
                         "required": false,
-                        "description": "version of the schema of the data type defined by this record, in xxx.xxx.xxx form; required at the schema root, optional on a definition"
+                        "description": "version of the schema of the data type defined by this record, in xxx.xxx.xxx form; required at the schema root, optional on a definition. it must be strictly higher than the version currently registered under the same __id: on upgrade the current version is archived as <type>__<old version>, archived ids cannot be POSTed directly, and records that declare the older __ver keep validating against that archived schema. the schema record's own __ver is the version of this schema of schema, not data.version; a data record's __ver is the version of its type's schema current when it was written, and with the No-Record-Framework header the Data Service rebuilds the record at the current version"
                     },
                     "description": {
                         "type": "string",
