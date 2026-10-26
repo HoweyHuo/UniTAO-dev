@@ -671,6 +671,7 @@ func (h *Handler) Delete(dataType string, dataId string) *Http.HttpError {
 			return err
 		}
 		delete(h.schemaMap, dataId)
+		return nil
 	}
 	_, err := h.LocalSchema(dataType, "")
 	if err != nil {
