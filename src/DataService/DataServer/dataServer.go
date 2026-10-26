@@ -376,6 +376,7 @@ func (srv *Server) handleDelete(w http.ResponseWriter, dataType string, dataId s
 	err := srv.data.Delete(dataType, dataId)
 	if err != nil {
 		Http.ResponseJson(w, err, err.Status, srv.config.Http)
+		return
 	}
 	result := map[string]string{
 		"result": fmt.Sprintf("item [type/id]=[%s/%s] deleted", dataType, dataId),
