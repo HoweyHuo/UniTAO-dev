@@ -707,6 +707,13 @@ func (h *Handler) deleteSchema(dataType string) *Http.HttpError {
 			return Http.NewHttpError(fmt.Sprintf("there are archived schema for type=[%s], please delete all archived schema before delete type", dataType), http.StatusBadRequest)
 		}
 	}
+	recordList, err := h.QueryDb(dataType, "")
+	if err != nil {
+		return err
+	}
+	if len(recordList) > 0 {
+		return Http.NewHttpError(fmt.Sprintf("data exists, cannot delete schema=[%s]", dataType), http.StatusBadRequest)
+	}
 	return h.deleteData(JsonKey.Schema, dataType)
 }
 
