@@ -120,12 +120,13 @@ func (srv *Server) readAssignedId(resp *http.Response) string {
 	return strings.TrimSpace(string(body))
 }
 
-// notifyNewType 在新增一个 data type 时向 Inventory 推送单类型事件：
-// POST {invUrl}/referral，body={"dsId","dataType"}。
-// best-effort：失败仅记日志，由 Inventory 周期全量 Sync 兜底，绝不影响 schema 创建。
-func (srv *Server) notifyNewType(dataType string) {
+// notifyTypeChange 在新增或删除一个 data type 时向 Inventory 推送单类型事件：
+// POST {invUrl}/referral，body={"dsId","dataType"}。事件不区分新增/删除，
+// Inventory 收到后查本 DS 上该类型是否还存在，据此把本 DS 并入或移出 referral。
+// best-effort：失败仅记日志，由 Inventory 周期全量 Sync 兜底，绝不影响 schema 创建或删除。
+func (srv *Server) notifyTypeChange(dataType string) {
 	if !srv.data.Inventory.InvLinked() {
-		srv.log.Printf("inventory not linked, skip new type notify for [%s]", dataType)
+		srv.log.Printf("inventory not linked, skip type change notify for [%s]", dataType)
 		return
 	}
 	payload := map[string]interface{}{
@@ -142,10 +143,10 @@ func (srv *Server) notifyNewType(dataType string) {
 		defer resp.Body.Close()
 	}
 	if err != nil {
-		srv.log.Printf("notify new type [%s] to inventory failed. Code:%d, Err:%s", dataType, status, err)
+		srv.log.Printf("notify type change [%s] to inventory failed. Code:%d, Err:%s", dataType, status, err)
 		return
 	}
-	srv.log.Printf("notified inventory of new type [%s] as ds.id=[%s], status=%d", dataType, srv.config.Ds.Id, status)
+	srv.log.Printf("notified inventory of type change [%s] as ds.id=[%s], status=%d", dataType, srv.config.Ds.Id, status)
 }
 
 // checkRegistration 查询 Inventory 中本 DS 的 inventory 记录。

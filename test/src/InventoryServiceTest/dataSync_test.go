@@ -352,3 +352,40 @@ func TestSyncTypeNormalizesArchivedId(t *testing.T) {
 		t.Fatalf("referral[Server] = %v, want [ds1]", got)
 	}
 }
+
+func TestSyncTypeRemovesDeletedType(t *testing.T) {
+	ds := fakeDs("Rack") // Server 已在该 DS 上删除
+	defer ds.Close()
+	db := &DataServiceTest.MockDatabase{Data: map[string]interface{}{}}
+	seedReferral(db, "Server", []string{"ds1"})
+	seedInventory(db, "ds1", ds.URL)
+	handler := &DataHandler.Handler{Db: db}
+	syncer := DataSync.New(handler, log.Default())
+
+	if err := syncer.SyncType("ds1", "Server"); err != nil {
+		t.Fatalf("SyncType failed: %s", err)
+	}
+	if _, err := handler.GetData("referral", "Server"); err == nil {
+		t.Fatalf("referral[Server] should be removed (no DS provides it any more)")
+	}
+}
+
+func TestSyncTypeRemovesOnlyThisDs(t *testing.T) {
+	ds1 := fakeDs("Server")
+	defer ds1.Close()
+	ds2 := fakeDs() // Server 已在 ds2 上删除
+	defer ds2.Close()
+	db := &DataServiceTest.MockDatabase{Data: map[string]interface{}{}}
+	seedReferral(db, "Server", []string{"ds1", "ds2"})
+	seedInventory(db, "ds1", ds1.URL)
+	seedInventory(db, "ds2", ds2.URL)
+	handler := &DataHandler.Handler{Db: db}
+	syncer := DataSync.New(handler, log.Default())
+
+	if err := syncer.SyncType("ds2", "Server"); err != nil {
+		t.Fatalf("SyncType failed: %s", err)
+	}
+	if got := referralServices(t, db, "Server"); len(got) != 1 || got[0] != "ds1" {
+		t.Fatalf("referral[Server] = %v, want [ds1]", got)
+	}
+}

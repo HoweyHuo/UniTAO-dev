@@ -123,9 +123,9 @@ func (s *Syncer) SyncDs(dsId string) error {
 	return nil
 }
 
-// SyncType 处理单类型事件：确认 DS 已注册、类型在该 DS 上确实存在后，
-// 把 dsId 并入该类型的 referral。类型不存在/DS 未注册时跳过（交由周期全量对账兜底）。
-// 只处理单个类型，不触发全量扫描。
+// SyncType 处理单类型事件，按该 DS 上类型的实际状态对账这一对 (dsId, dataType)：
+// 类型存在则把 dsId 并入 referral；类型已不存在（DS 删除了 schema）则把 dsId 移出 referral。
+// DS 未注册时跳过（交由周期全量对账兜底）。只处理单个类型，不触发全量扫描。
 func (s *Syncer) SyncType(dsId string, dataType string) error {
 	dataType, _ = Util.ParseCustomPath(dataType, JsonKey.ArchivedSchemaIdDiv)
 	if _, ok := Common.InternalTypes[dataType]; ok {
@@ -152,8 +152,8 @@ func (s *Syncer) SyncType(dsId string, dataType string) error {
 	_, code, e := Http.GetRestData(*schemaUrl)
 	if e != nil {
 		if code == http.StatusNotFound {
-			s.log.Printf("[sync-type] type[%s] not found on DS=[%s], skip (periodic sync will reconcile)", dataType, dsId)
-			return nil
+			s.log.Printf("[sync-type] type[%s] not found on DS=[%s], remove from referral", dataType, dsId)
+			return s.dropType(dsId, dataType)
 		}
 		return fmt.Errorf("failed to verify schema[%s] on DS=[%s], Code:%d, Error: %s", dataType, dsId, code, e)
 	}
@@ -183,6 +183,39 @@ func (s *Syncer) mergeType(dsId string, dataType string) error {
 	if setEqual(current, desired) {
 		s.log.Printf("[sync-ds] type[%s] @DS[%s] already up to date", dataType, dsId)
 		return nil
+	}
+	return s.setType(dataType, desired)
+}
+
+// dropType 把 dsId 从 dataType 的 referral 中移除；移除后不剩任何 DS 则删除整条 referral。
+// referral 不存在或不含 dsId 时什么都不做，天然幂等。
+func (s *Syncer) dropType(dsId string, dataType string) error {
+	record, err := s.handler.GetReferralRecord(dataType)
+	if err != nil {
+		if err.Status == http.StatusNotFound {
+			s.log.Printf("[sync-type] no referral for type[%s], nothing to remove", dataType)
+			return nil
+		}
+		return fmt.Errorf("failed to get referral[%s], Error: %s", dataType, err)
+	}
+	referral, e := RefRecord.LoadMap(record.Data)
+	if e != nil {
+		return fmt.Errorf("failed to parse referral[%s], Error: %s", dataType, e)
+	}
+	current := dedupeStrings(referral.DataServices)
+	if !contains(current, dsId) {
+		s.log.Printf("[sync-type] type[%s] @DS[%s] not in referral, nothing to remove", dataType, dsId)
+		return nil
+	}
+	desired := []string{}
+	for _, id := range current {
+		if id != dsId {
+			desired = append(desired, id)
+		}
+	}
+	if len(desired) == 0 {
+		s.log.Printf("[sync-type] type[%s] no longer exists on any DataService. remove referral", dataType)
+		return s.removeType(dataType)
 	}
 	return s.setType(dataType, desired)
 }

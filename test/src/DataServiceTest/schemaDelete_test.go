@@ -67,3 +67,34 @@ func TestSchemaDeleteWithData(t *testing.T) {
 		t.Fatalf("schema should be gone after delete, got: %v", err)
 	}
 }
+
+// 只有删除当前 schema（即移除该 data type）才通知 Inventory；删除归档版本不通知。
+func TestSchemaDeleteNotifiesTypeChange(t *testing.T) {
+	handler, ex := MockHandler()
+	if ex != nil {
+		t.Fatalf(ex.Error())
+	}
+	if err := AddData(handler, upgradeSchemaV1); err != nil {
+		t.Fatalf("failed to add schema. Error: %s", err)
+	}
+	if err := AddData(handler, upgradeSchemaV2); err != nil {
+		t.Fatalf("failed to upgrade schema. Error: %s", err)
+	}
+	notified := []string{}
+	handler.TypeChangeNotify = func(dataType string) {
+		notified = append(notified, dataType)
+	}
+
+	if err := handler.Delete(JsonKey.Schema, "upgradable__0.0.1"); err != nil {
+		t.Fatalf("failed to delete archived schema. Error: %s", err)
+	}
+	if len(notified) != 0 {
+		t.Fatalf("deleting an archived schema should not notify, got %v", notified)
+	}
+	if err := handler.Delete(JsonKey.Schema, "upgradable"); err != nil {
+		t.Fatalf("failed to delete schema. Error: %s", err)
+	}
+	if len(notified) != 1 || notified[0] != "upgradable" {
+		t.Fatalf("deleting the current schema should notify [upgradable], got %v", notified)
+	}
+}

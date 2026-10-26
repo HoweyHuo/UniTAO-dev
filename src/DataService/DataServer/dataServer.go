@@ -133,9 +133,9 @@ func (srv *Server) Run() {
 	}
 	srv.journal = journal
 	srv.data.AddJournal = srv.journal.AddJournal
-	// 新增 data type 时向 Inventory 推送单类型事件（best-effort，不阻塞 schema 创建）
-	srv.data.NewTypeNotify = func(dataType string) {
-		go srv.notifyNewType(dataType)
+	// 新增/删除 data type 时向 Inventory 推送单类型事件（best-effort，不阻塞 schema 创建或删除）
+	srv.data.TypeChangeNotify = func(dataType string) {
+		go srv.notifyTypeChange(dataType)
 	}
 	srv.RunJournalHandler()
 	// 自我注册：无 inventory.url 时 InvLinked() 为 false，StartSelfRegistration 直接返回
