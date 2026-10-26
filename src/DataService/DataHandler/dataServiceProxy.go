@@ -269,6 +269,7 @@ func (i *DataServiceProxy) Get(dataType string, dataId string) (*Record.Record, 
 	if err != nil {
 		return nil, err
 	}
+	var localMiss *Http.HttpError
 	if isLocal {
 		if dataType == JsonKey.Schema {
 			schemaId, schemaVer := Util.ParsePath(dataId)
@@ -293,6 +294,7 @@ func (i *DataServiceProxy) Get(dataType string, dataId string) (*Record.Record, 
 		if err.Status != http.StatusNotFound {
 			return nil, err
 		}
+		localMiss = err
 		// 本分片无此记录（分片数据不相交），尝试其它分片
 		i.Log(fmt.Sprintf("local GET 404 for [%s/%s], trying all shards", dataType, dataId))
 	}
@@ -303,6 +305,11 @@ func (i *DataServiceProxy) Get(dataType string, dataId string) (*Record.Record, 
 	}
 	dsInfoList, ex := i.GetDsInfo(queryType)
 	if ex != nil {
+		if localMiss != nil {
+			// 查不到其它分片（未连 Inventory、Inventory 不可达或尚未登记该类型）时，以本地 404 为准
+			i.Log(fmt.Sprintf("no other shard for [%s/%s], return local 404. Error: %s", dataType, dataId, ex))
+			return nil, localMiss
+		}
 		return nil, ex
 	}
 	var lastReal string
