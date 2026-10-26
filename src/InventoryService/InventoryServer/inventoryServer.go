@@ -55,7 +55,7 @@ type Server struct {
 	data     *DataHandler.Handler
 	log      *log.Logger
 	syncChan chan string      // DS 注册/更新事件
-	typeChan chan TypeEvent   // DS 新增 data type 事件（单类型，仅验证+合并，不扫描）
+	typeChan chan TypeEvent   // DS 新增/删除 data type 事件（单类型，按 DS 上实际状态合并或移除，不扫描）
 	syncer   *DataSync.Syncer // referral + schema 同步器
 }
 
@@ -250,7 +250,7 @@ func (srv *Server) handlerDelete(w http.ResponseWriter, r *http.Request) {
 	Http.ResponseText(w, []byte(result), http.StatusAccepted, srv.config.Http)
 }
 
-// handleTypeEvent 接收 DS 新增 data type 事件：POST /referral，body={"dsId","dataType"}。
+// handleTypeEvent 接收 DS 新增/删除 data type 事件：POST /referral，body={"dsId","dataType"}。
 // 只校验路径与 body 并非阻塞入队 typeChan；referral 写入由 syncLoop 单 goroutine 执行。
 func (srv *Server) handleTypeEvent(w http.ResponseWriter, r *http.Request) {
 	urlPath, err := Http.GetUrl(r)

@@ -62,10 +62,11 @@ type Handler struct {
 	Lock       *HashLock.HashLock
 	Inventory  *DataServiceProxy
 	AddJournal JournalAdd
-	// NewTypeNotify 在新增一个 data type（全新 schema，非版本升级）时被调用。
+	// TypeChangeNotify 在新增或删除一个 data type 时被调用（全新 schema / 删除当前 schema，
+	// 不含版本升级和归档版本的删除）。
 	// 由 DataServer 接线：通常以 goroutine 向 Inventory 推送单类型事件，best-effort。
-	NewTypeNotify func(dataType string)
-	log           *log.Logger
+	TypeChangeNotify func(dataType string)
+	log              *log.Logger
 }
 
 func New(config Config.Confuguration, logger *log.Logger, connectDb func(db DbConfig.DatabaseConfig, logger *log.Logger) (DbIface.Database, error)) (*Handler, *Http.HttpError) {
@@ -486,9 +487,9 @@ func (h *Handler) Add(record *Record.Record) *Http.HttpError {
 		return err
 	}
 	// 仅"新增全新 data type"时通知（版本升级走 archiveCurrentSchema，recordList>0，天然排除）。
-	if record.Type == JsonKey.Schema && len(recordList) == 0 && h.NewTypeNotify != nil {
+	if record.Type == JsonKey.Schema && len(recordList) == 0 && h.TypeChangeNotify != nil {
 		h.Log(fmt.Sprintf("HandlerAdd: new data type [%s], notify inventory", record.Id))
-		h.NewTypeNotify(record.Id)
+		h.TypeChangeNotify(record.Id)
 	}
 	return nil
 }
@@ -671,6 +672,11 @@ func (h *Handler) Delete(dataType string, dataId string) *Http.HttpError {
 			return err
 		}
 		delete(h.schemaMap, dataId)
+		// 删除当前 schema 才是移除了该 data type；删除归档版本不影响类型是否存在
+		if _, schemaVer := Util.ParseCustomPath(dataId, JsonKey.ArchivedSchemaIdDiv); schemaVer == "" && h.TypeChangeNotify != nil {
+			h.Log(fmt.Sprintf("HandlerDelete: data type [%s] removed, notify inventory", dataId))
+			h.TypeChangeNotify(dataId)
+		}
 		return nil
 	}
 	_, err := h.LocalSchema(dataType, "")
