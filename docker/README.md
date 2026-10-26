@@ -78,15 +78,15 @@ To pin a build independently of any bump, use the `sha-<short>` tag or an image 
 
 A point-in-time record of what each tag resolved to. Nothing keeps this up to date, and it goes stale on the next version bump — regenerate it with the command below rather than trusting the table.
 
-**as of 2026-09-10:**
+**as of 2026-10-26:**
 
 | Tag | amd64 manifest digest | Status |
 |-----|----------------------|--------|
 | `1.0.0` | `sha256:51c722ccfd367f86ff145e87e2007248d92cb0ba56a5b2a2b7f0f952b65085c8` | frozen |
 | `1.0.1` | `sha256:0058c3f8909ccd94b3600d1ee2e12f1fd7cda46483f0d2efb68a6276bf8ffce8` | frozen |
 | `1.0.2` | `sha256:accce9f130c6fd8b4037d179a598aeb2660da4a954737c7783ba0286893347d9` | frozen |
-| `1.0.3` | `sha256:5a0074d727a8e137af1364a696214062ab8cc56d4b0b53595db0b9ee5cc681cb` | in development (= `latest`) |
-| `latest` | `sha256:5a0074d727a8e137af1364a696214062ab8cc56d4b0b53595db0b9ee5cc681cb` | — |
+| `1.0.3` | `sha256:f8df3a379c521d62f1c6f52ac4e6a52bb1a3ccf4a03733eaf7b96055a9397254` | in development (= `latest`) |
+| `latest` | `sha256:f8df3a379c521d62f1c6f52ac4e6a52bb1a3ccf4a03733eaf7b96055a9397254` | — |
 
 Regenerate:
 
