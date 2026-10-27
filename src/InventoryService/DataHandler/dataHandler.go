@@ -540,6 +540,9 @@ func (h *Handler) PutData(data map[string]interface{}) (string, *Http.HttpError)
 	if err != nil {
 		return "", Http.WrapError(err, "payload failed to be load as Record", http.StatusBadRequest)
 	}
+	if err = record.ValidateEnvelope(); err != nil {
+		return "", Http.WrapError(err, "invalid record", http.StatusBadRequest)
+	}
 	if _, ok := EditableTypes[record.Type]; !ok {
 		return "", Http.NewHttpError(fmt.Sprintf("update on type=[%s] not editable", record.Type), http.StatusBadRequest)
 	}

@@ -99,6 +99,9 @@ func (schema *SchemaOps) init() error {
 }
 
 func (schema *SchemaOps) ValidateRecord(record *Record.Record) error {
+	if err := record.ValidateEnvelope(); err != nil {
+		return err
+	}
 	for _, c := range JsonKey.InvalidKeyChars {
 		if strings.Contains(record.Id, c) {
 			return fmt.Errorf("invalid char found in record id:[%s], please make sure not include following chars:\n%s", record.Id, JsonKey.InvalidKeyChars)

@@ -411,6 +411,41 @@ func TestValidateRecordId(t *testing.T) {
 	}
 }
 
+func TestValidateRecordEnvelopeWhitespace(t *testing.T) {
+	schemaStr := `{
+		"name": "test",
+		"version": "0.0.1",
+		"properties": {
+			"testAttr": {
+				"type": "string"
+			}
+		}
+	}`
+	schema, err := LoadSchema(schemaStr)
+	if err != nil {
+		t.Fatalf("failed load schemaStr. Error:%s", err)
+	}
+	good := Record.NewRecord("test", "0.0.1", "test01", map[string]interface{}{"testAttr": "a b"})
+	if err = schema.ValidateRecord(good); err != nil {
+		t.Fatalf("failed to validate good record. Error:%s", err)
+	}
+	badList := []*Record.Record{
+		Record.NewRecord("test", "0.0.1", "test 01", map[string]interface{}{"testAttr": "123"}),
+		Record.NewRecord("test", "0.0.1", "test01\t", map[string]interface{}{"testAttr": "123"}),
+		Record.NewRecord("test ", "0.0.1", "test01", map[string]interface{}{"testAttr": "123"}),
+		Record.NewRecord("test", "0.0.1 ", "test01", map[string]interface{}{"testAttr": "123"}),
+		Record.NewRecord("test", "0.0.1", "test\n01", map[string]interface{}{"testAttr": "123"}),
+	}
+	for _, bad := range badList {
+		if err = schema.ValidateRecord(bad); err == nil {
+			t.Fatalf("failed to catch whitespace in record envelope: __id=[%q] __type=[%q] __ver=[%q]", bad.Id, bad.Type, bad.Version)
+		}
+		if err = bad.ValidateEnvelope(); err == nil {
+			t.Fatalf("ValidateEnvelope missed whitespace: __id=[%q] __type=[%q] __ver=[%q]", bad.Id, bad.Type, bad.Version)
+		}
+	}
+}
+
 func TestValidateArrayCheckDup(t *testing.T) {
 	schemaStr := `{
 		"name": "test",
