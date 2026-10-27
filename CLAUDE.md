@@ -66,6 +66,8 @@ UniTAO 由两类服务组成：
 
    `__ver` 是 `xxx.xxx.xxx` 形式的版本串（至少三段数字），不是整数。跨类型引用直接存目标记录的 `__id` 字符串，没有额外的引用包装结构。
 
+   `__id`、`__type`、`__ver` **不能包含空白字符**（空格、制表符、换行等）。`Record.ValidateEnvelope` 负责检查，Data Service 写入时经 `SchemaOps.ValidateRecord` 调用，Inventory 的 `PUT /` 在 `PutData` 里调用；违反返回 400 `record field [__id]=[a b] must not contain whitespace`。`data` 里的属性名和值不受这条限制。
+
 3. **JSON Schema 扩展**：对 JSON Schema 的两项自定义扩展。
 
    **`contentMediaType: "inventory/{type}"`** — 标记字段引用由 Inventory Service 管理的另一类型的数据。要点：
