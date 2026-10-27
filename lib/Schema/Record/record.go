@@ -29,6 +29,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
+	"unicode"
 
 	"github.com/salesforce/UniTAO/lib/Schema/SchemaDoc"
 	"github.com/salesforce/UniTAO/lib/Util"
@@ -96,6 +98,24 @@ func NewRecord(dataType string, typeVersion string, dataId string, data map[stri
 		Data:    data,
 	}
 	return &record
+}
+
+// ValidateEnvelope 检查信封字段 __id/__type/__ver 不含空白字符（空格、制表符、换行等）。
+func (rec *Record) ValidateEnvelope() error {
+	fields := []struct {
+		key   string
+		value string
+	}{
+		{DataId, rec.Id},
+		{DataType, rec.Type},
+		{Version, rec.Version},
+	}
+	for _, f := range fields {
+		if strings.IndexFunc(f.value, unicode.IsSpace) >= 0 {
+			return fmt.Errorf("record field [%s]=[%s] must not contain whitespace", f.key, f.value)
+		}
+	}
+	return nil
 }
 
 func ParseVersion(version string) ([]int, error) {
