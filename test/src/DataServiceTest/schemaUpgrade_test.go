@@ -187,3 +187,41 @@ func TestSchemaUpgradeFlow(t *testing.T) {
 	assertAddRejected400(upgradeDataV1, "new data under the archived version")
 	assertAddRejected400(upgradeSchemaArchivedPost, "POST of the archived schema id [upgradable__0.0.1]")
 }
+
+// 把 record 升级到新版本 schema 时, data 不变也要写入新的 __ver (否则 Set 当作无变化跳过, 却返回成功).
+func TestDataUpgradeWithSameData(t *testing.T) {
+	handler, ex := MockHandler()
+	if ex != nil {
+		t.Fatalf(ex.Error())
+	}
+	for _, recordStr := range []string{upgradeSchemaV1, upgradeDataV1, upgradeSchemaV2} {
+		if err := AddData(handler, recordStr); err != nil {
+			t.Fatalf("failed to add record. Error: %s", err)
+		}
+	}
+	upgraded, e := Record.LoadStr(upgradeDataV1)
+	if e != nil {
+		t.Fatalf("failed to load record: %s", e)
+	}
+	upgraded.Version = "0.0.2"
+	if err := handler.Set("upgradable", "item01", upgraded); err != nil {
+		t.Fatalf("failed to upgrade record. Error: %s", err)
+	}
+	data, err := handler.LocalData("upgradable", "item01")
+	if err != nil {
+		t.Fatalf("failed to read record: %s", err)
+	}
+	stored, e := Record.LoadMap(data)
+	if e != nil {
+		t.Fatalf("failed to load stored record: %s", e)
+	}
+	if stored.Version != "0.0.2" {
+		t.Fatalf("stored record __ver = [%s], want [0.0.2]", stored.Version)
+	}
+
+	// 降级仍然被拒绝
+	downgraded, _ := Record.LoadStr(upgradeDataV1)
+	if err := handler.Set("upgradable", "item01", downgraded); err == nil || err.Status != http.StatusBadRequest {
+		t.Fatalf("downgrade to [0.0.1] should be rejected with %d, got %v", http.StatusBadRequest, err)
+	}
+}

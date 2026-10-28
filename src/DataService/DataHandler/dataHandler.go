@@ -589,6 +589,10 @@ func (h *Handler) CompareRecords(before *Record.Record, after *Record.Record) (b
 	if ex != nil {
 		return false, ex
 	}
+	// 升级数据格式(__ver 变高)即使 data 不变也是改动, 必须写入, 否则 record 停留在旧版本
+	if before.Version != after.Version {
+		return false, nil
+	}
 	srcStr, _ := json.MarshalIndent(before.Data, "", "    ")
 	tgtStr, _ := json.MarshalIndent(after.Data, "", "    ")
 	if string(srcStr) != string(tgtStr) {
