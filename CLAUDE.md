@@ -32,7 +32,7 @@ UniTAO 是一个基于 Schema 驱动的多节点异构基础设施清单管理�
 
 UniTAO 由两类服务组成：
 
-- **Data Service** — 数据节点，负责具体数据的 CRUD 操作、Schema 校验、变更日志记录和逐记录锁。每个 Data Service 实例连接一个数据库（DynamoDB、MongoDB 或本地文件），管理自己域内的数据。它是"存数据"的地方。
+- **Data Service** — 数据节点，负责具体数据的 CRUD 操作、Schema 校验、写入后处理（Journal）和逐记录锁。每个 Data Service 实例连接一个数据库（DynamoDB、MongoDB 或本地文件），管理自己域内的数据。它是"存数据"的地方。
 - **Inventory Service** — 聚合/查询节点，负责注册多个 Data Service、同步它们的 Schema、并提供跨 Data Service 的交叉引用查询。上层应用只需与 Inventory Service 对话，不需要知道数据分散在多少个 DS 上。它是"查数据"的地方。
 
 这种分离带来了几个关键优势：
@@ -85,7 +85,12 @@ UniTAO 由两类服务组成：
 
 5. **DataServiceProxy**：Inventory Service 内部通过 `DataServiceProxy` 将跨 DS 的引用查询代理到目标 Data Service。上层应用提交查询后，Inventory Service 根据引用的 `__ref__` 记录自动路由到正确的 DS 实例。
 
-6. **变更日志**：数据变更被记录日志，用于审计跟踪和跨服务同步。
+6. **Journal（变更队列）**：Data Service 内部的异步任务队列，用来执行写入后的副作用，**不是审计日志**。
+   - `DataHandler` 每次增 / 删 / 改 / PATCH 成功后调用 `AddJournal(type, id, before, after)`，按 `(type, id)` 分页存进 DS 自己的库。
+   - `JournalHandler` 为每个 `(type, id)` 起一个 `JournalWorker`，按顺序把 entry 交给 `LoadProcesses` 注册的 `JournalProcess`。顺序只在单条记录内保证，没有全局序号。
+   - 一页 entry 全部处理完、head 前移时，这一页会被删除（`JournalHeadForward` → `removeJournal`），不保留历史。
+   - 目前只有两个 process，都服务于 `indexTemplate`：`SchemaChanges` 在 schema 注册或删除时，经 Inventory 在被引用类型的 `cmtIdx` 里登记或撤销订阅；`CmtIndexChanges` 在数据变化时回填或清理被引用记录上的反向索引，可能跨 DS PATCH。
+   - 要给写入加新的后续处理（如向外推送变更），就实现一个 `JournalProcess` 并在 `LoadProcesses` 里注册。不过 Journal 处理完就删，不能用来回放或审计。
 
 ### REST API 概览
 
@@ -142,7 +147,7 @@ src/                           # 源码包（无 main）
   DataService/                 # Data Service 核心 — CRUD 处理器、日志、锁、配置、HTTP 服务
     DataHandler/               # Record 校验、CRUD 操作、跨 DS 代理
     DataServer/                # HTTP 服务器及 REST 端点路由
-    DataJournal/               # 数据变更日志跟踪
+    DataJournal/               # 写入后的异步处理队列（驱动 indexTemplate / cmtIdx）
     DataLock/                  # 并发访问的逐记录锁
   InventoryService/            # Inventory Service 核心 — 跨 DS 查询路由
     DataHandler/               # DS 注册、Schema 同步、交叉引用查询
