@@ -30,13 +30,18 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
+	"sync"
 	"time"
 
+	"Data/DbConfig"
+	"Data/DbIface"
 	"InventoryService/Config"
 	"InventoryService/DataHandler"
 	"InventoryService/DataSync"
 	"InventoryService/RefRecord"
 
+	"github.com/salesforce/UniTAO/lib/Schema"
 	"github.com/salesforce/UniTAO/lib/Util"
 	"github.com/salesforce/UniTAO/lib/Util/CustomLogger"
 	"github.com/salesforce/UniTAO/lib/Util/Http"
@@ -57,6 +62,9 @@ type Server struct {
 	syncChan chan string      // DS 注册/更新事件
 	typeChan chan TypeEvent   // DS 新增/删除 data type 事件（单类型，按 DS 上实际状态合并或移除，不扫描）
 	syncer   *DataSync.Syncer // referral + schema 同步器
+	syncLock *sync.Mutex      // 串行化各种同步；在 Start 中创建（New 按值返回 Server，不能内嵌锁）
+	// ConnectDb 建立数据库连接，测试时可替换；为 nil 时按配置连接。
+	ConnectDb func(config DbConfig.DatabaseConfig, logger *log.Logger) (DbIface.Database, error)
 }
 
 type ServerArgs struct {
@@ -113,9 +121,36 @@ func New() Server {
 	return server
 }
 
+// NewServer 不经命令行参数直接创建 Server（测试与嵌入使用）。
+func NewServer(configPath string, port string) (*Server, error) {
+	server := &Server{args: ServerArgs{config: configPath, port: port}}
+	if err := Config.Read(configPath, &server.config); err != nil {
+		return nil, err
+	}
+	server.Port = port
+	if server.Port == "" {
+		server.Port = server.config.Http.Port
+	}
+	if server.Port == "" {
+		server.Port = PORT_DEFAULT
+	}
+	return server, nil
+}
+
+func (srv *Server) newHandler() (*DataHandler.Handler, error) {
+	if srv.ConnectDb == nil {
+		return DataHandler.New(srv.config.Database, srv.log)
+	}
+	db, err := srv.ConnectDb(srv.config.Database, srv.log)
+	if err != nil {
+		return nil, err
+	}
+	return DataHandler.NewWithDb(db, srv.log)
+}
+
 func (srv *Server) WaitForDataHandler() error {
 	for {
-		handler, err := DataHandler.New(srv.config.Database, srv.log)
+		handler, err := srv.newHandler()
 		if err == nil {
 			srv.data = handler
 			break
@@ -135,12 +170,32 @@ func (srv *Server) Run() {
 	if logFile != nil {
 		defer logFile.Close()
 	}
-	srv.log = logger
-	srv.log.Printf("Server Listen on PORT:%s", srv.Port)
-	err = srv.WaitForDataHandler()
-	if err != nil {
-		srv.log.Fatalf("failed to connect to database, Err:%s", err)
+	if err := srv.Start(logger); err != nil {
+		logger.Fatalf("failed to start Inventory Service, Err:%s", err)
 	}
+	http.HandleFunc("/", Http.Cors(srv.handler))
+	srv.log.Printf("Data Server Listen @%s://%s:%s", srv.config.Http.HttpType, srv.config.Http.DnsName, srv.Port)
+	srv.log.Fatal(http.ListenAndServe(fmt.Sprintf(":%s", srv.Port), nil))
+}
+
+// ServeHTTP 让 Server 可以直接作为 http.Handler 使用（测试）。
+func (srv *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	Http.Cors(srv.handler)(w, r)
+}
+
+// Start 连接数据库并启动后台同步循环，但不监听端口。
+func (srv *Server) Start(logger *log.Logger) error {
+	if logger == nil {
+		logger = log.Default()
+	}
+	srv.log = logger
+	srv.syncLock = &sync.Mutex{}
+	srv.log.Printf("Server Listen on PORT:%s", srv.Port)
+	err := srv.WaitForDataHandler()
+	if err != nil {
+		return err
+	}
+	srv.data.PinnedSources = srv.config.PinnedSources
 	// 后台 schema sync：先于 HTTP 启动，注册事件驱动优先同步新 DS
 	intervalSec := srv.config.Sync.IntervalSec
 	if intervalSec <= 0 {
@@ -152,9 +207,7 @@ func (srv *Server) Run() {
 	srv.typeChan = make(chan TypeEvent, SyncChanCap)
 	srv.syncer = DataSync.New(srv.data, srv.log)
 	go srv.syncLoop(interval)
-	http.HandleFunc("/", Http.Cors(srv.handler))
-	srv.log.Printf("Data Server Listen @%s://%s:%s", srv.config.Http.HttpType, srv.config.Http.DnsName, srv.Port)
-	srv.log.Fatal(http.ListenAndServe(fmt.Sprintf(":%s", srv.Port), nil))
+	return nil
 }
 
 func (srv *Server) handler(w http.ResponseWriter, r *http.Request) {
@@ -220,6 +273,7 @@ func (srv *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	payload, ok := reqBody.(map[string]interface{})
 	if !ok {
 		Http.ResponseJson(w, "failed to parse request into JSON object", http.StatusBadRequest, srv.config.Http)
+		return
 	}
 	dataId, err := srv.data.PutData(payload)
 	if err != nil {
@@ -234,11 +288,24 @@ func (srv *Server) handlerDelete(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		Http.ResponseJson(w, err, err.Status, srv.config.Http)
 	}
+	if idx := strings.Index(urlPath, "?"); idx >= 0 {
+		urlPath = urlPath[:idx]
+	}
 	dataType, idPath := Util.ParsePath(urlPath)
 	id, nextPath := Util.ParsePath(idPath)
-	if nextPath == "" {
+	if id == "" || nextPath != "" {
 		err := Http.NewHttpError("invalid url for delete, expected format=[{dataType}/{dataId}]", http.StatusBadRequest)
 		Http.ResponseJson(w, err, err.Status, srv.config.Http)
+		return
+	}
+	// DELETE /inventory/{dsId}?url={url}：只移除一个副本的 URL，没有剩余 URL 时删除整条记录
+	if removeUrl := r.URL.Query().Get("url"); removeUrl != "" && dataType == Schema.Inventory {
+		err = srv.data.RemoveDsUrl(id, removeUrl)
+		if err != nil {
+			Http.ResponseJson(w, err, err.Status, srv.config.Http)
+			return
+		}
+		Http.ResponseText(w, []byte(fmt.Sprintf("url [%s] removed from [%s/%s]", removeUrl, dataType, id)), http.StatusAccepted, srv.config.Http)
 		return
 	}
 	err = srv.data.DeleteData(dataType, id)
@@ -342,7 +409,19 @@ drain:
 }
 
 // runSync 执行同步并记录结果；错误仅记日志，循环不中断。
+// SyncNow 立即做一次全量同步（测试与管理使用），与后台循环串行。
+func (srv *Server) SyncNow() error {
+	var result error
+	srv.runSync("manual", func() error {
+		result = srv.syncer.Sync()
+		return result
+	})
+	return result
+}
+
 func (srv *Server) runSync(what string, fn func() error) {
+	srv.syncLock.Lock()
+	defer srv.syncLock.Unlock()
 	srv.log.Printf("start %s sync", what)
 	if err := fn(); err != nil {
 		srv.log.Printf("%s sync failed, Error: %s", what, err)

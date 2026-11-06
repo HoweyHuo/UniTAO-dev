@@ -30,6 +30,8 @@ import (
 	"log"
 	"net/http"
 
+	"strings"
+
 	"Data"
 	"Data/DbConfig"
 	"Data/DbIface"
@@ -44,12 +46,15 @@ import (
 	SchemaPathData "github.com/salesforce/UniTAO/lib/SchemaPath/Data"
 	"github.com/salesforce/UniTAO/lib/Util"
 	"github.com/salesforce/UniTAO/lib/Util/Http"
+	"github.com/salesforce/UniTAO/lib/Util/Json"
 )
 
 type Handler struct {
 	log      *log.Logger
 	Db       DbIface.Database
 	SyncChan chan string // 非空时，inventory 记录写入成功后非阻塞投递 dsId 事件
+	// PinnedSources 把共享名固定给某个公钥指纹：该名字只给这个指纹使用（见 allocateSignedDsId）。
+	PinnedSources map[string]string
 }
 
 var InvTypes = map[string]bool{
@@ -71,12 +76,20 @@ func New(config DbConfig.DatabaseConfig, logger *log.Logger) (*Handler, error) {
 	if err != nil {
 		return nil, err
 	}
+	return NewWithDb(db, logger)
+}
+
+// NewWithDb 用已建立的数据库连接创建 Handler。
+func NewWithDb(db DbIface.Database, logger *log.Logger) (*Handler, error) {
+	if logger == nil {
+		logger = log.Default()
+	}
 	handler := Handler{
 		log: logger,
 		Db:  db,
 	}
 	handler.Db = db
-	err = handler.init()
+	err := handler.init()
 	if err != nil {
 		return nil, err
 	}
@@ -144,8 +157,7 @@ func (h *Handler) List(dataType string) ([]interface{}, *Http.HttpError) {
 	if err != nil {
 		return nil, err
 	}
-	// 分片（多 DS）时返回 {ds_name}/{id} 限定 id，不去重；单 DS 返回裸 id
-	multiDs := len(referral.DsInfos) > 1
+	// 始终返回 {ds}/{id} 限定 id，不去重：不同 vDS 的同 type 同 id 是不同的 record
 	idList := []interface{}{}
 	anySuccess := false
 	var lastErr string
@@ -180,11 +192,7 @@ func (h *Handler) List(dataType string) ([]interface{}, *Http.HttpError) {
 			if !ok || idStr == "" {
 				continue
 			}
-			if multiDs {
-				idList = append(idList, fmt.Sprintf("%s/%s", ds.Id, idStr))
-			} else {
-				idList = append(idList, idStr)
-			}
+			idList = append(idList, fmt.Sprintf("%s/%s", ds.Id, idStr))
 		}
 	}
 	if !anySuccess {
@@ -208,23 +216,72 @@ func (h *Handler) Get(dataType string, dataPath string) (interface{}, *Http.Http
 	if err != nil {
 		return nil, err
 	}
-	if len(referral.DsInfos) > 1 {
-		// 分片 type：路径首段为 {ds_name} 前缀，路由到指定 DataService
-		dsName, rest := Util.ParsePath(dataPath)
-		var pinDs *InvRecord.DataServiceInfo
-		for _, ds := range referral.DsInfos {
-			if ds.Id == dsName {
-				pinDs = ds
-				break
-			}
+	// 数据类型的查询路径始终为 {type}/{ds}/{id}：不同 vDS 的同 type 同 id 是不同的 record
+	dsName, rest := Util.ParsePath(dataPath)
+	var pinDs *InvRecord.DataServiceInfo
+	for _, ds := range referral.DsInfos {
+		if ds.Id == dsName {
+			pinDs = ds
+			break
 		}
-		if pinDs == nil {
-			return nil, Http.NewHttpError(fmt.Sprintf("unknown DataService=[%s] for type=[%s]", dsName, dataType), http.StatusBadRequest)
-		}
-		restId, restNext := Util.ParsePath(rest)
-		return h.getDataByPath(dataType, restId, restNext, pinDs)
 	}
-	return h.GetDataByPath(dataType, dataId, nextPath)
+	if pinDs == nil {
+		dsIds := []string{}
+		for _, ds := range referral.DsInfos {
+			dsIds = append(dsIds, ds.Id)
+		}
+		return nil, Http.NewHttpError(fmt.Sprintf("unknown DataService=[%s] for type=[%s]; query path is [%s/{ds}/{id}], ds in %v", dsName, dataType, dataType, dsIds), http.StatusBadRequest)
+	}
+	restId, restNext := Util.ParsePath(rest)
+	if restId == "" {
+		return h.listFromDs(pinDs, dataType)
+	}
+	return h.getDataByPath(dataType, restId, restNext, pinDs)
+}
+
+// listFromDs 列出指定 DS 上某类型的所有 id（带 {ds}/ 前缀）。
+func (h *Handler) listFromDs(ds *InvRecord.DataServiceInfo, dataType string) ([]interface{}, *Http.HttpError) {
+	dsUrl, e := ds.GetUrl()
+	if e != nil {
+		return nil, Http.NewHttpError(e.Error(), http.StatusInternalServerError)
+	}
+	urlPath, e := Http.URLPathJoin(dsUrl, dataType)
+	if e != nil {
+		return nil, Http.WrapError(e, "failed to build list url", http.StatusInternalServerError)
+	}
+	data, code, e := Http.GetRestData(*urlPath)
+	if e != nil {
+		return nil, Http.NewHttpError(e.Error(), code)
+	}
+	dsIds, ok := data.([]interface{})
+	if !ok {
+		return nil, Http.NewHttpError(fmt.Sprintf("list result from DS=[%s] is not an array", ds.Id), http.StatusInternalServerError)
+	}
+	result := []interface{}{}
+	for _, id := range dsIds {
+		if idStr, ok := id.(string); ok && idStr != "" {
+			result = append(result, fmt.Sprintf("%s/%s", ds.Id, idStr))
+		}
+	}
+	return result, nil
+}
+
+// dsServesType 判断 dsId 是否在 dataType 的 referral 中。
+func (h *Handler) dsServesType(dsId string, dataType string) bool {
+	record, err := h.GetReferralRecord(dataType)
+	if err != nil {
+		return false
+	}
+	referral, e := RefRecord.LoadMap(record.Data)
+	if e != nil {
+		return false
+	}
+	for _, id := range referral.DataServices {
+		if id == dsId {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *Handler) GetSchemaRecord(dataType string) (*Record.Record, *Http.HttpError) {
@@ -329,6 +386,16 @@ func (h *Handler) getDataByPath(dataType string, idPath string, nextPath string,
 		conn.FuncRecord = func(dt string, id string) (*Record.Record, *Http.HttpError) {
 			if dt == dataType && id == baseId {
 				return h.getRecordFromDs(pinDs, dataType, id)
+			}
+			// 引用按 vDS 优先解析：先在起始记录所在的 vDS 里找，找不到再全局查找
+			if dt != JsonKey.Schema && h.dsServesType(pinDs.Id, dt) {
+				record, err := h.getRecordFromDs(pinDs, dt, id)
+				if err == nil {
+					return record, nil
+				}
+				if err.Status != http.StatusNotFound {
+					return nil, err
+				}
 			}
 			return h.GetRecord(dt, id)
 		}
@@ -587,20 +654,15 @@ func (h *Handler) allocateDsId(record *Record.Record) *Http.HttpError {
 	if e != nil {
 		return Http.NewHttpError(e.Error(), http.StatusBadRequest)
 	}
-	existing, err := h.GetData(Schema.Inventory, record.Id)
+	if dsInfo.Signed() {
+		return h.allocateSignedDsId(record, dsInfo)
+	}
+	existingInfo, err := h.getDsInfoOrNil(record.Id)
 	if err != nil {
-		if err.Status == http.StatusNotFound {
-			return nil // 名字空闲
-		}
 		return err
 	}
-	existingMap, ok := existing.(map[string]interface{})
-	if !ok {
-		return Http.NewHttpError(fmt.Sprintf("inventory record [%s] invalid data", record.Id), http.StatusInternalServerError)
-	}
-	existingInfo, e := InvRecord.CreateDsInfo(existingMap)
-	if e != nil {
-		return Http.NewHttpError(e.Error(), http.StatusInternalServerError)
+	if existingInfo == nil {
+		return nil // 名字空闲
 	}
 	// 同 DS 重注册，或现有记录为 legacy（无 instanceId）由首个带 instanceId 的注册原地接管
 	if dsInfo.InstanceId != "" && (existingInfo.InstanceId == "" || existingInfo.InstanceId == dsInfo.InstanceId) {
@@ -613,6 +675,171 @@ func (h *Handler) allocateDsId(record *Record.Record) *Http.HttpError {
 	record.Id = newId
 	record.Data["dsId"] = newId
 	h.Log(fmt.Sprintf("DataService short name [%s] taken, allocated [%s]", dsInfo.Id, newId))
+	return nil
+}
+
+// fingerprintShort 返回指纹的前 8 位十六进制。
+func fingerprintShort(fingerprint string) string {
+	hexPart := strings.TrimPrefix(fingerprint, "SHA256:")
+	if len(hexPart) > 8 {
+		return hexPart[:8]
+	}
+	return hexPart
+}
+
+// DerivedDsId 返回撞名时由指纹派生的名字：{name}-{指纹前 8 位}。
+func DerivedDsId(name string, fingerprint string) string {
+	return fmt.Sprintf("%s-%s", name, fingerprintShort(fingerprint))
+}
+
+func (h *Handler) getDsInfoOrNil(dsId string) (*InvRecord.DataServiceInfo, *Http.HttpError) {
+	info, err := h.GetDsInfo(dsId)
+	if err != nil {
+		if err.Status == http.StatusNotFound {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return info, nil
+}
+
+// allocateSignedDsId 处理 shared / mirrored vDS 的注册。身份是公钥指纹（instanceId）：
+//   - 同一个指纹已经以别的名字注册过：合并进已有记录，作为副本（同一个来源不会被计入两次）；
+//     shared vDS 和它自己的镜像在同一个 Inventory 里也合并，kind 保持 shared
+//   - 名字空闲，或被同一指纹占用：使用这个名字；同指纹时合并 URL（副本）
+//   - 名字被别的指纹（或 local vDS）占用：改用 {name}-{指纹前 8 位}；
+//     若该名字被 PinnedSources 固定给当前指纹，则挤掉占用者（删除其记录，占用者重新注册时会得到派生名字）
+func (h *Handler) allocateSignedDsId(record *Record.Record, dsInfo *InvRecord.DataServiceInfo) *Http.HttpError {
+	fingerprint := dsInfo.InstanceId
+	if fingerprint == "" {
+		return Http.NewHttpError(fmt.Sprintf("%s vDS registration requires instanceId (public key fingerprint)", dsInfo.Kind), http.StatusBadRequest)
+	}
+	requested := record.Id
+	target := ""
+	allRecords, err := h.InvListData(Schema.Inventory)
+	if err != nil {
+		return err
+	}
+	for _, data := range allRecords {
+		info, e := InvRecord.CreateDsInfo(data[Record.Data])
+		if e != nil || !info.Signed() {
+			continue
+		}
+		if info.InstanceId == fingerprint && info.Id != requested {
+			h.Log(fmt.Sprintf("WARNING: vDS with fingerprint [%s] is already registered as [%s], merge registration of [%s] into it as a replica; check the alias configuration", fingerprint, info.Id, requested))
+			target = info.Id
+			break
+		}
+	}
+	if target == "" {
+		pinned, isPinned := h.PinnedSources[requested]
+		existing, err := h.getDsInfoOrNil(requested)
+		if err != nil {
+			return err
+		}
+		switch {
+		case isPinned && pinned != fingerprint:
+			target = DerivedDsId(requested, fingerprint)
+			h.Log(fmt.Sprintf("WARNING: name [%s] is pinned to [%s], register fingerprint [%s] as [%s]", requested, pinned, fingerprint, target))
+		case existing == nil:
+			target = requested
+		case existing.Signed() && existing.InstanceId == fingerprint:
+			target = requested
+		case isPinned && pinned == fingerprint:
+			h.Log(fmt.Sprintf("WARNING: name [%s] is pinned to [%s], evict current holder [%s]", requested, fingerprint, existing.InstanceId))
+			if e := h.Db.Delete(Schema.Inventory, map[string]interface{}{Record.DataType: Schema.Inventory, Record.DataId: requested}); e != nil {
+				return Http.WrapError(e, fmt.Sprintf("failed to evict inventory record [%s]", requested), http.StatusInternalServerError)
+			}
+			target = requested
+		default:
+			target = DerivedDsId(requested, fingerprint)
+			h.Log(fmt.Sprintf("WARNING: name [%s] is taken by [%s], register fingerprint [%s] as [%s]", requested, existing.InstanceId, fingerprint, target))
+		}
+	}
+	current, err := h.getDsInfoOrNil(target)
+	if err != nil {
+		return err
+	}
+	urls := dsInfo.URL
+	if current != nil {
+		if !current.Signed() || current.InstanceId != fingerprint {
+			return Http.NewHttpError(fmt.Sprintf("dsId [%s] is taken by another vDS, cannot register fingerprint [%s]", target, fingerprint), http.StatusConflict)
+		}
+		urls = mergeUrls(current.URL, dsInfo.URL)
+		// shared vDS 与它的镜像在同一个 Inventory 里合并成一条记录；有源头时 kind 保持 shared
+		if current.EffectiveKind() == InvRecord.KindShared {
+			record.Data["kind"] = InvRecord.KindShared
+		}
+	}
+	record.Id = target
+	record.Data["dsId"] = target
+	record.Data["url"] = toInterfaceList(urls)
+	return nil
+}
+
+// mergeUrls 保持已有顺序，追加新的 URL。
+func mergeUrls(existing []string, added []string) []string {
+	seen := map[string]bool{}
+	result := []string{}
+	for _, list := range [][]string{existing, added} {
+		for _, url := range list {
+			if url == "" || seen[url] {
+				continue
+			}
+			seen[url] = true
+			result = append(result, url)
+		}
+	}
+	return result
+}
+
+func toInterfaceList(list []string) []interface{} {
+	result := make([]interface{}, 0, len(list))
+	for _, item := range list {
+		result = append(result, item)
+	}
+	return result
+}
+
+// RemoveDsUrl 从 inventory 记录中移除一个 URL（vDS 从某个实例上删除）；没有剩余 URL 时删除整条记录。
+func (h *Handler) RemoveDsUrl(dsId string, url string) *Http.HttpError {
+	info, err := h.getDsInfoOrNil(dsId)
+	if err != nil {
+		return err
+	}
+	if info == nil {
+		return nil
+	}
+	remaining := []string{}
+	for _, item := range info.URL {
+		if item != url {
+			remaining = append(remaining, item)
+		}
+	}
+	if len(remaining) == len(info.URL) {
+		return nil
+	}
+	if len(remaining) == 0 {
+		return h.DeleteData(Schema.Inventory, dsId)
+	}
+	info.URL = remaining
+	return h.ReplaceDsInfo(info)
+}
+
+// ReplaceDsInfo 覆盖写入一条 inventory 记录（不做名字分配）。
+func (h *Handler) ReplaceDsInfo(info *InvRecord.DataServiceInfo) *Http.HttpError {
+	dsMap, e := Json.CopyToMap(info)
+	if e != nil {
+		return Http.WrapError(e, "failed to copy ds info", http.StatusInternalServerError)
+	}
+	record := Record.NewRecord(Schema.Inventory, InvRecord.LatestVer, info.Id, dsMap)
+	e = h.Db.Replace(Schema.Inventory, map[string]interface{}{
+		Record.DataType: Schema.Inventory,
+		Record.DataId:   info.Id,
+	}, record.Map())
+	if e != nil {
+		return Http.NewHttpError(e.Error(), http.StatusInternalServerError)
+	}
 	return nil
 }
 

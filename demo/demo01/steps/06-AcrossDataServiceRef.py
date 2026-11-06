@@ -14,15 +14,15 @@ print("""
 
 input("press ANY key to continue...")
 
-print("get http://localhost:8002/schema")
+print("get http://localhost:8002/local/schema")
 
-resp = requests.get("http://localhost:8002/schema")
+resp = requests.get("http://localhost:8002/local/schema")
 
 print(json.dumps(resp.json(), indent=4))
 
-print("get http://localhost:8002/schema/VmHost")
+print("get http://localhost:8002/local/schema/VmHost")
 
-resp = requests.get("http://localhost:8002/schema/VmHost")
+resp = requests.get("http://localhost:8002/local/schema/VmHost")
 
 print(json.dumps(resp.json(), indent=4))
 
@@ -42,9 +42,9 @@ vmHost = {
         "nic": []
     }
 }
-print("post http://localhost:8002 {}".format(json.dumps(vmHost, indent=4)))
+print("post http://localhost:8002/local {}".format(json.dumps(vmHost, indent=4)))
 
-resp = requests.post("http://localhost:8002", json=vmHost)
+resp = requests.post("http://localhost:8002/local", json=vmHost)
 
 print(resp.text)
 
@@ -76,10 +76,10 @@ nicEth001 = {
 print("""
 try to add not exists network card
 
-PATCH http://localhost:8002/VmHost/vmhost-test01/nic nic-eth1000-aef
+PATCH http://localhost:8002/local/VmHost/vmhost-test01/nic nic-eth1000-aef
 """)
 
-resp = requests.patch("http://localhost:8002/VmHost/vmhost-test01/nic", "nic-eth1000-aef")
+resp = requests.patch("http://localhost:8002/local/VmHost/vmhost-test01/nic", "nic-eth1000-aef")
 
 print(json.dumps(resp.json(), indent=4))
 
@@ -88,10 +88,10 @@ input("press ANY key to continue...")
 print("""
 Add Network Card entity [nic-eth1000-aef]
 
-POST http://localhost:8001 {}
+POST http://localhost:8001/local {}
 """.format(json.dumps(nicEth001, indent=4)))
 
-resp = requests.post("http://localhost:8001", json=nicEth001)
+resp = requests.post("http://localhost:8001/local", json=nicEth001)
 
 print(resp.text)
 
@@ -99,10 +99,10 @@ input("press ANY key to continue...")
 
 print("""
 Add reference to NetworkCard [nic-eth1000-aef]
-PATCH http://localhost:8002/VmHost/vmhost-test01/nic nic-eth1000-aef
+PATCH http://localhost:8002/local/VmHost/vmhost-test01/nic nic-eth1000-aef
 """)
 
-resp = requests.patch("http://localhost:8002/VmHost/vmhost-test01/nic", "nic-eth1000-aef")
+resp = requests.patch("http://localhost:8002/local/VmHost/vmhost-test01/nic", "nic-eth1000-aef")
 
 print(json.dumps(resp.json(), indent=4))
 
@@ -123,23 +123,23 @@ input("press ANY key to continue...")
 
 print("""
 Add reference to Virtual Hard Disk
-    PATCH http://localhost:8002/VmHost/vmhost-test01/virtualHardDisk vhd-wireguard-01-sys
+    PATCH http://localhost:8002/local/VmHost/vmhost-test01/virtualHardDisk vhd-wireguard-01-sys
 """)
-resp = requests.patch("http://localhost:8002/VmHost/vmhost-test01/virtualHardDisk", "vhd-wireguard-01-sys")
+resp = requests.patch("http://localhost:8002/local/VmHost/vmhost-test01/virtualHardDisk", "vhd-wireguard-01-sys")
 print(json.dumps(resp.json(), indent=4))
 
 print("""
 Add reference to VmLink
-    PATCH http://localhost:8002/VmHost/vmhost-test01/vmLink vm-srv-wireguard-01-link-ext
+    PATCH http://localhost:8002/local/VmHost/vmhost-test01/vmLink vm-srv-wireguard-01-link-ext
 """)
 
-resp = requests.patch("http://localhost:8002/VmHost/vmhost-test01/vmLink", "vm-srv-wireguard-01-link-ext")
+resp = requests.patch("http://localhost:8002/local/VmHost/vmhost-test01/vmLink", "vm-srv-wireguard-01-link-ext")
 print(json.dumps(resp.json(), indent=4))
 
 print("""
 Add referenceto Virtual Machine
-    PATCH http://localhost:8002/VmHost/vmhost-test01/virtualMachine vm-srv-wireguard-01
+    PATCH http://localhost:8002/local/VmHost/vmhost-test01/virtualMachine vm-srv-wireguard-01
 """)
 
-resp = requests.patch("http://localhost:8002/VmHost/vmhost-test01/virtualMachine", "vm-srv-wireguard-01")
+resp = requests.patch("http://localhost:8002/local/VmHost/vmhost-test01/virtualMachine", "vm-srv-wireguard-01")
 print(json.dumps(resp.json(), indent=4))

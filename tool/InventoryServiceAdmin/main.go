@@ -74,7 +74,7 @@ func ArgHandler() (string, *AdminArgs, error) {
 	var logPath string
 	addCmd := flag.NewFlagSet(CMD_ADD, flag.ExitOnError)
 	addDbConfig := addCmd.String("config", "", "database connection config")
-	addDs := addCmd.String(CMD_DS, "", "data service url to be registered with inventory service")
+	addDs := addCmd.String(CMD_DS, "", "vDS url to be registered with inventory service, including the vDS path, e.g. http://host:8001/local")
 	addDsId := addCmd.String(CMD_DS_ID, "", "data service unique id within Inventory Service")
 	CustomLogger.AddLogParam(addCmd, &logPath)
 

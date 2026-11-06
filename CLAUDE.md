@@ -32,7 +32,7 @@ UniTAO 是一个基于 Schema 驱动的多节点异构基础设施清单管理�
 
 UniTAO 由两类服务组成：
 
-- **Data Service** — 数据节点，负责具体数据的 CRUD 操作、Schema 校验、变更日志记录和逐记录锁。每个 Data Service 实例连接一个数据库（DynamoDB、MongoDB 或本地文件），管理自己域内的数据。它是"存数据"的地方。
+- **Data Service** — 数据节点，负责具体数据的 CRUD 操作、Schema 校验、写入后处理（Journal）和逐记录锁。每个 Data Service 实例连接一个数据库（DynamoDB、MongoDB 或本地文件），管理自己域内的数据。它是"存数据"的地方。
 - **Inventory Service** — 聚合/查询节点，负责注册多个 Data Service、同步它们的 Schema、并提供跨 Data Service 的交叉引用查询。上层应用只需与 Inventory Service 对话，不需要知道数据分散在多少个 DS 上。它是"查数据"的地方。
 
 这种分离带来了几个关键优势：
@@ -85,35 +85,58 @@ UniTAO 由两类服务组成：
 
 5. **DataServiceProxy**：Inventory Service 内部通过 `DataServiceProxy` 将跨 DS 的引用查询代理到目标 Data Service。上层应用提交查询后，Inventory Service 根据引用的 `__ref__` 记录自动路由到正确的 DS 实例。
 
-6. **变更日志**：数据变更被记录日志，用于审计跟踪和跨服务同步。
+6. **Journal（变更队列）**：Data Service 内部的异步任务队列，用来执行写入后的副作用，**不是审计日志**。
+   - `DataHandler` 每次增 / 删 / 改 / PATCH 成功后调用 `AddJournal(type, id, before, after)`，按 `(type, id)` 分页存进 DS 自己的库。
+   - `JournalHandler` 为每个 `(type, id)` 起一个 `JournalWorker`，按顺序把 entry 交给 `LoadProcesses` 注册的 `JournalProcess`。顺序只在单条记录内保证，没有全局序号。
+   - 一页 entry 全部处理完、head 前移时，这一页会被删除（`JournalHeadForward` → `removeJournal`），不保留历史。
+   - 内置两个 process，都服务于 `indexTemplate`：`SchemaChanges` 在 schema 注册或删除时，经 Inventory 在被引用类型的 `cmtIdx` 里登记或撤销订阅；`CmtIndexChanges` 在数据变化时回填或清理被引用记录上的反向索引，可能跨 DS PATCH。shared vDS 另外注册 `Share.ChannelPublish`（排在内置 process 之后），把变更写进 outbox 供发布。mirrored vDS 没有 Journal。
+   - 要给写入加新的后续处理（如向外推送变更），就实现一个 `JournalProcess` 并在 `LoadProcesses` 里注册。不过 Journal 处理完就删，不能用来回放或审计。
+
+7. **虚拟 Data Service（vDS）**：一个 DS 实例上承载多个 vDS，每个 vDS 有独立的表、schema、Journal、锁，在 Inventory 中各自注册为一个 DS。
+   - `local`（表 `table.data`）：本网数据，不共享。config 没有 `vds` 段时默认只有它。
+   - `shared/{name}`（表 `{table.data}_shared_{name}`）：经 Communication Channel 发布给其它网络，可写。只能引用同一个 shared vDS 内的记录（`Handler.RefLocalOnly`）。
+   - `mirrored/{name}`（表 `{table.data}_mirrored_{name}`）：别的网络的 shared 的只读副本（`Handler.ReadOnly`，写返回 405），没有 Journal。
+   - 记录身份是 `(vDS, __type, __id)`；local 与各 shared 的 schema 各存一份，互不共用。
+   - 代码：`DataServer/vds.go`（每个 vDS 的初始化、删除、`/{vDS}/config`）、`Share/`（outbox、`ChannelPublish` JournalProcess、发布器 `Publisher`、镜像同步器 `Mirror`）、`Channel/`（`dir` / `git` 通道、ed25519 签名的 manifest、可选 X25519 加密）、`DataHandler/apply.go`（镜像侧直接写入，跳过引用校验）。
+   - 发布：写入 → Journal → outbox（无空洞的 seq，先写记录再推进计数器）→ `Publisher` 按连续 seq 发 segment，定期发 snapshot；发布前与通道对账（通道领先则追上，通道落后则先发 snapshot）。
+   - 镜像：`Mirror` 从 `state.json` 中的 cursor 拉取，校验来源指纹与文件 hash；通道无法连续提供时从最新 snapshot 重建。
+   - 运行时状态在 `state.json` 的 `vds` 下（每个 vDS 的 `initialized`、`table`、Inventory 分配的 id、镜像 cursor）。从 config 删除 mirrored 并重启会删表并从 Inventory 注销其 URL：待注销的 URL 先记进 `state.json` 的 `unregister`，启动时注销完才开始注册当前的 vDS（否则改 alias 后的新名字会因指纹相同被合并进旧记录）。撞名被改名的镜像，给它配 `alias` 即可让 DS 路径和 Inventory 的 dsId 一致，但同一来源的所有副本要用同一个 alias。
+   - 签名密钥与加密密钥用 `DataServiceAdmin keygen|fingerprint|enckey` 生成。
 
 ### REST API 概览
 
 Data Service 和 Inventory Service 均通过 HTTP JSON API 对外暴露。
 
-两个服务的 URL 都是 `/{type}[/{id}]` 形式，**没有 `/data` 或 `/inv` 前缀**，也无 `/ds/...` 之类的管理端点。
+Data Service 的 URL 是 `/{vDS}/{type}[/{id}]`（`{vDS}` 为 `local`、`shared/{name}`、`mirrored/{name}`），不兼容旧的无前缀形式。Inventory Service 的 URL 是 `/{type}[/{ds}/{id}]`。两者都**没有 `/data` 或 `/inv` 前缀**，也无 `/ds/...` 之类的管理端点。
 
 | 服务 | 方法 | 端点 | 说明 |
 |------|------|------|------|
-| Data Service | `POST` | `/` | 创建 Record，类型取自 body 的 `__type` |
-| Data Service | `GET` | `/{type}` | 列出该类型的所有 `__id` |
-| Data Service | `GET` | `/{type}/{id}[/{attrPath}]` | 查询 Record，可带属性路径深入 |
-| Data Service | `PUT` | `/{type}/{id}` | 替换 Record |
-| Data Service | `PATCH` | `/{type}/{id}[/{attrPath}]` | 部分更新 Record |
-| Data Service | `DELETE` | `/{type}/{id}` | 删除 Record |
-| Data Service | `GET` | `/schema[/{type}]` | 列出 / 查询已注册的 Schema |
-| Inventory Service | `GET` | `/{type}[/{id}]` | 跨 DS 查询 Record，自动路由并沿引用展开 |
+| Data Service | `GET` | `/` | 列出 vDS 路径；`/shared`、`/mirrored` 列出该组的名字 |
+| Data Service | `GET` | `/{vDS}` | `["config", "schema", <data types>]` |
+| Data Service | `GET` | `/{vDS}/config` | 该 vDS 的设置与状态（kind、表、通道、发布/同步进度），不含密钥 |
+| Data Service | `POST` | `/{vDS}` | 创建 Record，类型取自 body 的 `__type` |
+| Data Service | `GET` | `/{vDS}/{type}` | 列出该类型的所有 `__id` |
+| Data Service | `GET` | `/{vDS}/{type}/{id}[/{attrPath}]` | 查询 Record，可带属性路径深入 |
+| Data Service | `PUT` | `/{vDS}/{type}/{id}` | 替换 Record |
+| Data Service | `PATCH` | `/{vDS}/{type}/{id}[/{attrPath}]` | 部分更新 Record；请求体是 JSON 值（字符串发 `"abc"`），不是合法 JSON 时按原文本处理 |
+| Data Service | `DELETE` | `/{vDS}/{type}/{id}` | 删除 Record |
+| Data Service | `GET` | `/{vDS}/schema[/{type}]` | 列出 / 查询已注册的 Schema |
+| Inventory Service | `GET` | `/{type}` | 列出所有 DS 上该类型的 id，**始终**为 `{ds}/{id}` |
+| Inventory Service | `GET` | `/{type}/{ds}[/{id}[/{attrPath}]]` | 跨 DS 查询 Record，必须带 ds；沿引用展开时先在起始记录的 vDS 内找，找不到再全局查找 |
 | Inventory Service | `GET` | `/schema` | 列出所有已同步的类型 |
 | Inventory Service | `GET` | `/referral[/{type}]` | 查询类型到 Data Service 的映射 |
 | Inventory Service | `PUT` | `/` | 注册 / 更新 Data Service（body 为 `inventory` 类型的 Record） |
 | Inventory Service | `POST` | `/referral` | Data Service 上报类型变更事件，触发同步 |
 | Inventory Service | `DELETE` | `/{type}/{id}` | 删除 Inventory 本地记录（如 `inventory/{ds-id}`） |
+| Inventory Service | `DELETE` | `/inventory/{dsId}?url={url}` | 只移除一个副本 URL，没有剩余 URL 时删除整条记录 |
+
+**Inventory 中签名 vDS 的注册**（`allocateSignedDsId`）：shared / mirrored 以名字 + 来源公钥指纹（`instanceId`）注册。同名同指纹（镜像副本、shared 与它自己的镜像）合并 URL 成一条记录，有 shared 时 kind 保持 shared；同名不同指纹的后来者改名为 `{name}-{指纹前 8 位}`；同指纹不同名合并进已有记录；`pinnedSources` 把名字固定给某个指纹。sync 时按各副本 `/config` 的 cursor 给 URL 排序（shared 源头最前）。同一类型同版本的 schema 在不同 DS 上内容不同时，后来的 DS 不进入该类型的 referral（D6）。
 
 Data Service 的路径查询引擎还支持 `?schema`（显示当前路径的 schema）、`?flat`（只显示当前层）、`?iterator`（列出各叶子可选值），以及用 `[*]` 通配数组/映射的下标。
 
 **Schema 不能 PUT 或 PATCH，只能 POST 新版本升级。** 对 `/schema/...` 发 PUT（`Handler.Set` 拒绝所有 `InternalTypes`）或 PATCH（`Handler.Patch` 单独拦 `schema`）都会返回 400 `method[...] on type[schema] is not allowed`。要修改 schema，用 `POST /` 提交同 id、更高 `version` 的 schema record：`Handler.Add` 会把当前版本归档为 archived id 再写入新版本；版本相同或更低都会被拒，也不能直接 POST 一个 archived id。这样按旧版本写入的数据仍能找到它的 schema。`Handler.Patch` 不能拦全部 `InternalTypes`，因为日志处理器要经它（可能跨 DS 走 HTTP）PATCH `CmtIdx`。
 
-Data Service 启动时会通过 `PUT /` 把自身注册到 Inventory Service（`DataServer/selfRegister.go`）；Inventory 侧不必也不存在 `POST /ds/register` 端点。
+Data Service 启动时会为每个 vDS 通过 `PUT /` 注册到 Inventory Service（`DataServer/selfRegister.go`），URL 为 `{ds.urls}/{vDS 路径}`，之后每 `SelfRegCheckSec` 复查一次；Inventory 侧不必也不存在 `POST /ds/register` 端点。
 
 ### 网络安全模型与访问控制
 
@@ -142,7 +165,9 @@ src/                           # 源码包（无 main）
   DataService/                 # Data Service 核心 — CRUD 处理器、日志、锁、配置、HTTP 服务
     DataHandler/               # Record 校验、CRUD 操作、跨 DS 代理
     DataServer/                # HTTP 服务器及 REST 端点路由
-    DataJournal/               # 数据变更日志跟踪
+    DataJournal/               # 写入后的异步处理队列（驱动 indexTemplate / cmtIdx / 共享发布）
+    Channel/                   # Communication Channel：dir / git，签名与加密
+    Share/                     # shared 发布（outbox + Publisher）与 mirrored 同步（Mirror）
     DataLock/                  # 并发访问的逐记录锁
   InventoryService/            # Inventory Service 核心 — 跨 DS 查询路由
     DataHandler/               # DS 注册、Schema 同步、交叉引用查询
@@ -164,6 +189,7 @@ test/                          # 集成测试与单元测试
     SchemaPathTest/            # 路径查询引擎测试
     UtilTest/                  # 工具函数测试
     DataServiceTest/           # 集成测试（需要运行中的服务）
+    VdsTest/                   # vDS / Channel 测试：进程内起 DS + Inventory（内存库 MemDb），含 git 通道
 ```
 
 ### 辅助目录

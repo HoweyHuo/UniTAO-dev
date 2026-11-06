@@ -50,6 +50,7 @@ type JournalHandler struct {
 	OpsCtrl     *Thread.ThreadCtrl
 	log         *log.Logger
 	processList []ProcessIface.JournalProcess
+	extra       []ProcessIface.JournalProcess
 }
 
 func LoadProcesses(data *DataHandler.Handler, log *log.Logger) ([]ProcessIface.JournalProcess, error) {
@@ -78,11 +79,13 @@ func (o *JournalHandler) getProcessList() error {
 	if err != nil {
 		return err
 	}
-	o.processList = processList
+	o.processList = append(processList, o.extra...)
 	return nil
 }
 
-func NewJournalHandler(data *DataHandler.Handler, lib *JournalLib, logger *log.Logger) (*JournalHandler, error) {
+// NewJournalHandler 创建 Journal 处理器。extra 为追加在内置 process 之后的处理器
+// （例如 shared vDS 的 ChannelPublish）。
+func NewJournalHandler(data *DataHandler.Handler, lib *JournalLib, logger *log.Logger, extra ...ProcessIface.JournalProcess) (*JournalHandler, error) {
 	if logger == nil {
 		logger = log.Default()
 	}
@@ -91,6 +94,7 @@ func NewJournalHandler(data *DataHandler.Handler, lib *JournalLib, logger *log.L
 		lib:     lib,
 		OpsCtrl: Thread.NewThreadController(logger),
 		log:     logger,
+		extra:   extra,
 	}
 	journal.Log("Created")
 	err := journal.getProcessList()

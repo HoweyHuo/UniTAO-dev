@@ -22,10 +22,10 @@ input("press ANY KEY to continue...")
 
 print("""
 Current VirtualMachine Schema:
-GET http://localhost:8001/schema/VirtualMachine
+GET http://localhost:8001/local/schema/VirtualMachine
 """)
 
-resp = requests.get("http://localhost:8001/schema/VirtualMachine")
+resp = requests.get("http://localhost:8001/local/schema/VirtualMachine")
 print(json.dumps(resp.json(), indent=4))
 
 print("""
@@ -118,8 +118,8 @@ vmSchemaV2 = {
         }
     }
 }
-print("POST http://localhost:8001 {}".format(json.dumps(vmSchemaV2, indent=4)))
-resp = requests.post("http://localhost:8001", json=vmSchemaV2)
+print("POST http://localhost:8001/local {}".format(json.dumps(vmSchemaV2, indent=4)))
+resp = requests.post("http://localhost:8001/local", json=vmSchemaV2)
 print(resp.text)
 
 input("press ANY KEY to continue...")
@@ -150,19 +150,19 @@ vm = {
     }
 }
 
-print("POST http://localhost:8001 {}".format(json.dumps(vm, indent=4)))
-resp = requests.post("http://localhost:8001", json=vm)
+print("POST http://localhost:8001/local {}".format(json.dumps(vm, indent=4)))
+resp = requests.post("http://localhost:8001/local", json=vm)
 print(resp.text)
 
-print("get http://localhost:8002/VmHost/vmhost-test01")
-resp = requests.get("http://localhost:8002/VmHost/vmhost-test01")
+print("get http://localhost:8002/local/VmHost/vmhost-test01")
+resp = requests.get("http://localhost:8002/local/VmHost/vmhost-test01")
 print(json.dumps(resp.json(), indent=4))
 
 print("sleep 3 second")
 time.sleep(3)
 
-print("get http://localhost:8002/VmHost/vmhost-test01")
-resp = requests.get("http://localhost:8002/VmHost/vmhost-test01")
+print("get http://localhost:8002/local/VmHost/vmhost-test01")
+resp = requests.get("http://localhost:8002/local/VmHost/vmhost-test01")
 print(json.dumps(resp.json(), indent=4))
 
 input("press ANY KEY to continue...")
@@ -205,14 +205,14 @@ vhdList = [
 ]
 
 for vhd in vhdList:
-    print("POST http://localhost:8001 {}".format(json.dumps(vhd, indent=4)))
-    resp = requests.post("http://localhost:8001", json=vhd)
+    print("POST http://localhost:8001/local {}".format(json.dumps(vhd, indent=4)))
+    resp = requests.post("http://localhost:8001/local", json=vhd)
     
 print("sleep 3 second")
 time.sleep(3)
 
-print("GET http://localhost:8001/VirtualMachine/vm-test01")
-resp = requests.get("http://localhost:8001/VirtualMachine/vm-test01")
+print("GET http://localhost:8001/local/VirtualMachine/vm-test01")
+resp = requests.get("http://localhost:8001/local/VirtualMachine/vm-test01")
 print(json.dumps(resp.json(), indent=4))
 
 print("""
@@ -228,15 +228,15 @@ dataStorage = {
     "virtualDrive": [],
     "device": []
 }
-print("PATCH http://localhost:8001/VirtualMachine/vm-test01/storage {}".format(json.dumps(dataStorage, indent=4)))
-resp = requests.patch("http://localhost:8001/VirtualMachine/vm-test01/storage", json=dataStorage)
+print("PATCH http://localhost:8001/local/VirtualMachine/vm-test01/storage {}".format(json.dumps(dataStorage, indent=4)))
+resp = requests.patch("http://localhost:8001/local/VirtualMachine/vm-test01/storage", json=dataStorage)
 print(json.dumps(resp.json(), indent=4))
 
 print("sleep for 3 second")
 time.sleep(3)
 
-print("get http://localhost:8001/VirtualMachine/vm-test01")
-resp = requests.get("http://localhost:8001/VirtualMachine/vm-test01")
+print("get http://localhost:8001/local/VirtualMachine/vm-test01")
+resp = requests.get("http://localhost:8001/local/VirtualMachine/vm-test01")
 print(json.dumps(resp.json(), indent=4))
 
 input("press ANY KEY to continue...")
@@ -248,19 +248,19 @@ print("""
 """)
 input("press ANY KEY to continue...")
 
-print("delete http://localhost:8001/VirtualHardDisk/vhd-vm-test01-sys")
-resp = requests.delete("http://localhost:8001/VirtualHardDisk/vhd-vm-test01-sys")
+print("delete http://localhost:8001/local/VirtualHardDisk/vhd-vm-test01-sys")
+resp = requests.delete("http://localhost:8001/local/VirtualHardDisk/vhd-vm-test01-sys")
 print("status code: [{}]".format(resp.status_code))
 
-print("get http://localhost:8001/VirtualMachine/vm-test01")
-resp = requests.get("http://localhost:8001/VirtualMachine/vm-test01")
+print("get http://localhost:8001/local/VirtualMachine/vm-test01")
+resp = requests.get("http://localhost:8001/local/VirtualMachine/vm-test01")
 print(json.dumps(resp.json(), indent=4))
 
 print("sleep for 3 second")
 time.sleep(3)
 
-print("get http://localhost:8001/VirtualMachine/vm-test01")
-resp = requests.get("http://localhost:8001/VirtualMachine/vm-test01")
+print("get http://localhost:8001/local/VirtualMachine/vm-test01")
+resp = requests.get("http://localhost:8001/local/VirtualMachine/vm-test01")
 print(json.dumps(resp.json(), indent=4))
 
 input("press ANY KEY to continue...")
@@ -283,17 +283,17 @@ vm = {
         "host": "vmhost-test01"
     }
 }
-print("POST http://localhost:8001 {}".format(json.dumps(vm, indent=4)))
-resp = requests.post("http://localhost:8001", json=vm)
+print("POST http://localhost:8001/local {}".format(json.dumps(vm, indent=4)))
+resp = requests.post("http://localhost:8001/local", json=vm)
 print(resp.text)
 
-print("get http://localhost:8001/VirtualMachine/vm-test01")
-resp = requests.get("http://localhost:8001/VirtualMachine/vm-test01")
+print("get http://localhost:8001/local/VirtualMachine/vm-test01")
+resp = requests.get("http://localhost:8001/local/VirtualMachine/vm-test01")
 print(json.dumps(resp.json(), indent=4))
 
 print("sleep for 6 second")
 time.sleep(6)
 
-print("get http://localhost:8001/VirtualMachine/vm-test01")
-resp = requests.get("http://localhost:8001/VirtualMachine/vm-test01")
+print("get http://localhost:8001/local/VirtualMachine/vm-test01")
+resp = requests.get("http://localhost:8001/local/VirtualMachine/vm-test01")
 print(json.dumps(resp.json(), indent=4))

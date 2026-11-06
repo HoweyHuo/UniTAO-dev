@@ -1,0 +1,19 @@
+{
+    "database": {
+        "type": "dynamodb",
+        "dynamodb": { "region": "us-west-2", "endpoint": "http://dynamodb:8000" }
+    },
+    "table": { "data": "SiteB" },
+    "http": { "type": "http", "dns": "site-b-ds", "port": "80", "id": "SiteB", "headers": {} },
+    "ds": { "id": "SiteB", "urls": ["http://site-b-ds", "http://localhost:8021"] },
+    "inventory": { "url": "http://site-b-inv" },
+    "vds": {
+        "local": {},
+        "mirrored": [{
+            "name": "catalog",
+            "trustedFingerprint": "__TRUSTED_FINGERPRINT__",
+            "pullIntervalSec": 10,
+            "channel": { "type": "dir", "path": "/opt/UniTAO/exchange" }
+        }]
+    }
+}

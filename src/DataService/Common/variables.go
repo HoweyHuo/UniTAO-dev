@@ -34,6 +34,8 @@ import (
 
 var InternalTypes = map[string]interface{}{
 	KeyJournal:                true,
+	KeyOutbox:                 true,
+	KeyChannelState:           true,
 	CmtIndex.KeyCmtIdx:        true,
 	CmtIndex.KeyCmtSubscriber: true,
 	JsonKey.Schema:            true,
@@ -41,5 +43,12 @@ var InternalTypes = map[string]interface{}{
 }
 
 var ReadOnlyTypes = map[string]interface{}{
-	KeyJournal: true,
+	KeyJournal:      true,
+	KeyOutbox:       true,
+	KeyChannelState: true,
+}
+
+// ReservedTypeNames 是 vDS 路径下有特殊含义、不能注册成数据类型的名字：/{vDS}/config、/{vDS}/schema。
+var ReservedTypeNames = map[string]interface{}{
+	KeyConfig: true,
 }

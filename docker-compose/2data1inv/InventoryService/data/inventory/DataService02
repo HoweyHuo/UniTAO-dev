@@ -6,8 +6,8 @@
         "dsId": "DataService02",
         "lastSynctime": "",
         "url": [
-            "http://unitao-data-service02",
-            "http://localhost:8002"
+            "http://unitao-data-service02/local",
+            "http://localhost:8002/local"
         ]
     }
 }

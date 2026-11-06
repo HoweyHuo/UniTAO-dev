@@ -1,0 +1,66 @@
+# 两个相互隔离的网络：siteA 共享 catalog，siteB 镜像它。两边只通过 ./exchange 目录（dir 通道）交换数据。
+# 先运行 ./setup.sh 生成签名密钥和 SiteB 的配置。
+services:
+  dynamodb:
+    image: amazon/dynamodb-local:latest
+    container_name: sm-dynamodb
+    restart: always
+    command: "-jar DynamoDBLocal.jar -inMemory -sharedDb"
+    networks: [siteA, siteB]
+
+  site-a-ds:
+    image: ${UNITAO_IMAGE:-ghcr.io/howeyhuo/unitao-dev:latest}
+    container_name: sm-site-a-ds
+    restart: always
+    volumes:
+      - ./SiteA/ds:/opt/UniTAO/config
+      - ./keys:/opt/UniTAO/keys:ro
+      - ./exchange:/opt/UniTAO/exchange
+      - ./logs:/opt/UniTAO/log
+    ports:
+      - "8011:80"
+    depends_on: [dynamodb]
+    networks: [siteA]
+    command: "DataService -id SiteA -config /opt/UniTAO/config/config.json -log /opt/UniTAO/log"
+
+  site-a-inv:
+    image: ${UNITAO_IMAGE:-ghcr.io/howeyhuo/unitao-dev:latest}
+    container_name: sm-site-a-inv
+    restart: always
+    volumes:
+      - ./SiteA/inv:/opt/UniTAO/config
+      - ./logs:/opt/UniTAO/log
+    ports:
+      - "8014:80"
+    networks: [siteA]
+    command: "InventoryService -config /opt/UniTAO/config/config.json -log /opt/UniTAO/log"
+
+  site-b-ds:
+    image: ${UNITAO_IMAGE:-ghcr.io/howeyhuo/unitao-dev:latest}
+    container_name: sm-site-b-ds
+    restart: always
+    volumes:
+      - ./SiteB/ds:/opt/UniTAO/config
+      - ./exchange:/opt/UniTAO/exchange:ro
+      - ./logs:/opt/UniTAO/log
+    ports:
+      - "8021:80"
+    depends_on: [dynamodb]
+    networks: [siteB]
+    command: "DataService -id SiteB -config /opt/UniTAO/config/config.json -log /opt/UniTAO/log"
+
+  site-b-inv:
+    image: ${UNITAO_IMAGE:-ghcr.io/howeyhuo/unitao-dev:latest}
+    container_name: sm-site-b-inv
+    restart: always
+    volumes:
+      - ./SiteB/inv:/opt/UniTAO/config
+      - ./logs:/opt/UniTAO/log
+    ports:
+      - "8024:80"
+    networks: [siteB]
+    command: "InventoryService -config /opt/UniTAO/config/config.json -log /opt/UniTAO/log"
+
+networks:
+  siteA: {}
+  siteB: {}

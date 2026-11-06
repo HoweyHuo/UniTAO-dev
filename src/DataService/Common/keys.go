@@ -27,5 +27,8 @@ This copyright notice and license applies to all files in this directory or sub-
 package Common
 
 const (
-	KeyJournal = "journal"
+	KeyJournal      = "journal"
+	KeyOutbox       = "outbox"
+	KeyChannelState = "channelState"
+	KeyConfig       = "config"
 )

@@ -1,0 +1,20 @@
+{
+    "database": {
+        "type": "dynamodb",
+        "dynamodb": { "region": "us-west-2", "endpoint": "http://dynamodb:8000" }
+    },
+    "table": { "data": "SiteA" },
+    "http": { "type": "http", "dns": "site-a-ds", "port": "80", "id": "SiteA", "headers": {} },
+    "ds": { "id": "SiteA", "urls": ["http://site-a-ds", "http://localhost:8011"] },
+    "inventory": { "url": "http://site-a-inv" },
+    "vds": {
+        "local": {},
+        "shared": [{
+            "name": "catalog",
+            "signingKeyFile": "/opt/UniTAO/keys/catalog.pem",
+            "publishIntervalSec": 5,
+            "snapshotIntervalSec": 60,
+            "channel": { "type": "dir", "path": "/opt/UniTAO/exchange" }
+        }]
+    }
+}

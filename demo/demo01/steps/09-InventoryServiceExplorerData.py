@@ -14,19 +14,19 @@ input("press ANY key to continue...")
 
 print("Get Data virtual machine from Data Service 01 and Inventory Service")
 
-print("get http://localhost:8001/VirtualMachine")
+print("get http://localhost:8001/local/VirtualMachine")
 
-resp = requests.get("http://localhost:8001/VirtualMachine")
+resp = requests.get("http://localhost:8001/local/VirtualMachine")
 print(json.dumps(resp.json(), indent=4))
 
-print("get http://localhost:8001/VirtualMachine/vm-srv-wireguard-01")
+print("get http://localhost:8001/local/VirtualMachine/vm-srv-wireguard-01")
 
-resp = requests.get("http://localhost:8001/VirtualMachine/vm-srv-wireguard-01")
+resp = requests.get("http://localhost:8001/local/VirtualMachine/vm-srv-wireguard-01")
 print(json.dumps(resp.json(), indent=4))
 
-print("get http://localhost:8004/VirtualMachine/vm-srv-wireguard-01")
+print("get http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01")
 
-resp = requests.get("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01")
+resp = requests.get("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01")
 print(json.dumps(resp.json(), indent=4))
 
 input("press ANY key to continue...")
@@ -41,76 +41,76 @@ print("""
 
 input("press ANY key to continue...")
 
-print("GET http://localhost:8004/VirtualMachine/vm-srv-wireguard-01")
+print("GET http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01")
 
-resp = requests.get("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01")
+resp = requests.get("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01")
 print(json.dumps(resp.json(), indent=4))
 
-print("GET http://localhost:8004/VirtualMachine/vm-srv-wireguard-01?schema")
-resp = requests.get("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01?schema")
-print(json.dumps(resp.json(), indent=4))
-input("press ANY key to continue...")
-
-print("GET http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network")
-resp = requests.get("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network")
-print(json.dumps(resp.json(), indent=4))
-
-print("GET http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network?schema")
-resp = requests.get("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network?schema")
+print("GET http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01?schema")
+resp = requests.get("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01?schema")
 print(json.dumps(resp.json(), indent=4))
 input("press ANY key to continue...")
 
-print("GET http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[eth0]")
-resp = requests.get("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[eth0]")
+print("GET http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network")
+resp = requests.get("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network")
 print(json.dumps(resp.json(), indent=4))
 
-print("GET http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[eth0]?schema")
-resp = requests.get("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[eth0]?schema")
-print(json.dumps(resp.json(), indent=4))
-input("press ANY key to continue...")
-
-print("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[eth0]/link")
-resp = requests.get("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[eth0]/link")
-print(json.dumps(resp.json(), indent=4))
-
-print("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[eth0]/link?schema")
-resp = requests.get("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[eth0]/link?schema")
+print("GET http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network?schema")
+resp = requests.get("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network?schema")
 print(json.dumps(resp.json(), indent=4))
 input("press ANY key to continue...")
 
-print("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[eth0]/link/bridge")
-resp = requests.get("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[eth0]/link/bridge")
+print("GET http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[eth0]")
+resp = requests.get("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[eth0]")
 print(json.dumps(resp.json(), indent=4))
 
-print("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[eth0]/link/bridge?schema")
-resp = requests.get("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[eth0]/link/bridge?schema")
-print(json.dumps(resp.json(), indent=4))
-input("press ANY key to continue...")
-
-print("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[eth0]/link/bridge/links")
-resp = requests.get("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[eth0]/link/bridge/links")
-print(json.dumps(resp.json(), indent=4))
-
-print("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[eth0]/link/bridge/links?schema")
-resp = requests.get("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[eth0]/link/bridge/links?schema")
+print("GET http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[eth0]?schema")
+resp = requests.get("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[eth0]?schema")
 print(json.dumps(resp.json(), indent=4))
 input("press ANY key to continue...")
 
-print("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[eth0]/link/bridge/links[vm-srv-wireguard-02-link-ext]")
-resp = requests.get("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[eth0]/link/bridge/links[vm-srv-wireguard-02-link-ext]")
+print("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[eth0]/link")
+resp = requests.get("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[eth0]/link")
 print(json.dumps(resp.json(), indent=4))
 
-print("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[eth0]/link/bridge/links[vm-srv-wireguard-02-link-ext]?schema")
-resp = requests.get("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[eth0]/link/bridge/links[vm-srv-wireguard-02-link-ext]?schema")
+print("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[eth0]/link?schema")
+resp = requests.get("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[eth0]/link?schema")
 print(json.dumps(resp.json(), indent=4))
 input("press ANY key to continue...")
 
-print("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[eth0]/link/bridge/links[vm-srv-wireguard-02-link-ext]/vm")
-resp = requests.get("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[eth0]/link/bridge/links[vm-srv-wireguard-02-link-ext]/vm")
+print("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[eth0]/link/bridge")
+resp = requests.get("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[eth0]/link/bridge")
 print(json.dumps(resp.json(), indent=4))
 
-print("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[eth0]/link/bridge/links[vm-srv-wireguard-02-link-ext]/vm?schema")
-resp = requests.get("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[eth0]/link/bridge/links[vm-srv-wireguard-02-link-ext]/vm?schema")
+print("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[eth0]/link/bridge?schema")
+resp = requests.get("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[eth0]/link/bridge?schema")
+print(json.dumps(resp.json(), indent=4))
+input("press ANY key to continue...")
+
+print("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[eth0]/link/bridge/links")
+resp = requests.get("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[eth0]/link/bridge/links")
+print(json.dumps(resp.json(), indent=4))
+
+print("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[eth0]/link/bridge/links?schema")
+resp = requests.get("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[eth0]/link/bridge/links?schema")
+print(json.dumps(resp.json(), indent=4))
+input("press ANY key to continue...")
+
+print("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[eth0]/link/bridge/links[vm-srv-wireguard-02-link-ext]")
+resp = requests.get("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[eth0]/link/bridge/links[vm-srv-wireguard-02-link-ext]")
+print(json.dumps(resp.json(), indent=4))
+
+print("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[eth0]/link/bridge/links[vm-srv-wireguard-02-link-ext]?schema")
+resp = requests.get("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[eth0]/link/bridge/links[vm-srv-wireguard-02-link-ext]?schema")
+print(json.dumps(resp.json(), indent=4))
+input("press ANY key to continue...")
+
+print("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[eth0]/link/bridge/links[vm-srv-wireguard-02-link-ext]/vm")
+resp = requests.get("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[eth0]/link/bridge/links[vm-srv-wireguard-02-link-ext]/vm")
+print(json.dumps(resp.json(), indent=4))
+
+print("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[eth0]/link/bridge/links[vm-srv-wireguard-02-link-ext]/vm?schema")
+resp = requests.get("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[eth0]/link/bridge/links[vm-srv-wireguard-02-link-ext]/vm?schema")
 print(json.dumps(resp.json(), indent=4))
 input("press ANY key to continue...")
 
@@ -125,76 +125,76 @@ print("""
 
 input("press ANY key to continue...")
 
-print("GET http://localhost:8004/VirtualMachine/vm-srv-wireguard-01?flat")
+print("GET http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01?flat")
 
-resp = requests.get("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01?flat")
+resp = requests.get("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01?flat")
 print(json.dumps(resp.json(), indent=4))
 
-print("GET http://localhost:8004/VirtualMachine/vm-srv-wireguard-01?schema")
-resp = requests.get("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01?schema")
-print(json.dumps(resp.json(), indent=4))
-input("press ANY key to continue...")
-
-print("GET http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network?flat")
-resp = requests.get("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network?flat")
-print(json.dumps(resp.json(), indent=4))
-
-print("GET http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network?schema")
-resp = requests.get("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network?schema")
+print("GET http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01?schema")
+resp = requests.get("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01?schema")
 print(json.dumps(resp.json(), indent=4))
 input("press ANY key to continue...")
 
-print("GET http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[eth0]?flat")
-resp = requests.get("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[eth0]?flat")
+print("GET http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network?flat")
+resp = requests.get("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network?flat")
 print(json.dumps(resp.json(), indent=4))
 
-print("GET http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[eth0]?schema")
-resp = requests.get("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[eth0]?schema")
-print(json.dumps(resp.json(), indent=4))
-input("press ANY key to continue...")
-
-print("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[eth0]/link?flat")
-resp = requests.get("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[eth0]/link?flat")
-print(json.dumps(resp.json(), indent=4))
-
-print("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[eth0]/link?schema")
-resp = requests.get("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[eth0]/link?schema")
+print("GET http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network?schema")
+resp = requests.get("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network?schema")
 print(json.dumps(resp.json(), indent=4))
 input("press ANY key to continue...")
 
-print("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[eth0]/link/bridge?flat")
-resp = requests.get("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[eth0]/link/bridge?flat")
+print("GET http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[eth0]?flat")
+resp = requests.get("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[eth0]?flat")
 print(json.dumps(resp.json(), indent=4))
 
-print("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[eth0]/link/bridge?schema")
-resp = requests.get("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[eth0]/link/bridge?schema")
-print(json.dumps(resp.json(), indent=4))
-input("press ANY key to continue...")
-
-print("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[eth0]/link/bridge/links?flat")
-resp = requests.get("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[eth0]/link/bridge/links?flat")
-print(json.dumps(resp.json(), indent=4))
-
-print("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[eth0]/link/bridge/links?schema")
-resp = requests.get("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[eth0]/link/bridge/links?schema")
+print("GET http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[eth0]?schema")
+resp = requests.get("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[eth0]?schema")
 print(json.dumps(resp.json(), indent=4))
 input("press ANY key to continue...")
 
-print("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[eth0]/link/bridge/links[vm-srv-wireguard-02-link-ext]?flat")
-resp = requests.get("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[eth0]/link/bridge/links[vm-srv-wireguard-02-link-ext]?flat")
+print("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[eth0]/link?flat")
+resp = requests.get("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[eth0]/link?flat")
 print(json.dumps(resp.json(), indent=4))
 
-print("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[eth0]/link/bridge/links[vm-srv-wireguard-02-link-ext]?schema")
-resp = requests.get("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[eth0]/link/bridge/links[vm-srv-wireguard-02-link-ext]?schema")
+print("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[eth0]/link?schema")
+resp = requests.get("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[eth0]/link?schema")
 print(json.dumps(resp.json(), indent=4))
 input("press ANY key to continue...")
 
-print("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[eth0]/link/bridge/links[vm-srv-wireguard-02-link-ext]/vm?flat")
-resp = requests.get("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[eth0]/link/bridge/links[vm-srv-wireguard-02-link-ext]/vm?flat")
+print("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[eth0]/link/bridge?flat")
+resp = requests.get("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[eth0]/link/bridge?flat")
 print(json.dumps(resp.json(), indent=4))
 
-print("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[eth0]/link/bridge/links[vm-srv-wireguard-02-link-ext]/vm?schema")
-resp = requests.get("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[eth0]/link/bridge/links[vm-srv-wireguard-02-link-ext]/vm?schema")
+print("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[eth0]/link/bridge?schema")
+resp = requests.get("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[eth0]/link/bridge?schema")
+print(json.dumps(resp.json(), indent=4))
+input("press ANY key to continue...")
+
+print("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[eth0]/link/bridge/links?flat")
+resp = requests.get("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[eth0]/link/bridge/links?flat")
+print(json.dumps(resp.json(), indent=4))
+
+print("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[eth0]/link/bridge/links?schema")
+resp = requests.get("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[eth0]/link/bridge/links?schema")
+print(json.dumps(resp.json(), indent=4))
+input("press ANY key to continue...")
+
+print("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[eth0]/link/bridge/links[vm-srv-wireguard-02-link-ext]?flat")
+resp = requests.get("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[eth0]/link/bridge/links[vm-srv-wireguard-02-link-ext]?flat")
+print(json.dumps(resp.json(), indent=4))
+
+print("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[eth0]/link/bridge/links[vm-srv-wireguard-02-link-ext]?schema")
+resp = requests.get("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[eth0]/link/bridge/links[vm-srv-wireguard-02-link-ext]?schema")
+print(json.dumps(resp.json(), indent=4))
+input("press ANY key to continue...")
+
+print("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[eth0]/link/bridge/links[vm-srv-wireguard-02-link-ext]/vm?flat")
+resp = requests.get("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[eth0]/link/bridge/links[vm-srv-wireguard-02-link-ext]/vm?flat")
+print(json.dumps(resp.json(), indent=4))
+
+print("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[eth0]/link/bridge/links[vm-srv-wireguard-02-link-ext]/vm?schema")
+resp = requests.get("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[eth0]/link/bridge/links[vm-srv-wireguard-02-link-ext]/vm?schema")
 print(json.dumps(resp.json(), indent=4))
 
 input("press ANY key to continue...")
@@ -210,30 +210,30 @@ print("""
 
 input("press ANY key to continue...")
 
-print("GET http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[*]")
-resp = requests.get("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[*]")
+print("GET http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[*]")
+resp = requests.get("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[*]")
 print(json.dumps(resp.json(), indent=4))
 
-print("GET http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[*]?iterator")
-resp = requests.get("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[*]?iterator")
-print(json.dumps(resp.json(), indent=4))
-
-input("press ANY key to continue...")
-
-print("GET http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[*]/link")
-resp = requests.get("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[*]/link")
-print(json.dumps(resp.json(), indent=4))
-
-print("GET http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[*]/link?iterator")
-resp = requests.get("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[*]/link?iterator")
+print("GET http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[*]?iterator")
+resp = requests.get("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[*]?iterator")
 print(json.dumps(resp.json(), indent=4))
 
 input("press ANY key to continue...")
 
-print("GET http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[*]/link/bridge/links[*]/vm")
-resp = requests.get("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[*]/link/bridge/links[*]/vm")
+print("GET http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[*]/link")
+resp = requests.get("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[*]/link")
 print(json.dumps(resp.json(), indent=4))
 
-print("GET http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[*]/link/bridge/links[*]/vm?iterator")
-resp = requests.get("http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[*]/link/bridge/links[*]/vm?iterator")
+print("GET http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[*]/link?iterator")
+resp = requests.get("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[*]/link?iterator")
+print(json.dumps(resp.json(), indent=4))
+
+input("press ANY key to continue...")
+
+print("GET http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[*]/link/bridge/links[*]/vm")
+resp = requests.get("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[*]/link/bridge/links[*]/vm")
+print(json.dumps(resp.json(), indent=4))
+
+print("GET http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[*]/link/bridge/links[*]/vm?iterator")
+resp = requests.get("http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[*]/link/bridge/links[*]/vm?iterator")
 print(json.dumps(resp.json(), indent=4))

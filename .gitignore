@@ -10,3 +10,7 @@ docker-compose/**/logs/*.log
 
 # DataService runtime state written next to its config (see src/DataService/Config/state.go)
 docker-compose/**/state.json
+# shared-mirror demo: generated keys, channel content and config
+docker-compose/shared-mirror/keys/
+docker-compose/shared-mirror/exchange/
+docker-compose/shared-mirror/SiteB/ds/config.json

@@ -28,11 +28,11 @@ print("""
 # per schema of VirtualMachine, 
 #  - storage link to VirtualHardDisk/StorageDevice
 #  - network link to VmLink
-# Get VirtualMachine Schema from http://localhost:8001/schema/VirtualMachine
+# Get VirtualMachine Schema from http://localhost:8001/local/schema/VirtualMachine
 #######################################################################################
 """)
 
-resp = requests.get("http://localhost:8001/schema/VirtualMachine")
+resp = requests.get("http://localhost:8001/local/schema/VirtualMachine")
 
 respObj = resp.json()
 
@@ -46,17 +46,17 @@ print("""
 
 input("press Enter to continue...")
 
-print("patch http://localhost:8001/VirtualMachine/vm-srv-wireguard-01/storage {}".format(json.dumps(storage, indent=4)))
+print("patch http://localhost:8001/local/VirtualMachine/vm-srv-wireguard-01/storage {}".format(json.dumps(storage, indent=4)))
 
-resp = requests.patch("http://localhost:8001/VirtualMachine/vm-srv-wireguard-01/storage", json=storage)
+resp = requests.patch("http://localhost:8001/local/VirtualMachine/vm-srv-wireguard-01/storage", json=storage)
 
 print(json.dumps(resp.json(), indent=4))
 
 input("press ANY Key to continue...")
 
-print("patch http://localhost:8001/VirtualMachine/vm-srv-wireguard-01/network {}".format(json.dumps(network, indent=4)))
+print("patch http://localhost:8001/local/VirtualMachine/vm-srv-wireguard-01/network {}".format(json.dumps(network, indent=4)))
 
-resp = requests.patch("http://localhost:8001/VirtualMachine/vm-srv-wireguard-01/network", json=network)
+resp = requests.patch("http://localhost:8001/local/VirtualMachine/vm-srv-wireguard-01/network", json=network)
 
 print(json.dumps(resp.json(), indent=4))
 
@@ -91,32 +91,32 @@ print("""
 
 input("press ANY key to continue...")
 
-print("POST http://localhost:8001 {}",format(json.dumps(vhd, indent=4)))
+print("POST http://localhost:8001/local {}",format(json.dumps(vhd, indent=4)))
 
-resp = requests.post("http://localhost:8001", json=vhd)
-
-print(resp.text)
-
-input("press ANY key to continue...")
-
-print("POST http://localhost:8001 {}",format(json.dumps(vmLink, indent=4)))
-
-resp = requests.post("http://localhost:8001", json=vmLink)
+resp = requests.post("http://localhost:8001/local", json=vhd)
 
 print(resp.text)
 
 input("press ANY key to continue...")
 
-print("patch http://localhost:8001/VirtualMachine/vm-srv-wireguard-01/storage {}".format(json.dumps(storage, indent=4)))
+print("POST http://localhost:8001/local {}",format(json.dumps(vmLink, indent=4)))
 
-respStorage = requests.patch("http://localhost:8001/VirtualMachine/vm-srv-wireguard-01/storage", json=storage)
+resp = requests.post("http://localhost:8001/local", json=vmLink)
+
+print(resp.text)
+
+input("press ANY key to continue...")
+
+print("patch http://localhost:8001/local/VirtualMachine/vm-srv-wireguard-01/storage {}".format(json.dumps(storage, indent=4)))
+
+respStorage = requests.patch("http://localhost:8001/local/VirtualMachine/vm-srv-wireguard-01/storage", json=storage)
 
 print(json.dumps(respStorage.json(), indent=4))
 
 input("press ANY Key to continue...")
 
-print("patch http://localhost:8001/VirtualMachine/vm-srv-wireguard-01/network {}".format(json.dumps(network, indent=4)))
+print("patch http://localhost:8001/local/VirtualMachine/vm-srv-wireguard-01/network {}".format(json.dumps(network, indent=4)))
 
-respNetwork = requests.patch("http://localhost:8001/VirtualMachine/vm-srv-wireguard-01/network", json=network)
+respNetwork = requests.patch("http://localhost:8001/local/VirtualMachine/vm-srv-wireguard-01/network", json=network)
 
 print(json.dumps(respNetwork.json(), indent=4))

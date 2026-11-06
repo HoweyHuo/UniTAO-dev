@@ -75,14 +75,15 @@ func LoadRequest(r *http.Request) (interface{}, *HttpError) {
 	if err != nil {
 		return nil, WrapError(err, "failed to read body from request", http.StatusBadRequest)
 	}
-	data := map[string]interface{}{}
-	err = json.Unmarshal(reqBody, &data)
-	if err != nil {
-		strData := string(reqBody)
-		if strData == "" {
-			return nil, nil
-		}
-		return strData, nil
+	if len(bytes.TrimSpace(reqBody)) == 0 {
+		return nil, nil
+	}
+	// 请求体是任意 JSON 值（对象、数组、字符串、数字、布尔、null）时按 JSON 解析，
+	// 所以 PATCH 字符串属性应发 "abc"（带引号），存进去的是 abc。
+	// 不是合法 JSON 的请求体按原文本处理，兼容直接发 abc 的旧客户端。
+	var data interface{}
+	if err = json.Unmarshal(reqBody, &data); err != nil {
+		return string(reqBody), nil
 	}
 	return data, nil
 }
@@ -166,16 +167,10 @@ func SubmitPayload(dataUrl string, method string, headers map[string]interface{}
 		}
 		req = r
 	} else {
-		payloadType := reflect.TypeOf(payload).Kind()
-		var json_data []byte
-		if payloadType == reflect.Slice || payloadType == reflect.Map {
-			data, err := json.MarshalIndent(payload, "", "    ")
-			if err != nil {
-				return nil, http.StatusBadRequest, fmt.Errorf("failed to marshal payload. Error: %s", err)
-			}
-			json_data = data
-		} else {
-			json_data = []byte(payload.(string))
+		// 所有值都按 JSON 编码（字符串带引号），由 LoadRequest 按 JSON 解析回原值
+		json_data, err := json.MarshalIndent(payload, "", "    ")
+		if err != nil {
+			return nil, http.StatusBadRequest, fmt.Errorf("failed to marshal payload. Error: %s", err)
 		}
 		r, err := http.NewRequest(method, dataUrl, bytes.NewBuffer(json_data))
 		if err != nil {
@@ -214,11 +209,12 @@ func SiteReachable(url string) bool {
 	client := http.Client{
 		Timeout: timeout,
 	}
-	_, err := client.Get(url)
+	resp, err := client.Get(url)
 	if err != nil {
 		log.Println("Site unreachable, error: ", err)
 		return false
 	}
+	resp.Body.Close()
 	log.Printf("Site[%s] reached", url)
 	return true
 }
