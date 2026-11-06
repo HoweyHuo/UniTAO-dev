@@ -10,7 +10,7 @@ docker build -f ./docker/unitao/dockerfile -t ghcr.io/howeyhuo/unitao-dev:latest
 
 ```
 cd docker-compose/shared-mirror
-./setup.sh                      # signing key + trusted fingerprint for siteB
+./setup.sh                      # signing key, trusted fingerprint for siteB, .env with your UID/GID
 docker compose up -d
 
 # write into the shared vDS on siteA
@@ -23,4 +23,6 @@ curl localhost:8021/mirrored/catalog/config      # cursor, source fingerprint, s
 curl localhost:8024/rack                         # ["catalog/r1"] in siteB's Inventory
 ```
 
-`keys/`, `exchange/`, `SiteB/ds/config.json` and every `state.json` are generated and ignored by git.
+the UniTAO containers run as your user (`UNITAO_UID` / `UNITAO_GID` in `.env`, written by `setup.sh`), so everything they write is yours and can be deleted normally. without `.env` they run as root.
+
+`keys/`, `exchange/`, `SiteB/ds/config.json`, `.env`, every `state.json` and the logs are generated and ignored by git. `./clean.sh` stops the example and removes all of them; files left owned by root by an older run are removed through a container.
