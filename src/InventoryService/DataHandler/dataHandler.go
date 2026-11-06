@@ -628,9 +628,12 @@ func (h *Handler) PutData(data map[string]interface{}) (string, *Http.HttpError)
 			return "", e
 		}
 	}
-	args := make(map[string]interface{})
-	args[DbIface.Table] = record.Type
-	args[Record.DataId] = record.Id
+	// Replace 的 keys 是过滤条件：MongoDB 按它匹配已有文档，带上文档里没有的字段（如 DbIface.Table）
+	// 就永远匹配不上，upsert 每次都插入一条重复记录。
+	args := map[string]interface{}{
+		Record.DataType: record.Type,
+		Record.DataId:   record.Id,
+	}
 	err = h.Db.Replace(record.Type, args, record.Map())
 	if err != nil {
 		return "", Http.NewHttpError(err.Error(), http.StatusInternalServerError)
