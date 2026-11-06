@@ -160,6 +160,18 @@ func (db *MemDb) Create(tableName string, data interface{}) error {
 	return db.put(tableName, data)
 }
 
+// recordKeys 检查 Replace / Delete 的过滤条件。MongoDB 把 keys 原样当过滤条件，
+// 多出文档里没有的字段（如 DbIface.Table）就匹配不上：Replace 会插入重复记录，Delete 什么也不删。
+// MemDb 要求 keys 恰好是 {__type, __id}，否则报错，让测试暴露这类调用。
+func recordKeys(op string, keys map[string]interface{}) (string, string, error) {
+	dataType, _ := keys[Record.DataType].(string)
+	dataId, _ := keys[Record.DataId].(string)
+	if dataType == "" || dataId == "" || len(keys) != 2 {
+		return "", "", fmt.Errorf("MemDb %s: keys must be exactly {%s, %s}, got %v", op, Record.DataType, Record.DataId, keys)
+	}
+	return dataType, dataId, nil
+}
+
 func (db *MemDb) Replace(tableName string, keys map[string]interface{}, data interface{}) error {
 	db.lock.Lock()
 	defer db.lock.Unlock()
@@ -167,11 +179,18 @@ func (db *MemDb) Replace(tableName string, keys map[string]interface{}, data int
 	if err != nil {
 		return err
 	}
-	dataType, _ := keys[Record.DataType].(string)
-	dataId, _ := keys[Record.DataId].(string)
-	if dataType != "" && dataId != "" {
-		delete(tbl, memKey(dataType, dataId))
+	dataType, dataId, err := recordKeys("Replace", keys)
+	if err != nil {
+		return err
 	}
+	record, err := deepCopy(data)
+	if err != nil {
+		return err
+	}
+	if record[Record.DataType] != dataType || record[Record.DataId] != dataId {
+		return fmt.Errorf("MemDb Replace: keys %v do not match record [%v/%v]", keys, record[Record.DataType], record[Record.DataId])
+	}
+	delete(tbl, memKey(dataType, dataId))
 	return db.put(tableName, data)
 }
 
@@ -182,8 +201,10 @@ func (db *MemDb) Delete(tableName string, keys map[string]interface{}) error {
 	if !ok {
 		return nil
 	}
-	dataType, _ := keys[Record.DataType].(string)
-	dataId, _ := keys[Record.DataId].(string)
+	dataType, dataId, err := recordKeys("Delete", keys)
+	if err != nil {
+		return err
+	}
 	delete(tbl, memKey(dataType, dataId))
 	return nil
 }
