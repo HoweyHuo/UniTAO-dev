@@ -166,7 +166,8 @@
 - **同一来源被多个实例镜像**（`dsId` 相同，指纹也相同）：Inventory 认为这是**同一个 vDS 的多个副本**，把新实例的 URL 合并进这条记录的 `url` 数组，而不是新增一个 DS。这样 sync 时不会把同一份镜像计入两次，查询结果也不会重复。现在相同 `instanceId` 的注册会被当成"重注册"并替换 URL，对签名身份要改成"合并 URL"。
 - **同名但指纹不同**：两个不同的来源撞了名。处理方式是**自动改名 + 告警**，不需要人工干预就能继续工作：
   - 先注册的保留原名；后注册的由 Inventory 分配 `{name}-{指纹前 8 位}`，例如 `prod-3f2a9c1b`，通过注册响应返回给实例。
-  - 实例把分配到的名字存进 `state.json`，之后 vDS 的路径和 `dsId` 都用这个名字，例如 `mirrored/prod-3f2a9c1b`。这和现在 ds.id 撞名时 `dsId` / `dsIdFrom` 的机制一致：config 里的名字改了，分配的名字就作废。
+  - 实例把分配到的名字存进 `state.json`，之后向 Inventory 注册都用这个 `dsId`。**vDS 的路径不变**，仍是 config 里的名字（例如 `mirrored/prod`），分配到的名字在 `/{vDS}/config` 的 `inventoryId` 中可见。这样直连 DS 的客户端不会因为别处的撞名、在运行时被迫换 URL。这和现在 ds.id 撞名时 `dsId` / `dsIdFrom` 的机制一致：config 里的名字改了，分配的名字就作废。
+  - **想让路径和 `dsId` 一致**：给这个 mirrored 配 `alias`（例如 `prod-b`）并重启。路径、表名和申请的 `dsId` 都改用 alias，相当于删掉旧 vDS、新建一个：旧表删除、从最新 snapshot 重新同步，旧 URL 从 Inventory 注销。实例启动时先注销已删除 vDS 的 URL（待注销的 URL 记在 `state.json`，重启不丢），再注册当前的 vDS；否则新名字的注册会因指纹相同被合并进旧记录。按"同指纹不同名"的规则，同一来源的所有副本要配同一个 alias，否则仍会被合并到已有的名字下。
   - 在 `/{vDS}/config` 和 Inventory 日志里记录告警，说明这个来源因撞名被改了名，以及和谁冲突（对方的指纹）。
   - **为什么用指纹派生，而不用递增后缀**：派生出来的名字只取决于指纹，和注册顺序、次数无关；不同实例镜像同一个来源时会得到同一个名字，仍然能合并成副本；Inventory 记录删除后重建，名字也不会变。
   - 谁保留原名取决于第一次注册的先后。撞名一旦发生，结果由 Inventory 持久化的记录固定，重启不会互换。
@@ -426,7 +427,7 @@ func NewSubscriber(cfg Config) (Subscriber, error)
 - **加密**：没有用 `age`，用标准库实现 X25519 + HKDF-SHA256 + AES-256-GCM，支持多个接收方；密钥是一行 base64，`DataServiceAdmin enckey` 生成。
 
 **行为**
-- **撞名改名只改 Inventory 的 dsId**：D4 写的是 vDS 路径也改成派生名字。实现中 vDS 路径始终是 config 里的名字（例如仍是 `mirrored/prod`），Inventory 分配的 dsId 存在 `state.json`，在 `/{vDS}/config` 的 `inventoryId` 中可见。这样本地直连 DS 的客户端不会因为别处的撞名而改路径。
+- **撞名改名只改 Inventory 的 dsId**：D4 的初稿写的是 vDS 路径也改成派生名字。实现中 vDS 路径始终是 config 里的名字，已确认采用这一做法并改写了 D4；需要路径和 `dsId` 一致时用 `alias`。
 - **shared 和它自己的镜像在同一个 Inventory**：合并成一条记录后 kind 保持 `shared`；按 cursor 给副本排序时 shared 源头排在最前。DS 复查注册时对签名 vDS 只要求记录是签名身份且包含自己的 URL，避免两边来回改 kind。
 - **发布前与通道对账**（第 9 节没写）：通道比本地进度新（写入通道后、保存进度前进程退出）就追上；通道比本地旧（仓库被重置）就先发一个当前 seq 的 snapshot，镜像方因 gap 从它重建。通道的 `Publish` 严格要求 seq 接着通道上的最大 seq。
 - **snapshot 只按时间触发**（`snapshotIntervalSec`），没有按 outbox 积压量触发。通道上还没有 snapshot 时，第一次发布就会生成一个。

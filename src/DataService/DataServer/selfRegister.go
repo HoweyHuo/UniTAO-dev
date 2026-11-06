@@ -82,8 +82,14 @@ func (srv *Server) StartSelfRegistration() {
 			vds.InstanceId = srv.config.Ds.InstanceId
 			vds.setInvId(srv.config.Ds.Id)
 		}
-		go srv.selfRegister(vds)
 	}
+	// 先注销已删除 vDS 的 URL，再注册当前的 vDS，见 Config.State.Unregister
+	go func() {
+		srv.flushUnregister()
+		for _, vds := range srv.vdsList {
+			go srv.selfRegister(vds)
+		}
+	}()
 }
 
 // selfRegister 查询 Inventory 中该 vDS 的注册记录：已注册且一致则跳过；
@@ -122,7 +128,7 @@ func (srv *Server) register(vds *Vds) error {
 	current := vds.InvId()
 	if assignedId != "" && assignedId != current {
 		srv.log.Printf("vDS [%s]: inventory assigned dsId=[%s] (requested [%s])", vds.Path, assignedId, current)
-		vds.setInvId(assignedId)
+		// 先写 state.json 再改内存：在两者之间重启时，新实例仍能按分配到的名字注销旧 URL
 		if vds.Kind == KindLocal {
 			srv.config.Ds.Id = assignedId
 			if err := srv.state.Save(&srv.config); err != nil {
@@ -140,6 +146,7 @@ func (srv *Server) register(vds *Vds) error {
 				srv.log.Printf("failed to persist assigned dsId of vDS [%s], Err:%s", vds.Path, err)
 			}
 		}
+		vds.setInvId(assignedId)
 	}
 	srv.log.Printf("vDS [%s] registered to inventory=[%s] as dsId=[%s]", vds.Path, srv.config.Inv.Url, vds.InvId())
 	return nil
@@ -185,33 +192,49 @@ func (srv *Server) notifyTypeChange(vds *Vds, dataType string) {
 	srv.log.Printf("notified inventory of type change [%s] as dsId=[%s], status=%d", dataType, vds.InvId(), status)
 }
 
-// unregisterUrls 从 Inventory 中移除已删除 vDS 的 URL（副本的其它 URL 保留；没有 URL 时 Inventory 删除整条记录）。
-func (srv *Server) unregisterUrls(invId string, path string) {
-	if !srv.invLinked() || invId == "" {
-		return
-	}
-	for attempt := 0; attempt < 3; attempt++ {
-		ok := true
-		for _, base := range srv.dsUrls() {
-			vdsUrl := joinVdsUrl(base, path)
-			delUrl, err := Http.URLPathJoin(srv.config.Inv.Url, Schema.Inventory, invId)
-			if err != nil {
-				srv.log.Printf("failed to build unregister url. Err:%s", err)
-				return
-			}
-			target := fmt.Sprintf("%s?url=%s", *delUrl, url.QueryEscape(vdsUrl))
-			status, err := httpDelete(target)
-			if err != nil || status >= 300 {
-				srv.log.Printf("failed to unregister url [%s] of [%s] from inventory. Code:%d, Err:%v", vdsUrl, invId, status, err)
-				ok = false
-			}
-		}
-		if ok {
-			srv.log.Printf("unregistered removed vDS [%s] (dsId=[%s]) from inventory", path, invId)
+// flushUnregister 从 Inventory 注销 state 中记录的、已从 config 删除的 vDS URL（副本的其它 URL 保留；
+// 没有 URL 时 Inventory 删除整条记录）。Inventory 不可达或返回 5xx 时一直重试，处理完才返回；
+// 返回 4xx 时记录日志后放弃该 URL。Inventory 对不存在的记录或 URL 返回成功，所以重复注销是安全的。
+func (srv *Server) flushUnregister() {
+	for {
+		pending := srv.state.PendingUnregister()
+		if len(pending) == 0 {
 			return
 		}
-		time.Sleep(time.Duration(SelfRegRetrySec) * time.Second)
+		for _, task := range pending {
+			if !srv.unregisterUrl(task) {
+				continue
+			}
+			srv.state.DoneUnregister(task)
+			if err := srv.state.Save(&srv.config); err != nil {
+				srv.log.Printf("failed to save state, Err:%s", err)
+			}
+		}
+		if len(srv.state.PendingUnregister()) > 0 {
+			time.Sleep(time.Duration(SelfRegRetrySec) * time.Second)
+		}
 	}
+}
+
+// unregisterUrl 注销一个 URL，返回该任务是否已处理完（成功或不可重试的失败）。
+func (srv *Server) unregisterUrl(task Config.UnregisterTask) bool {
+	delUrl, err := Http.URLPathJoin(srv.config.Inv.Url, Schema.Inventory, task.DsId)
+	if err != nil {
+		srv.log.Printf("failed to build unregister url for [%s]. Err:%s", task.DsId, err)
+		return true
+	}
+	target := fmt.Sprintf("%s?url=%s", *delUrl, url.QueryEscape(task.Url))
+	status, err := httpDelete(target)
+	if err != nil || status >= 500 {
+		srv.log.Printf("failed to unregister url [%s] of [%s] from inventory, will retry. Code:%d, Err:%v", task.Url, task.DsId, status, err)
+		return false
+	}
+	if status >= 300 {
+		srv.log.Printf("inventory rejected unregistering url [%s] of [%s], give up. Code:%d", task.Url, task.DsId, status)
+		return true
+	}
+	srv.log.Printf("unregistered url [%s] of removed vDS (dsId=[%s]) from inventory", task.Url, task.DsId)
+	return true
 }
 
 // checkRegistration 查询 Inventory 中该 vDS 的 inventory 记录，返回是否已注册且与当前一致。

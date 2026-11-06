@@ -152,12 +152,17 @@ func (srv *Server) removeDeletedVds(configured map[string]bool) {
 			srv.log.Printf("vDS [local] is no longer configured; its table [%s] is kept", st.Table)
 			continue
 		}
-		srv.log.Printf("vDS [%s] removed from config, unregister and drop table [%s]", path, st.Table)
+		srv.log.Printf("vDS [%s] removed from config, drop table [%s] and unregister it before registering current vDS", path, st.Table)
 		invId := st.AssignedId
 		if invId == "" {
 			_, invId = splitKindName(path)
 		}
-		go srv.unregisterUrls(invId, path)
+		// 只记录，由 StartSelfRegistration 在注册当前 vDS 之前完成注销
+		if srv.invLinked() {
+			for _, base := range srv.dsUrls() {
+				srv.state.AddUnregister(invId, joinVdsUrl(base, path))
+			}
+		}
 		if st.Table != "" {
 			if err := srv.db.DeleteTable(st.Table); err != nil {
 				srv.log.Printf("failed to drop table [%s] of removed vDS [%s], Err:%s", st.Table, path, err)

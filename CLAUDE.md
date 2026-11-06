@@ -100,7 +100,7 @@ UniTAO 由两类服务组成：
    - 代码：`DataServer/vds.go`（每个 vDS 的初始化、删除、`/{vDS}/config`）、`Share/`（outbox、`ChannelPublish` JournalProcess、发布器 `Publisher`、镜像同步器 `Mirror`）、`Channel/`（`dir` / `git` 通道、ed25519 签名的 manifest、可选 X25519 加密）、`DataHandler/apply.go`（镜像侧直接写入，跳过引用校验）。
    - 发布：写入 → Journal → outbox（无空洞的 seq，先写记录再推进计数器）→ `Publisher` 按连续 seq 发 segment，定期发 snapshot；发布前与通道对账（通道领先则追上，通道落后则先发 snapshot）。
    - 镜像：`Mirror` 从 `state.json` 中的 cursor 拉取，校验来源指纹与文件 hash；通道无法连续提供时从最新 snapshot 重建。
-   - 运行时状态在 `state.json` 的 `vds` 下（每个 vDS 的 `initialized`、`table`、Inventory 分配的 id、镜像 cursor）。从 config 删除 mirrored 并重启会删表并从 Inventory 注销其 URL。
+   - 运行时状态在 `state.json` 的 `vds` 下（每个 vDS 的 `initialized`、`table`、Inventory 分配的 id、镜像 cursor）。从 config 删除 mirrored 并重启会删表并从 Inventory 注销其 URL：待注销的 URL 先记进 `state.json` 的 `unregister`，启动时注销完才开始注册当前的 vDS（否则改 alias 后的新名字会因指纹相同被合并进旧记录）。撞名被改名的镜像，给它配 `alias` 即可让 DS 路径和 Inventory 的 dsId 一致，但同一来源的所有副本要用同一个 alias。
    - 签名密钥与加密密钥用 `DataServiceAdmin keygen|fingerprint|enckey` 生成。
 
 ### REST API 概览

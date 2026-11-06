@@ -48,9 +48,52 @@ type State struct {
 	InstanceId string `json:"instanceId"`
 	// Vds 按 vDS 路径（local、shared/{name}、mirrored/{name}）保存各 vDS 的运行时状态。
 	// 也用于启动时发现已从 config 中删除的 vDS。
-	Vds  map[string]*VdsState `json:"vds,omitempty"`
-	path string
-	lock sync.Mutex
+	Vds map[string]*VdsState `json:"vds,omitempty"`
+	// Unregister 为已从 config 删除、尚未从 Inventory 注销的 vDS URL，注销成功后移除。
+	// 启动时先处理完它们再注册当前的 vDS：否则改了 alias 的 mirrored 用新名字注册时，
+	// 旧记录还在，会因指纹相同被合并进旧记录，拿回旧名字。
+	Unregister []UnregisterTask `json:"unregister,omitempty"`
+	path       string
+	lock       sync.Mutex
+}
+
+// UnregisterTask 是一个待从 Inventory 注销的 vDS URL。
+type UnregisterTask struct {
+	DsId string `json:"dsId"`
+	Url  string `json:"url"`
+}
+
+// AddUnregister 记录一个待注销的 URL（重复的忽略）。
+func (s *State) AddUnregister(dsId string, url string) {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+	task := UnregisterTask{DsId: dsId, Url: url}
+	for _, item := range s.Unregister {
+		if item == task {
+			return
+		}
+	}
+	s.Unregister = append(s.Unregister, task)
+}
+
+// PendingUnregister 返回待注销 URL 的副本。
+func (s *State) PendingUnregister() []UnregisterTask {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+	return append([]UnregisterTask{}, s.Unregister...)
+}
+
+// DoneUnregister 移除已处理的待注销 URL。
+func (s *State) DoneUnregister(task UnregisterTask) {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+	remaining := []UnregisterTask{}
+	for _, item := range s.Unregister {
+		if item != task {
+			remaining = append(remaining, item)
+		}
+	}
+	s.Unregister = remaining
 }
 
 // VdsState 是单个 vDS 的运行时状态。

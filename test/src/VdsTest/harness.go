@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -68,6 +69,12 @@ type invNode struct {
 	http *httptest.Server
 	db   *MemDb
 	Url  string
+	hook atomic.Value // func(*http.Request)：每个请求处理前调用，测试用来制造延迟
+}
+
+// setHook 设置请求处理前的回调，传 nil 清除。
+func (n *invNode) setHook(hook func(r *http.Request)) {
+	n.hook.Store(hook)
 }
 
 func startInventory(t *testing.T, pinned map[string]string) *invNode {
@@ -91,9 +98,17 @@ func startInventory(t *testing.T, pinned map[string]string) *invNode {
 	if err := srv.Start(testLogger()); err != nil {
 		t.Fatalf("failed to start inventory server: %s", err)
 	}
-	server := httptest.NewServer(srv)
+	node := &invNode{srv: srv, db: db}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if hook, ok := node.hook.Load().(func(*http.Request)); ok && hook != nil {
+			hook(r)
+		}
+		srv.ServeHTTP(w, r)
+	}))
 	t.Cleanup(server.Close)
-	return &invNode{srv: srv, http: server, db: db, Url: server.URL}
+	node.http = server
+	node.Url = server.URL
+	return node
 }
 
 type dsNode struct {

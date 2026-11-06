@@ -244,11 +244,11 @@ func TestSignedRegistration(t *testing.T) {
 		}
 		return string(resp.Body)
 	}
-	if id := register("prod", fpA, "mirrored", "http://x1/mirrored/prod"); id != "prod" {
+	if id := register("prod", fpA, "mirrored", "http://127.0.0.1:9001/mirrored/prod"); id != "prod" {
 		t.Fatalf("expect prod, got %s", id)
 	}
 	// 同名同指纹：副本，URL 合并
-	if id := register("prod", fpA, "mirrored", "http://x2/mirrored/prod"); id != "prod" {
+	if id := register("prod", fpA, "mirrored", "http://127.0.0.1:9002/mirrored/prod"); id != "prod" {
 		t.Fatalf("expect replica merged into prod, got %s", id)
 	}
 	data, _ := getInvRecord(t, inv, "prod")
@@ -257,33 +257,33 @@ func TestSignedRegistration(t *testing.T) {
 	}
 	// 同名不同指纹：派生名字
 	derived := DataHandler.DerivedDsId("prod", fpB)
-	if id := register("prod", fpB, "mirrored", "http://x3/mirrored/prod"); id != derived {
+	if id := register("prod", fpB, "mirrored", "http://127.0.0.1:9003/mirrored/prod"); id != derived {
 		t.Fatalf("expect derived id %s, got %s", derived, id)
 	}
 	// 同指纹不同名（alias 不一致）：合并进已有记录
-	if id := register("prod-alias", fpA, "mirrored", "http://x4/mirrored/prod-alias"); id != "prod" {
+	if id := register("prod-alias", fpA, "mirrored", "http://127.0.0.1:9004/mirrored/prod-alias"); id != "prod" {
 		t.Fatalf("expect same-fingerprint merged into prod, got %s", id)
 	}
 	// local 占用了名字：签名 vDS 得到派生名字
-	register("plain", "uuid-1", "", "http://x5/local")
-	if id := register("plain", fpD, "shared", "http://x6/shared/plain"); id != DataHandler.DerivedDsId("plain", fpD) {
+	register("plain", "uuid-1", "", "http://127.0.0.1:9005/local")
+	if id := register("plain", fpD, "shared", "http://127.0.0.1:9006/shared/plain"); id != DataHandler.DerivedDsId("plain", fpD) {
 		t.Fatalf("expect derived id for name taken by local, got %s", id)
 	}
 	// pinnedSources：名字被固定给 fpC，其它指纹得到派生名字；fpC 来时拿到名字
-	if id := register("pinned", fpE, "mirrored", "http://x7/mirrored/pinned"); id != DataHandler.DerivedDsId("pinned", fpE) {
+	if id := register("pinned", fpE, "mirrored", "http://127.0.0.1:9007/mirrored/pinned"); id != DataHandler.DerivedDsId("pinned", fpE) {
 		t.Fatalf("expect non-pinned source get derived id, got %s", id)
 	}
-	if id := register("pinned", fpC, "mirrored", "http://x8/mirrored/pinned"); id != "pinned" {
+	if id := register("pinned", fpC, "mirrored", "http://127.0.0.1:9008/mirrored/pinned"); id != "pinned" {
 		t.Fatalf("expect pinned source get the name, got %s", id)
 	}
 	// 按 URL 注销副本
-	expectStatus(t, call(t, http.MethodDelete, inv.Url+"/inventory/prod?url=http://x1/mirrored/prod", nil), http.StatusAccepted, "remove one url")
+	expectStatus(t, call(t, http.MethodDelete, inv.Url+"/inventory/prod?url=http://127.0.0.1:9001/mirrored/prod", nil), http.StatusAccepted, "remove one url")
 	data, _ = getInvRecord(t, inv, "prod")
-	if urls := urlsOf(data); contains(urls, "http://x1/mirrored/prod") || len(urls) != 2 {
+	if urls := urlsOf(data); contains(urls, "http://127.0.0.1:9001/mirrored/prod") || len(urls) != 2 {
 		t.Fatalf("expect url removed, got %v", urls)
 	}
-	call(t, http.MethodDelete, inv.Url+"/inventory/prod?url=http://x2/mirrored/prod", nil)
-	call(t, http.MethodDelete, inv.Url+"/inventory/prod?url=http://x4/mirrored/prod-alias", nil)
+	call(t, http.MethodDelete, inv.Url+"/inventory/prod?url=http://127.0.0.1:9002/mirrored/prod", nil)
+	call(t, http.MethodDelete, inv.Url+"/inventory/prod?url=http://127.0.0.1:9004/mirrored/prod-alias", nil)
 	if _, ok := getInvRecord(t, inv, "prod"); ok {
 		t.Fatalf("expect record deleted when no url left")
 	}
