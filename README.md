@@ -116,6 +116,7 @@ to run demo:
  ./scripts/build-us.sh
  ```
  - a schema cannot be changed in place: **PUT** or **PATCH** on `schema` returns 400. to upgrade, **POST** a schema record with the same `__id` and a **strictly higher** `data.version` (equal or lower is rejected). the current version is archived automatically as `__id = <type>__<old version>`; archived ids cannot be POSTed directly, and records that declare the old `__ver` keep validating against the archived schema. the schema record's own `__ver` is the current version of the schema of schema (not `data.version`), while a data record's `__ver` is the version of its type's schema at write time. the same contract is documented on `GET /schema/schema`
+ - the body of a **PATCH** on an attribute path is a JSON value: send `"rack one"` (quoted) for a string, `42` for a number, an object or array as usual. a body that is not valid JSON is taken as raw text, so the older unquoted form (`rack one`) still works, but a raw `123` or `true` is now a number / boolean, quote it to keep it a string
 
 ## Virtual Data Services (vDS)
 

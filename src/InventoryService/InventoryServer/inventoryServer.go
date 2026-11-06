@@ -273,6 +273,7 @@ func (srv *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	payload, ok := reqBody.(map[string]interface{})
 	if !ok {
 		Http.ResponseJson(w, "failed to parse request into JSON object", http.StatusBadRequest, srv.config.Http)
+		return
 	}
 	dataId, err := srv.data.PutData(payload)
 	if err != nil {

@@ -118,7 +118,7 @@ Data Service 的 URL 是 `/{vDS}/{type}[/{id}]`（`{vDS}` 为 `local`、`shared/
 | Data Service | `GET` | `/{vDS}/{type}` | 列出该类型的所有 `__id` |
 | Data Service | `GET` | `/{vDS}/{type}/{id}[/{attrPath}]` | 查询 Record，可带属性路径深入 |
 | Data Service | `PUT` | `/{vDS}/{type}/{id}` | 替换 Record |
-| Data Service | `PATCH` | `/{vDS}/{type}/{id}[/{attrPath}]` | 部分更新 Record |
+| Data Service | `PATCH` | `/{vDS}/{type}/{id}[/{attrPath}]` | 部分更新 Record；请求体是 JSON 值（字符串发 `"abc"`），不是合法 JSON 时按原文本处理 |
 | Data Service | `DELETE` | `/{vDS}/{type}/{id}` | 删除 Record |
 | Data Service | `GET` | `/{vDS}/schema[/{type}]` | 列出 / 查询已注册的 Schema |
 | Inventory Service | `GET` | `/{type}` | 列出所有 DS 上该类型的 id，**始终**为 `{ds}/{id}` |
