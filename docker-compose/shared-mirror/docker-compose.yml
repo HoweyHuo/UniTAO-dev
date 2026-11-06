@@ -1,5 +1,6 @@
 # 两个相互隔离的网络：siteA 共享 catalog，siteB 镜像它。两边只通过 ./exchange 目录（dir 通道）交换数据。
-# 先运行 ./setup.sh 生成签名密钥和 SiteB 的配置。
+# 先运行 ./setup.sh 生成签名密钥、SiteB 的配置和 .env（当前用户的 UID/GID）。
+# UniTAO 容器以该用户运行，写出的 exchange、state.json、日志都归当前用户，可以直接删除；./clean.sh 清理全部生成文件。
 services:
   dynamodb:
     image: amazon/dynamodb-local:latest
@@ -12,6 +13,9 @@ services:
     image: ${UNITAO_IMAGE:-ghcr.io/howeyhuo/unitao-dev:latest}
     container_name: sm-site-a-ds
     restart: always
+    user: "${UNITAO_UID:-0}:${UNITAO_GID:-0}"
+    environment:
+      HOME: /tmp
     volumes:
       - ./SiteA/ds:/opt/UniTAO/config
       - ./keys:/opt/UniTAO/keys:ro
@@ -27,6 +31,9 @@ services:
     image: ${UNITAO_IMAGE:-ghcr.io/howeyhuo/unitao-dev:latest}
     container_name: sm-site-a-inv
     restart: always
+    user: "${UNITAO_UID:-0}:${UNITAO_GID:-0}"
+    environment:
+      HOME: /tmp
     volumes:
       - ./SiteA/inv:/opt/UniTAO/config
       - ./logs:/opt/UniTAO/log
@@ -39,6 +46,9 @@ services:
     image: ${UNITAO_IMAGE:-ghcr.io/howeyhuo/unitao-dev:latest}
     container_name: sm-site-b-ds
     restart: always
+    user: "${UNITAO_UID:-0}:${UNITAO_GID:-0}"
+    environment:
+      HOME: /tmp
     volumes:
       - ./SiteB/ds:/opt/UniTAO/config
       - ./exchange:/opt/UniTAO/exchange:ro
@@ -53,6 +63,9 @@ services:
     image: ${UNITAO_IMAGE:-ghcr.io/howeyhuo/unitao-dev:latest}
     container_name: sm-site-b-inv
     restart: always
+    user: "${UNITAO_UID:-0}:${UNITAO_GID:-0}"
+    environment:
+      HOME: /tmp
     volumes:
       - ./SiteB/inv:/opt/UniTAO/config
       - ./logs:/opt/UniTAO/log

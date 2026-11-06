@@ -14,3 +14,4 @@ docker-compose/**/state.json
 docker-compose/shared-mirror/keys/
 docker-compose/shared-mirror/exchange/
 docker-compose/shared-mirror/SiteB/ds/config.json
+docker-compose/shared-mirror/.env
