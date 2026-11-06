@@ -22,12 +22,12 @@ vm = {
         "network":[]
     }
 }
-print("POST http://localhost:8001 {}".format(json.dumps(vm, indent=4)))
-resp = requests.post("http://localhost:8001", json=vm)
+print("POST http://localhost:8001/local {}".format(json.dumps(vm, indent=4)))
+resp = requests.post("http://localhost:8001/local", json=vm)
 print(resp.text)
 
-print("PATCH http://localhost:8002/VmHost/vmhost-test01/virtualMachine 'vm-srv-wireguard-02'")
-resp = requests.patch("http://localhost:8002/VmHost/vmhost-test01/virtualMachine", "vm-srv-wireguard-02")
+print("PATCH http://localhost:8002/local/VmHost/vmhost-test01/virtualMachine 'vm-srv-wireguard-02'")
+resp = requests.patch("http://localhost:8002/local/VmHost/vmhost-test01/virtualMachine", "vm-srv-wireguard-02")
 print(json.dumps(resp.json(), indent=4))
 
 input("press ANY key to continue...")
@@ -42,8 +42,8 @@ vhd = {
     }
 }
 
-print("POST http://localhost:8001 {}",format(json.dumps(vhd, indent=4)))
-resp = requests.post("http://localhost:8001", json=vhd)
+print("POST http://localhost:8001/local {}",format(json.dumps(vhd, indent=4)))
+resp = requests.post("http://localhost:8001/local", json=vhd)
 print(resp.text)
 
 storage = {
@@ -51,12 +51,12 @@ storage = {
     "vhd": "vhd-wireguard-02-sys"
 }
 
-print("PATCH http://localhost:8001/VirtualMachine/vm-srv-wireguard-02/storage {}".format(json.dumps(storage, indent=4)))
-resp = requests.patch("http://localhost:8001/VirtualMachine/vm-srv-wireguard-02/storage", json=storage)
+print("PATCH http://localhost:8001/local/VirtualMachine/vm-srv-wireguard-02/storage {}".format(json.dumps(storage, indent=4)))
+resp = requests.patch("http://localhost:8001/local/VirtualMachine/vm-srv-wireguard-02/storage", json=storage)
 print(json.dumps(resp.json(), indent=4))
 
-print("PATCH http://localhost:8002/VmHost/vmhost-test01/virtualHardDisk 'vhd-wireguard-02-sys'")
-resp = requests.patch("http://localhost:8002/VmHost/vmhost-test01/virtualHardDisk", "vhd-wireguard-02-sys")
+print("PATCH http://localhost:8002/local/VmHost/vmhost-test01/virtualHardDisk 'vhd-wireguard-02-sys'")
+resp = requests.patch("http://localhost:8002/local/VmHost/vmhost-test01/virtualHardDisk", "vhd-wireguard-02-sys")
 print(json.dumps(resp.json(), indent=4))
 
 input("press ANY key to continue...")
@@ -72,8 +72,8 @@ vmLink = {
         "bridge": "br-ext"
     }
 }
-print("POST http://localhost:8001 {}".format(json.dumps(vmLink, indent=4)))
-resp = requests.post("http://localhost:8001", json=vmLink)
+print("POST http://localhost:8001/local {}".format(json.dumps(vmLink, indent=4)))
+resp = requests.post("http://localhost:8001/local", json=vmLink)
 print(resp.text)
 
 network = {
@@ -81,14 +81,14 @@ network = {
     "link": "vm-srv-wireguard-02-link-ext"
 }
 
-print("PATCH http://localhost:8001/VirtualMachine/vm-srv-wireguard-02/network {}".format(json.dumps(network, indent=4)))
-resp = requests.patch("http://localhost:8001/VirtualMachine/vm-srv-wireguard-02/network", json=network)
+print("PATCH http://localhost:8001/local/VirtualMachine/vm-srv-wireguard-02/network {}".format(json.dumps(network, indent=4)))
+resp = requests.patch("http://localhost:8001/local/VirtualMachine/vm-srv-wireguard-02/network", json=network)
 print(json.dumps(resp.json(), indent=4))
 
-print("PATCH http://localhost:8001/NetBridge/br-ext/links 'vm-srv-wireguard-02-link-ext'")
-resp = requests.patch("http://localhost:8001/NetBridge/br-ext/links", "vm-srv-wireguard-02-link-ext")
+print("PATCH http://localhost:8001/local/NetBridge/br-ext/links 'vm-srv-wireguard-02-link-ext'")
+resp = requests.patch("http://localhost:8001/local/NetBridge/br-ext/links", "vm-srv-wireguard-02-link-ext")
 print(json.dumps(resp.json(), indent=4))
 
-print("PATCH http://localhost:8002/VmHost/vmhost-test01/vmLink 'vm-srv-wireguard-02-link-ext'")
-resp = requests.patch("http://localhost:8002/VmHost/vmhost-test01/vmLink", "vm-srv-wireguard-02-link-ext")
+print("PATCH http://localhost:8002/local/VmHost/vmhost-test01/vmLink 'vm-srv-wireguard-02-link-ext'")
+resp = requests.patch("http://localhost:8002/local/VmHost/vmhost-test01/vmLink", "vm-srv-wireguard-02-link-ext")
 print(json.dumps(resp.json(), indent=4))

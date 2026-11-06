@@ -169,6 +169,19 @@ func (i *DataServiceProxy) GetDsInfo(dataType string) ([]*InvRecord.DataServiceI
 	return dsInfoList, nil
 }
 
+// DsKindOf 返回持有 dataType 的各 DS（vDS）的 kind。
+func (i *DataServiceProxy) DsKindOf(dataType string) ([]string, *Http.HttpError) {
+	dsInfoList, err := i.GetDsInfo(dataType)
+	if err != nil {
+		return nil, err
+	}
+	kinds := make([]string, 0, len(dsInfoList))
+	for _, ds := range dsInfoList {
+		kinds = append(kinds, ds.EffectiveKind())
+	}
+	return kinds, nil
+}
+
 // getDsUrl 返回第一个可达的 DataService URL（用于写入与 getIdUrl；多分片读取请用 Get）。
 func (i *DataServiceProxy) getDsUrl(dataType string, dataId string) (string, *Http.HttpError) {
 	queryType := dataType

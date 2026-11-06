@@ -66,7 +66,26 @@ type Handler struct {
 	// 不含版本升级和归档版本的删除）。
 	// 由 DataServer 接线：通常以 goroutine 向 Inventory 推送单类型事件，best-effort。
 	TypeChangeNotify func(dataType string)
-	log              *log.Logger
+	// VdsPath 为该 Handler 所属 vDS 的路径（local、shared/{name}、mirrored/{name}），用于提示信息。
+	VdsPath string
+	// ReadOnly 为 true 时拒绝所有外部写入（mirrored vDS）；Channel 变更经 Apply* 方法写入。
+	ReadOnly bool
+	// RefLocalOnly 为 true 时，引用只能指向本 vDS 中的记录（shared vDS 的引用闭合）。
+	RefLocalOnly bool
+	// DsKindOf 返回某个数据类型在 Inventory 中所在的各 DS 的 kind（local/shared/mirrored），
+	// 用于禁止对只存在于 mirrored vDS 的类型做 indexTemplate 订阅。为 nil 时不检查。
+	DsKindOf func(dataType string) ([]string, *Http.HttpError)
+	log      *log.Logger
+}
+
+const (
+	KindLocal    = "local"
+	KindShared   = "shared"
+	KindMirrored = "mirrored"
+)
+
+func (h *Handler) readOnlyError() *Http.HttpError {
+	return Http.NewHttpError(fmt.Sprintf("vDS [%s] is read-only", h.VdsPath), http.StatusMethodNotAllowed)
 }
 
 func New(config Config.Confuguration, logger *log.Logger, connectDb func(db DbConfig.DatabaseConfig, logger *log.Logger) (DbIface.Database, error)) (*Handler, *Http.HttpError) {
@@ -77,15 +96,49 @@ func New(config Config.Confuguration, logger *log.Logger, connectDb func(db DbCo
 	if err != nil {
 		return nil, Http.WrapError(err, "failed to connect to Database", http.StatusInternalServerError)
 	}
+	return NewWithDb(config, logger, db), nil
+}
+
+// NewWithDb 用已建立的数据库连接创建 Handler。同一个 DS 实例上的多个 vDS 共用一个连接，
+// 各自通过 config.DataTable.Data 使用不同的表。
+func NewWithDb(config Config.Confuguration, logger *log.Logger, db DbIface.Database) *Handler {
+	if logger == nil {
+		logger = log.Default()
+	}
 	handler := Handler{
 		schemaMap: make(map[string]*Schema.SchemaOps),
 		DB:        db,
 		Config:    config,
 		Lock:      HashLock.NewHashLock(logger),
+		VdsPath:   KindLocal,
 		log:       logger,
 	}
 	handler.Inventory = CreateDsProxy(&handler)
-	return &handler, nil
+	handler.DsKindOf = handler.Inventory.DsKindOf
+	return &handler
+}
+
+// ListDataTypes 返回本 vDS 中的数据类型（当前版本 schema，去掉内部类型与归档版本）。
+func (h *Handler) ListDataTypes() ([]string, *Http.HttpError) {
+	idList, err := h.List(JsonKey.Schema)
+	if err != nil {
+		return nil, err
+	}
+	result := []string{}
+	for _, idObj := range idList {
+		id, ok := idObj.(string)
+		if !ok {
+			continue
+		}
+		if _, ver := Util.ParseCustomPath(id, JsonKey.ArchivedSchemaIdDiv); ver != "" {
+			continue
+		}
+		if _, internal := Common.InternalTypes[id]; internal {
+			continue
+		}
+		result = append(result, id)
+	}
+	return result, nil
 }
 
 func (h *Handler) Log(message string) {
@@ -279,7 +332,10 @@ func (h *Handler) Validate(record *Record.Record) *Http.HttpError {
 	if record.Type != JsonKey.Schema {
 		err = h.ValidateDataRefs(schema.Schema, record.Data, path.Join(record.Type, record.Id))
 	} else {
-		err = h.validateCmtAutoIdxOnSchema(record)
+		err = h.validateSchemaRefScope(record)
+		if err == nil {
+			err = h.validateCmtAutoIdxOnSchema(record)
+		}
 	}
 	if err != nil {
 		h.Log(err.Error())
@@ -371,6 +427,68 @@ func (h *Handler) ValidateDataRefs(doc *SchemaDoc.SchemaDoc, data map[string]int
 	return nil
 }
 
+// CollectCmtRefTypes 递归收集 schema 中所有 contentMediaType 为 inventory/{type} 的引用类型。
+func CollectCmtRefTypes(doc *SchemaDoc.SchemaDoc, result map[string]bool, visited map[*SchemaDoc.SchemaDoc]bool) {
+	if doc == nil || visited[doc] {
+		return
+	}
+	visited[doc] = true
+	for _, ref := range doc.CmtRefs {
+		if ref.CmtType == Schema.Inventory {
+			result[ref.ContentType] = true
+		}
+	}
+	for _, sub := range doc.SubDocs {
+		CollectCmtRefTypes(sub, result, visited)
+	}
+}
+
+// validateSchemaRefScope 在 shared vDS 中检查 schema 引用的类型都在本 vDS 中（引用闭合）。
+func (h *Handler) validateSchemaRefScope(record *Record.Record) *Http.HttpError {
+	if !h.RefLocalOnly {
+		return nil
+	}
+	schemaData, ex := Json.CopyToMap(record.Data)
+	if ex != nil {
+		return Http.WrapError(ex, "failed to copy schema data", http.StatusInternalServerError)
+	}
+	doc, ex := SchemaDoc.New(schemaData)
+	if ex != nil {
+		return Http.WrapError(ex, fmt.Sprintf("failed to parse schema [%s]", record.Id), http.StatusBadRequest)
+	}
+	refTypes := map[string]bool{}
+	CollectCmtRefTypes(doc, refTypes, map[*SchemaDoc.SchemaDoc]bool{})
+	schemaName, _ := Util.ParseCustomPath(record.Id, JsonKey.ArchivedSchemaIdDiv)
+	for refType := range refTypes {
+		if refType == schemaName {
+			continue
+		}
+		if _, err := h.LocalSchema(refType, ""); err != nil {
+			if err.Status == http.StatusNotFound {
+				return Http.NewHttpError(fmt.Sprintf("schema [%s] references type [%s] which is not in vDS [%s]; a shared vDS can only reference types in itself", record.Id, refType, h.VdsPath), http.StatusBadRequest)
+			}
+			return err
+		}
+	}
+	return nil
+}
+
+// getRefRecord 取引用目标记录。shared vDS 只在本 vDS 中查找。
+func (h *Handler) getRefRecord(dataType string, dataId string) (*Record.Record, *Http.HttpError) {
+	if !h.RefLocalOnly {
+		return h.Inventory.Get(dataType, dataId)
+	}
+	data, err := h.LocalData(dataType, dataId)
+	if err != nil {
+		return nil, err
+	}
+	record, ex := Record.LoadMap(data)
+	if ex != nil {
+		return nil, Http.WrapError(ex, fmt.Sprintf("failed to load [%s/%s] as record", dataType, dataId), http.StatusInternalServerError)
+	}
+	return record, nil
+}
+
 func (h *Handler) validateCmtRefValue(ref *SchemaDoc.CMTDocRef, value string, dataPath string) *Http.HttpError {
 	if ref.CmtType != Schema.Inventory {
 		// ContentMediaType not start with inventory, we don't understand
@@ -379,9 +497,12 @@ func (h *Handler) validateCmtRefValue(ref *SchemaDoc.CMTDocRef, value string, da
 	if ref.ContentType == JsonKey.Schema {
 		return Http.NewHttpError("should not refer to schema of schema as data type", http.StatusBadRequest)
 	}
-	cmtRecord, err := h.Inventory.Get(ref.ContentType, value)
+	cmtRecord, err := h.getRefRecord(ref.ContentType, value)
 	if err != nil {
 		if err.Status == http.StatusNotFound {
+			if h.RefLocalOnly {
+				return Http.NewHttpError(fmt.Sprintf("reference %s:%s with value=[%s] does not exists in vDS [%s]; a shared vDS can only reference records in itself. @path=[%s]", ref.CmtType, ref.ContentType, value, h.VdsPath, dataPath), http.StatusBadRequest)
+			}
 			return Http.NewHttpError(fmt.Sprintf("reference %s:%s with value=[%s] does not exists. @path=[%s]", ref.CmtType, ref.ContentType, value, dataPath), http.StatusBadRequest)
 		}
 		return err
@@ -425,9 +546,22 @@ func (h *Handler) validateCmtAutoIdxOnSchema(record *Record.Record) *Http.HttpEr
 }
 
 func (h *Handler) validateCmtAutoIdx(idx *CmtIndex.AutoIndex) *Http.HttpError {
-	schemaRec, err := h.Inventory.Get(JsonKey.Schema, idx.ContentType)
-	if err != nil {
-		return err
+	var schemaRec *Record.Record
+	if h.RefLocalOnly {
+		schema, err := h.LocalSchema(idx.ContentType, "")
+		if err != nil {
+			return err
+		}
+		schemaRec = schema.Record
+	} else {
+		if err := h.checkIndexTargetWritable(idx.ContentType); err != nil {
+			return err
+		}
+		rec, err := h.Inventory.Get(JsonKey.Schema, idx.ContentType)
+		if err != nil {
+			return err
+		}
+		schemaRec = rec
 	}
 	targetSchema, ex := SchemaDoc.New(schemaRec.Data)
 	if ex != nil {
@@ -436,7 +570,37 @@ func (h *Handler) validateCmtAutoIdx(idx *CmtIndex.AutoIndex) *Http.HttpError {
 	return idx.ValidateIndexTemplate(targetSchema)
 }
 
+// checkIndexTargetWritable 禁止 indexTemplate 订阅只存在于 mirrored vDS 中的类型：
+// 回填反向索引需要写被引用记录，而 mirrored vDS 只读。
+func (h *Handler) checkIndexTargetWritable(dataType string) *Http.HttpError {
+	if _, err := h.LocalSchema(dataType, ""); err == nil {
+		return nil
+	}
+	if h.DsKindOf == nil {
+		return nil
+	}
+	kinds, err := h.DsKindOf(dataType)
+	if err != nil || len(kinds) == 0 {
+		return nil
+	}
+	for _, kind := range kinds {
+		if kind != KindMirrored {
+			return nil
+		}
+	}
+	return Http.NewHttpError(fmt.Sprintf("indexTemplate cannot target type [%s]: it only exists in mirrored vDS, which is read-only", dataType), http.StatusBadRequest)
+}
+
 func (h *Handler) Add(record *Record.Record) *Http.HttpError {
+	if h.ReadOnly {
+		return h.readOnlyError()
+	}
+	if record.Type == JsonKey.Schema {
+		schemaName, _ := Util.ParseCustomPath(record.Id, JsonKey.ArchivedSchemaIdDiv)
+		if _, reserved := Common.ReservedTypeNames[schemaName]; reserved {
+			return Http.NewHttpError(fmt.Sprintf("[%s] is a reserved name and cannot be registered as a data type", schemaName), http.StatusBadRequest)
+		}
+	}
 	err := h.Validate(record)
 	if err != nil {
 		return err
@@ -602,6 +766,9 @@ func (h *Handler) CompareRecords(before *Record.Record, after *Record.Record) (b
 }
 
 func (h *Handler) Set(dataType string, dataId string, record *Record.Record) *Http.HttpError {
+	if h.ReadOnly {
+		return h.readOnlyError()
+	}
 	if _, ok := Common.InternalTypes[record.Type]; ok {
 		return Http.NewHttpError(fmt.Sprintf("method[%s] on type[%s] is not allowed", http.MethodPut, record.Type), http.StatusBadRequest)
 	}
@@ -670,6 +837,9 @@ func (h *Handler) updateRecord(dataType string, dataId string, record *Record.Re
 }
 
 func (h *Handler) Delete(dataType string, dataId string) *Http.HttpError {
+	if h.ReadOnly {
+		return h.readOnlyError()
+	}
 	if dataType == JsonKey.Schema {
 		err := h.deleteSchema(dataId)
 		if err != nil {
@@ -758,6 +928,9 @@ func (h *Handler) deleteData(dataType string, dataId string) *Http.HttpError {
 }
 
 func (h *Handler) Patch(dataType string, idPath string, headers map[string]interface{}, data interface{}) (map[string]interface{}, *Http.HttpError) {
+	if h.ReadOnly {
+		return nil, h.readOnlyError()
+	}
 	// schema 只能通过 POST 新版本升级（旧版本自动归档），不允许原地修改
 	if dataType == JsonKey.Schema {
 		return nil, Http.NewHttpError(fmt.Sprintf("method[%s] on type[%s] is not allowed", http.MethodPatch, dataType), http.StatusBadRequest)

@@ -131,7 +131,7 @@
 ### D2 vDS 的隔离
 
 每个 vDS 都有自己独立的：
-- **数据表**：同一个数据库连接，表名带 vDS 后缀，比如 `Data_local`、`Data_shared_A01`、`Data_mirrored_C02`。
+- **数据表**：同一个数据库连接，每个 vDS 一张表。实现：`local` 沿用 `table.data`，`shared/{name}` 为 `{table.data}_shared_{name}`，`mirrored/{name}` 为 `{table.data}_mirrored_{name}`（见第 15 节）。
 - **schema**：存在本 vDS 的数据表里，`/{vDS}/schema` 只显示本 vDS 的。
 - **Journal**：键里带上 vDS。process 只在 `local` / `shared/*` 上运行（见 D7）。
 - **逐记录锁**：锁的键带上 vDS。
@@ -309,6 +309,8 @@ func NewSubscriber(cfg Config) (Subscriber, error)
 
 放在新模块 `src/Channel/`（接口 + 工厂 + 签名），具体实现放在 `src/Channel/GitChannel/` 和 `src/Channel/DirChannel/`（本地目录，用于测试）。组织方式和 `src/Data/DbIface` 加各实现一致。
 
+> 实现与此不同：接口与实现都在 `src/DataService/Channel` 一个包里，git 通道复用目录通道的文件格式，只在读写前后挂 git 操作；`Subscriber` 用 `Refresh` + `SourceFingerprint` 代替 `SourceKey`。见第 15 节。
+
 ## 10. Git 仓库布局
 
 ```
@@ -328,6 +330,8 @@ func NewSubscriber(cfg Config) (Subscriber, error)
 - **增量更新不变慢**：镜像只读 `manifest.json` 和 cursor 之后的 segment，不需要遍历历史。
 - **控制仓库体积**：新 snapshot 生成后，早于它的 snapshot 和 segment 可以删除；镜像侧用 `--depth 1` 浅拉取。
 - **推送频率**：按时间（如 60 秒）或条数攒批，一批写成一个 segment，一次 commit + push。
+
+> 实现的布局更简单：`snapshots/{seq}.jsonl.gz[.enc]` 单个文件（schema 排在数据前面）；不给每个文件单独签名，而是 `manifest.json` 记录每个文件的 sha256，`manifest.sig` 对整个 manifest 签名。见第 15 节。
 
 ## 11. 配置示例
 
@@ -409,3 +413,38 @@ func NewSubscriber(cfg Config) (Subscriber, error)
 - 从 config 里删掉 mirrored 时删除数据（D11）。
 - Inventory 选副本时优先选 cursor 最新的那个（D4）。
 - 一个实例可以有多个 shared，路径为 `shared/{name}`（第 2 节、D5、第 11 节）。
+
+## 15. 实现与计划的差异
+
+第一阶段的 8 个里程碑都已实现。和上文不同或上文没写到的地方：
+
+**结构**
+- **表名**：`local` 沿用 `table.data`，不加后缀，这样已有部署的数据原地可用；顶层 `initialized` 迁移到 `state.json` 的 `vds.local`。shared / mirrored 为 `{table.data}_{kind}_{name}`。
+- **Channel 的位置**：`src/DataService/Channel` 一个包（`channel.go` 接口与工厂，`store.go` 目录格式，`git.go` git 钩子，`keys.go` 签名与加密）。git 通道用 git CLI，发布方完整 clone、commit、push（冲突时 rebase 重试 3 次），订阅方 `fetch --depth 1` 后 `reset --hard`。
+- **共享逻辑**：`src/DataService/Share`（outbox、`ChannelPublish`、`Publisher`、`Mirror`）；镜像侧直接写入在 `DataHandler/apply.go`。
+- **签名**：manifest 记录每个文件的 sha256，只对 manifest 签名一次（`manifest.sig`），不是每个文件一个 `.sig`。
+- **加密**：没有用 `age`，用标准库实现 X25519 + HKDF-SHA256 + AES-256-GCM，支持多个接收方；密钥是一行 base64，`DataServiceAdmin enckey` 生成。
+
+**行为**
+- **撞名改名只改 Inventory 的 dsId**：D4 写的是 vDS 路径也改成派生名字。实现中 vDS 路径始终是 config 里的名字（例如仍是 `mirrored/prod`），Inventory 分配的 dsId 存在 `state.json`，在 `/{vDS}/config` 的 `inventoryId` 中可见。这样本地直连 DS 的客户端不会因为别处的撞名而改路径。
+- **shared 和它自己的镜像在同一个 Inventory**：合并成一条记录后 kind 保持 `shared`；按 cursor 给副本排序时 shared 源头排在最前。DS 复查注册时对签名 vDS 只要求记录是签名身份且包含自己的 URL，避免两边来回改 kind。
+- **发布前与通道对账**（第 9 节没写）：通道比本地进度新（写入通道后、保存进度前进程退出）就追上；通道比本地旧（仓库被重置）就先发一个当前 seq 的 snapshot，镜像方因 gap 从它重建。通道的 `Publish` 严格要求 seq 接着通道上的最大 seq。
+- **snapshot 只按时间触发**（`snapshotIntervalSec`），没有按 outbox 积压量触发。通道上还没有 snapshot 时，第一次发布就会生成一个。
+- **outbox 不需要去重**：seq 无空洞（先写 outbox 记录，再推进计数器），发布方只发已提交的连续 seq。
+- **Inventory `GET /{type}/{ds}`**：列出某一个 DS 上该类型的 id（D9 之外新增）。
+- **`DELETE /inventory/{dsId}?url=`**：DS 删除 vDS 时用它注销自己的 URL。
+- **force-init**：仍然清空整个数据库，所以所有 vDS 都会重新初始化。
+
+**顺带修复的已有问题**
+- Inventory 判断名字是否被占用时把整个 record 信封当成 `data` 解析，`instanceId` 总是空，导致"不同 DS 撞名"一直被当成旧记录原地接管，从没分配过 `_n` 后缀。
+- Inventory `DELETE` 的路径检查条件写反了（`/{type}/{id}` 被拒，多一段反而通过）。
+- `DataServiceInfo.GetUrl` 取的是最后一个可达的 URL，改为第一个。
+- `Http.SiteReachable` 没有关闭响应体。
+
+**测试**
+- 没有用 docker-compose 做集成测试，改为进程内测试 `test/src/VdsTest`：两个 DS + 一个 Inventory 跑在 `httptest` 上，用按表隔离的内存库 `MemDb`；覆盖第 13 节的大部分场景（全量与增量、只读、同 type 同 id 不覆盖、引用在 vDS 内展开、篡改与指纹不符、加密、git 通道用本地 bare 仓库、副本合并、撞名派生、alias 不一致合并、pinnedSources、删除 mirrored、通道被重置）。
+- `docker-compose/shared-mirror/` 已提供（dir 通道，两个 compose network），但还没有在 docker 里实际跑过。
+
+**未做**
+- 在 vDS 之间复制 schema 的 `DataServiceAdmin` 命令（D2 提到）。
+- mirrored 的类型别名（D6 的后续阶段）。

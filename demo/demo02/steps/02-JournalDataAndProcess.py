@@ -14,12 +14,12 @@ input("press ANY key to continue...")
 print("""
 Journal Record Schema:
 
-Get http://localhost:8001/schema/journal
+Get http://localhost:8001/local/schema/journal
 """)
 
 input("press ANY key to continue...")
 
-resp = requests.get("http://localhost:8001/schema/journal")
+resp = requests.get("http://localhost:8001/local/schema/journal")
 print(json.dumps(resp.json(), indent=4))
 
 input("press ANY key to continue...")
@@ -31,11 +31,11 @@ dataType:{dataType}_dataId:{dataId}_page:{idx}
 
 Get list of journal of previous schema upload
 
-Get http://localhost:8001/journal
+Get http://localhost:8001/local/journal
 """)
 input("press ANY key to continue...")
 
-resp = requests.get("http://localhost:8001/journal")
+resp = requests.get("http://localhost:8001/local/journal")
 print(json.dumps(resp.json(), indent=4))
 
 input("press ANY key to continue...")
@@ -45,10 +45,10 @@ For each record, a batch of journal log stored within.
 the log entry which is not finished, stay in the active list
 the log entry that all journal process finished, will be put under archived list
 
-GET http://localhost:8001/journal/dataType:schema_dataId:VirtualHardDisk_page:1
+GET http://localhost:8001/local/journal/dataType:schema_dataId:VirtualHardDisk_page:1
 """)
 
 input("press ANY key to continue...")
 
-resp = requests.get("http://localhost:8001/journal/dataType:schema_dataId:VirtualHardDisk_page:1")
+resp = requests.get("http://localhost:8001/local/journal/dataType:schema_dataId:VirtualHardDisk_page:1")
 print(json.dumps(resp.json(), indent=4))

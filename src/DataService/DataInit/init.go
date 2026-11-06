@@ -75,6 +75,22 @@ func InitDatabase(config Config.Confuguration, db DbIface.Database, log *log.Log
 	return nil
 }
 
+// ResetDatabase drops every table in the database if it exists (force-init).
+func ResetDatabase(db DbIface.Database, log *log.Logger) error {
+	dbExists, err := db.DatabaseExists()
+	if err != nil {
+		return fmt.Errorf("failed to check database existence. Error:%s", err)
+	}
+	if !dbExists {
+		return nil
+	}
+	if err := wipeAll(db); err != nil {
+		return fmt.Errorf("failed to reset database. Error:%s", err)
+	}
+	log.Printf("DataInit: database reset by force-init")
+	return nil
+}
+
 // wipeAll drops every existing table in the database.
 func wipeAll(db DbIface.Database) error {
 	tableList, err := db.ListTable()
@@ -209,9 +225,9 @@ func importRecords(db DbIface.Database, dataTable string, records interface{}, l
 			continue
 		}
 		queryArgs := map[string]interface{}{
-			DbIface.Table:    dataTable,
-			Record.DataType:  dataType,
-			Record.DataId:    dataId,
+			DbIface.Table:   dataTable,
+			Record.DataType: dataType,
+			Record.DataId:   dataId,
 		}
 		exists, err := recordExists(db, queryArgs)
 		if err != nil {

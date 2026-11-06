@@ -31,6 +31,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"sync"
 )
 
 const StateFile = "state.json"
@@ -45,7 +46,67 @@ type State struct {
 	// DsId 作废，以 config 为准。
 	DsIdFrom   string `json:"dsIdFrom"`
 	InstanceId string `json:"instanceId"`
-	path       string
+	// Vds 按 vDS 路径（local、shared/{name}、mirrored/{name}）保存各 vDS 的运行时状态。
+	// 也用于启动时发现已从 config 中删除的 vDS。
+	Vds  map[string]*VdsState `json:"vds,omitempty"`
+	path string
+	lock sync.Mutex
+}
+
+// VdsState 是单个 vDS 的运行时状态。
+type VdsState struct {
+	Initialized bool   `json:"initialized"`
+	Table       string `json:"table"`
+	// AssignedId 为 Inventory 撞名时分配的 dsId；AssignedFrom 为分配时请求的名字，
+	// 请求名字（config 中的名字）改变后 AssignedId 作废。
+	AssignedId   string `json:"assignedId,omitempty"`
+	AssignedFrom string `json:"assignedFrom,omitempty"`
+	// mirrored：是否已从 snapshot 完成过加载、已应用到的最大 seq、同步到的来源公钥指纹
+	Loaded            bool   `json:"loaded,omitempty"`
+	Cursor            uint64 `json:"cursor,omitempty"`
+	SourceFingerprint string `json:"sourceFingerprint,omitempty"`
+}
+
+// VdsState 返回指定 vDS 的状态，不存在时创建。
+func (s *State) VdsState(path string) *VdsState {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+	if s.Vds == nil {
+		s.Vds = map[string]*VdsState{}
+	}
+	st, ok := s.Vds[path]
+	if !ok {
+		st = &VdsState{}
+		s.Vds[path] = st
+	}
+	return st
+}
+
+// VdsPaths 返回 state 中记录的所有 vDS 路径。
+func (s *State) VdsPaths() []string {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+	result := []string{}
+	for path := range s.Vds {
+		result = append(result, path)
+	}
+	return result
+}
+
+// RemoveVds 删除指定 vDS 的状态。
+func (s *State) RemoveVds(path string) {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+	delete(s.Vds, path)
+}
+
+// UpdateVds 在锁内修改 vDS 状态并写回 state.json。
+func (s *State) UpdateVds(path string, config *Confuguration, update func(st *VdsState)) error {
+	st := s.VdsState(path)
+	s.lock.Lock()
+	update(st)
+	s.lock.Unlock()
+	return s.Save(config)
 }
 
 func StatePath(configPath string) string {
@@ -56,7 +117,7 @@ func StatePath(configPath string) string {
 // state.json 不存在时，以 config 中旧版本回写的 initialized / ds.instanceId 为初值并立即写出，
 // 避免升级后 instanceId 变化，被 Inventory 判定为另一个撞名的 DS。
 func LoadState(configPath string, config *Confuguration) (*State, error) {
-	state := &State{path: StatePath(configPath)}
+	state := &State{path: StatePath(configPath), Vds: map[string]*VdsState{}}
 	configDsId := config.Ds.Id
 	data, err := ioutil.ReadFile(state.path)
 	if os.IsNotExist(err) {
@@ -85,6 +146,8 @@ func LoadState(configPath string, config *Confuguration) (*State, error) {
 
 // Save 把 config 中的运行时值写入 state.json。
 func (s *State) Save(config *Confuguration) error {
+	s.lock.Lock()
+	defer s.lock.Unlock()
 	s.Initialized = config.Initialized
 	s.InstanceId = config.Ds.InstanceId
 	s.DsId = ""

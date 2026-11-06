@@ -15,7 +15,7 @@ RUN sed 's/\r$//' ./tool/DataServiceAdmin/initMongo.sh > ./bin/dataservice_init_
 FROM alpine:3.21
 WORKDIR /opt/UniTAO/
 ENV PATH="/opt/UniTAO/:${PATH}"
-RUN apk add --no-cache bash ca-certificates && apk upgrade --no-cache
+RUN apk add --no-cache bash ca-certificates git openssh-client && apk upgrade --no-cache
 COPY --from=build /go/src/github.com/salesforce/UniTAO/bin/. ./
 RUN chmod +x ./dataservice_init_dynamo.sh
 RUN chmod +x ./dataservice_init_mongo.sh

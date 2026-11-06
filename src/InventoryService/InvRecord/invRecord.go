@@ -52,30 +52,56 @@ const (
 				},
 				"instanceId": {
 					"type": "string",
-					"description": "UUID generated on first start; distinguishes a re-registration of the same Data Service from another one using the same dsId"
+					"description": "identity of the registered vDS: the DS instance UUID for a local vDS, the public key fingerprint of the source for a shared or mirrored vDS; distinguishes a re-registration or replica of the same vDS from another one using the same dsId"
+				},
+				"kind": {
+					"type": "string",
+					"description": "kind of the registered virtual Data Service: local, shared or mirrored; empty is treated as local",
+					"required": false
 				},
 				"url": {
 					"type": "array",
 					"items": {
 						"type": "string"
 					},
-					"description": "URLs the Inventory Service can use to reach this Data Service; the first reachable one is used"
+					"description": "URLs the Inventory Service can use to reach this vDS; the first reachable one is used. A shared or mirrored vDS hosted by several instances (replicas) lists all of them, ordered by sync cursor, newest first"
 				},
 				"lastSynctime": {
 					"type": "string",
-					"description": "timestamp of the last schema sync reported for this Data Service"
+					"description": "timestamp of the last schema sync reported for this Data Service",
+					"required": false
 				}
 			}
 		}
 	}`
 )
 
+const (
+	KindLocal    = "local"
+	KindShared   = "shared"
+	KindMirrored = "mirrored"
+)
+
 type DataServiceInfo struct {
 	Id           string   `json:"dsId"`
 	InstanceId   string   `json:"instanceId"`
+	Kind         string   `json:"kind,omitempty"`
 	URL          []string `json:"url"`
-	LastSyncTime string   `json:"lastSynctime"`
+	LastSyncTime string   `json:"lastSynctime,omitempty"`
 	goodUrl      string
+}
+
+// Signed 判断该 vDS 是否以签名指纹为身份（shared / mirrored）。
+func (ds *DataServiceInfo) Signed() bool {
+	return ds.Kind == KindShared || ds.Kind == KindMirrored
+}
+
+// EffectiveKind 返回 kind，空值视为 local。
+func (ds *DataServiceInfo) EffectiveKind() string {
+	if ds.Kind == "" {
+		return KindLocal
+	}
+	return ds.Kind
 }
 
 func NewDsInfo(id string, url string) *Record.Record {
@@ -101,12 +127,14 @@ func CreateDsInfo(payload interface{}) (*DataServiceInfo, error) {
 	return &dsInfo, nil
 }
 
+// GetUrl 按顺序返回第一个可达的 URL（副本按 cursor 从新到旧排序）。
 func (ds *DataServiceInfo) GetUrl() (string, error) {
 	if ds.goodUrl == "" || !Http.SiteReachable(ds.goodUrl) {
 		ds.goodUrl = ""
 		for _, url := range ds.URL {
 			if Http.SiteReachable(url) {
 				ds.goodUrl = url
+				break
 			}
 		}
 		if ds.goodUrl == "" {

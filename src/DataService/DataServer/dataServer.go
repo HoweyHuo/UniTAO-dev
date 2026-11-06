@@ -27,16 +27,18 @@ package DataServer
 
 import (
 	"Data"
+	"Data/DbConfig"
+	"Data/DbIface"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
+	"strings"
 	"time"
 
 	"DataService/Common"
 	"DataService/Config"
-	"DataService/DataHandler"
-	"DataService/DataInit"
 	"DataService/DataJournal"
 
 	"github.com/salesforce/UniTAO/lib/Schema/Record"
@@ -53,25 +55,28 @@ const (
 )
 
 type Server struct {
-	Id             string
-	Port           string
-	args           map[string]string
-	config         Config.Confuguration
-	state          *Config.State
-	data           *DataHandler.Handler
-	journal        *DataJournal.JournalLib
-	journalHandler *DataJournal.JournalHandler
-	BackendCtl     *Thread.ThreadCtrl
-	logPath        string
-	log            *log.Logger
+	Id         string
+	Port       string
+	args       map[string]string
+	config     Config.Confuguration
+	state      *Config.State
+	db         DbIface.Database
+	vdsList    []*Vds
+	vdsMap     map[string]*Vds
+	BackendCtl *Thread.ThreadCtrl
+	logPath    string
+	log        *log.Logger
+	// ConnectDb 建立数据库连接，测试时可替换。
+	ConnectDb func(config DbConfig.DatabaseConfig, logger *log.Logger) (DbIface.Database, error)
 }
 
 func New() (Server, error) {
 	srv := Server{
-		Port:    PORT_DEFAULT,
-		args:    make(map[string]string),
-		config:  Config.Confuguration{},
-		logPath: "",
+		Port:      PORT_DEFAULT,
+		args:      make(map[string]string),
+		config:    Config.Confuguration{},
+		logPath:   "",
+		ConnectDb: Data.ConnectDb,
 	}
 	err := srv.init()
 	if err != nil {
@@ -80,18 +85,31 @@ func New() (Server, error) {
 	return srv, nil
 }
 
-func (srv *Server) WaitForDataHandler() error {
+// NewServer 不经命令行参数直接创建 Server（测试与嵌入使用）。
+func NewServer(serverId string, configPath string, port string) (*Server, error) {
+	srv := &Server{
+		Id:        serverId,
+		Port:      PORT_DEFAULT,
+		args:      map[string]string{CONFIG: configPath, PORT: port},
+		ConnectDb: Data.ConnectDb,
+	}
+	if err := srv.loadConfig(); err != nil {
+		return nil, err
+	}
+	return srv, nil
+}
+
+func (srv *Server) connectDb() {
 	for {
-		handler, err := DataHandler.New(srv.config, srv.log, Data.ConnectDb)
+		db, err := srv.ConnectDb(srv.config.Database, srv.log)
 		if err == nil {
-			srv.data = handler
-			break
+			srv.db = db
+			return
 		}
-		srv.log.Printf("failed to initialize data layer, Err:%s", err)
+		srv.log.Printf("failed to connect to database, Err:%s", err)
 		srv.log.Printf("retry to connect to database after 10 seconds")
 		time.Sleep(10 * time.Second)
 	}
-	return nil
 }
 
 func (srv *Server) Run() {
@@ -102,45 +120,35 @@ func (srv *Server) Run() {
 	if logFile != nil {
 		defer logFile.Close()
 	}
-	srv.log = logger
-	if logFile != nil {
-		defer logFile.Close()
-	}
-	srv.BackendCtl = Thread.NewThreadController(srv.log)
-	ex = srv.WaitForDataHandler()
+	journalLogFile, journalLogger, ex := CustomLogger.FileLoger(srv.logPath, fmt.Sprintf("%s_Journal", srv.Id))
 	if ex != nil {
-		srv.log.Fatalf("failed to connect to database, Err:%s", ex)
+		log.Fatalf("failed to create file logger[%s_Journal], Error: %s", srv.Id, ex)
 	}
-	if !srv.config.Initialized {
-		if err := DataInit.InitDatabase(srv.config, srv.data.DB, srv.log); err != nil {
-			srv.log.Fatalf("failed to initialize database, Err:%s", err)
-		}
-		srv.config.Initialized = true
-		if err := srv.state.Save(&srv.config); err != nil {
-			srv.log.Printf("failed to persist initialized flag, Err:%s", err)
-		}
+	if journalLogFile != nil {
+		defer journalLogFile.Close()
 	}
-	jLogFile, jLogger, ex := CustomLogger.FileLoger(srv.logPath, fmt.Sprintf("%s_Journal", srv.Id))
-	if ex != nil {
-		srv.log.Fatalf("failed to create file logger[%s_Journal], Error: %s", srv.Id, ex)
+	if err := srv.Start(logger, journalLogger); err != nil {
+		logger.Fatalf("failed to start Data Service, Err:%s", err)
 	}
-	if jLogFile != nil {
-		defer jLogFile.Close()
-	}
-	journal, err := DataJournal.NewJournalLib(srv.data.DB, srv.config.DataTable.Data, jLogger)
-	if err != nil {
-		srv.log.Fatalf("failed to create Journal Library. Error: %s", err)
-	}
-	srv.journal = journal
-	srv.data.AddJournal = srv.journal.AddJournal
-	// 新增/删除 data type 时向 Inventory 推送单类型事件（best-effort，不阻塞 schema 创建或删除）
-	srv.data.TypeChangeNotify = func(dataType string) {
-		go srv.notifyTypeChange(dataType)
-	}
-	srv.RunJournalHandler()
-	// 自我注册：无 inventory.url 时 InvLinked() 为 false，StartSelfRegistration 直接返回
-	srv.StartSelfRegistration()
 	srv.RunHttp()
+}
+
+// Start 连接数据库、建立所有 vDS、启动后台任务与自我注册，但不监听端口。
+func (srv *Server) Start(logger *log.Logger, journalLogger *log.Logger) error {
+	if logger == nil {
+		logger = log.Default()
+	}
+	if journalLogger == nil {
+		journalLogger = logger
+	}
+	srv.log = logger
+	srv.BackendCtl = Thread.NewThreadController(srv.log)
+	srv.connectDb()
+	if err := srv.setupVds(journalLogger); err != nil {
+		return err
+	}
+	srv.StartSelfRegistration()
+	return nil
 }
 
 func (srv *Server) RunHttp() {
@@ -149,17 +157,17 @@ func (srv *Server) RunHttp() {
 	srv.log.Fatal(http.ListenAndServe(fmt.Sprintf(":%s", srv.Port), nil))
 }
 
-func (srv *Server) RunJournalHandler() {
-	journal, err := DataJournal.NewJournalHandler(srv.data, srv.journal, srv.journal.Logger)
+// ServeHTTP 让 Server 可以直接作为 http.Handler 使用（测试）。
+func (srv *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	Http.Cors(srv.handler)(w, r)
+}
+
+func (srv *Server) runJournalHandler(vds *Vds, journalHandler *DataJournal.JournalHandler) {
+	worker, err := srv.BackendCtl.AddWorker(fmt.Sprintf("journalHandler_%s", vds.Path), journalHandler.Run)
 	if err != nil {
-		srv.log.Fatalf("failed to load Journal Handler. Error:%s", err)
+		srv.log.Fatalf("failed to create Journal Handler of vDS [%s] as backend process.", vds.Path)
 	}
-	srv.journalHandler = journal
-	worker, err := srv.BackendCtl.AddWorker("journalHandler", srv.journalHandler.Run)
-	if err != nil {
-		srv.log.Fatalf("failed to create Journal Handler as backend process.")
-	}
-	srv.journal.HandlerNotify = worker.Notify
+	vds.Journal.HandlerNotify = worker.Notify
 	worker.Run()
 }
 
@@ -187,6 +195,10 @@ func (srv *Server) init() error {
 		srv.logPath = logPath
 	}
 	srv.args[CONFIG] = configPath
+	return srv.loadConfig()
+}
+
+func (srv *Server) loadConfig() error {
 	err := Config.Read(srv.args[CONFIG], &srv.config)
 	if err != nil {
 		return err
@@ -195,13 +207,31 @@ func (srv *Server) init() error {
 	if err != nil {
 		return err
 	}
-	if port != "" {
-		srv.Port = port
-
+	if srv.args[PORT] != "" {
+		srv.Port = srv.args[PORT]
 	} else if srv.config.Http.Port != "" {
 		srv.Port = srv.config.Http.Port
 	}
 	return nil
+}
+
+func (srv *Server) responseError(w http.ResponseWriter, status int, format string, args ...interface{}) {
+	err := Http.NewHttpError(fmt.Sprintf(format, args...), status)
+	Http.ResponseJson(w, err, err.Status, srv.config.Http)
+}
+
+// splitVdsPath 从请求路径中取出 vDS：返回 (vDS 路径, 剩余路径, 是否为 vDS 分组根 /shared 或 /mirrored)。
+func splitVdsPath(requestUrl string) (string, string, string) {
+	first, rest := Util.ParsePath(requestUrl)
+	switch first {
+	case KindShared, KindMirrored:
+		name, remain := Util.ParsePath(rest)
+		if name == "" || strings.HasPrefix(name, "?") {
+			return "", "", first
+		}
+		return fmt.Sprintf("%s/%s", first, name), remain, ""
+	}
+	return first, rest, ""
 }
 
 func (srv *Server) handler(w http.ResponseWriter, r *http.Request) {
@@ -209,54 +239,106 @@ func (srv *Server) handler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		srv.log.Printf("failed to parse request URL. Error:%s", err)
 		Http.ResponseJson(w, err, err.Status, srv.config.Http)
+		return
 	}
-	dataType, idPath := Util.ParsePath(requestUrl)
-	srv.log.Printf("process request[%s] on [%s/%s]", r.Method, dataType, idPath)
+	vdsPath, rest, group := splitVdsPath(requestUrl)
+	if vdsPath == "" || strings.HasPrefix(vdsPath, "?") {
+		// GET / 列出所有 vDS；GET /shared、/mirrored 列出该组的名字
+		if r.Method != http.MethodGet {
+			srv.responseError(w, http.StatusMethodNotAllowed, "method [%s] not supported on [%s]", r.Method, requestUrl)
+			return
+		}
+		Http.ResponseJson(w, srv.listVds(group), http.StatusOK, srv.config.Http)
+		return
+	}
+	vds, ok := srv.vdsMap[vdsPath]
+	if !ok {
+		srv.responseError(w, http.StatusNotFound, "vDS [%s] not found on this Data Service, available: %v", vdsPath, srv.listVds(""))
+		return
+	}
+	dataType, idPath := Util.ParsePath(rest)
+	if strings.HasPrefix(dataType, "?") {
+		dataType = ""
+	}
+	srv.log.Printf("process request[%s] on vDS [%s] [%s/%s]", r.Method, vds.Path, dataType, idPath)
+	if vds.Kind == KindMirrored && r.Method != http.MethodGet {
+		srv.responseError(w, http.StatusMethodNotAllowed, "vDS [%s] is read-only", vds.Path)
+		return
+	}
+	if dataType == "" {
+		switch r.Method {
+		case http.MethodGet:
+			srv.handleVdsRoot(w, vds)
+		case http.MethodPost:
+			srv.handlePost(w, r, vds, "", "")
+		default:
+			srv.responseError(w, http.StatusMethodNotAllowed, "method [%s] not supported on vDS root [%s]", r.Method, vds.Path)
+		}
+		return
+	}
+	if dataType == Common.KeyConfig {
+		if r.Method != http.MethodGet || idPath != "" {
+			srv.responseError(w, http.StatusMethodNotAllowed, "only GET [%s/%s] is supported", vds.Path, Common.KeyConfig)
+			return
+		}
+		Http.ResponseJson(w, srv.vdsConfigInfo(vds), http.StatusOK, srv.config.Http)
+		return
+	}
 	if dataType == Record.KeyRecord {
-		srv.log.Printf("Invalid request on [%s]", dataType)
-		Http.ResponseJson(w, Http.HttpError{
-			Status: http.StatusBadRequest,
-			Message: []string{
-				fmt.Sprintf("data type=[%s] is not supported", dataType),
-			},
-		}, http.StatusBadRequest, srv.config.Http)
+		srv.responseError(w, http.StatusBadRequest, "data type=[%s] is not supported", dataType)
 		return
 	}
 	if _, ok := Common.ReadOnlyTypes[dataType]; ok && r.Method != http.MethodGet {
-		srv.log.Printf("Invalid update request on [%s]", dataType)
-		Http.ResponseJson(w, Http.HttpError{
-			Status: http.StatusBadRequest,
-			Message: []string{
-				fmt.Sprintf("update on data type=[%s] is not supported", dataType),
-			},
-		}, http.StatusBadRequest, srv.config.Http)
+		srv.responseError(w, http.StatusBadRequest, "update on data type=[%s] is not supported", dataType)
 		return
 	}
 	switch r.Method {
 	case http.MethodGet:
-		srv.handleGet(w, dataType, idPath)
+		srv.handleGet(w, vds, dataType, idPath)
 	case http.MethodPost:
-		srv.handlePost(w, r, dataType, idPath)
+		srv.handlePost(w, r, vds, dataType, idPath)
 	case http.MethodDelete:
-		srv.handleDelete(w, dataType, idPath)
+		srv.handleDelete(w, vds, dataType, idPath)
 	case http.MethodPut:
-		srv.handlePut(w, r, dataType, idPath)
+		srv.handlePut(w, r, vds, dataType, idPath)
 	case http.MethodPatch:
-		srv.handlePatch(w, r, dataType, idPath)
+		srv.handlePatch(w, r, vds, dataType, idPath)
 	default:
-		Http.ResponseJson(w, Http.HttpError{
-			Status: http.StatusMethodNotAllowed,
-			Message: []string{
-				fmt.Sprintf("method [%s] not supported", r.Method),
-			},
-		}, http.StatusMethodNotAllowed, srv.config.Http)
+		srv.responseError(w, http.StatusMethodNotAllowed, "method [%s] not supported", r.Method)
 	}
 }
 
-func (srv *Server) handleGet(w http.ResponseWriter, dataType string, idPath string) {
+// listVds 列出 vDS 路径；group 为 shared/mirrored 时只列该组的名字。
+func (srv *Server) listVds(group string) []string {
+	result := []string{}
+	for _, vds := range srv.vdsList {
+		if group == "" {
+			result = append(result, vds.Path)
+			continue
+		}
+		if vds.Kind == group {
+			result = append(result, vds.Name)
+		}
+	}
+	sort.Strings(result)
+	return result
+}
+
+func (srv *Server) handleVdsRoot(w http.ResponseWriter, vds *Vds) {
+	types, err := vds.Handler.ListDataTypes()
+	if err != nil {
+		Http.ResponseJson(w, err, err.Status, srv.config.Http)
+		return
+	}
+	sort.Strings(types)
+	result := append([]string{Common.KeyConfig, "schema"}, types...)
+	Http.ResponseJson(w, result, http.StatusOK, srv.config.Http)
+}
+
+func (srv *Server) handleGet(w http.ResponseWriter, vds *Vds, dataType string, idPath string) {
 	if idPath == "" {
-		srv.log.Printf("list id of [%s]", dataType)
-		idList, err := srv.data.List(dataType)
+		srv.log.Printf("list id of [%s/%s]", vds.Path, dataType)
+		idList, err := vds.Handler.List(dataType)
 		if err != nil {
 			Http.ResponseJson(w, err, err.Status, srv.config.Http)
 			return
@@ -268,11 +350,15 @@ func (srv *Server) handleGet(w http.ResponseWriter, dataType string, idPath stri
 	var err *Http.HttpError
 	switch dataType {
 	case Common.KeyJournal:
+		if vds.Journal == nil {
+			srv.responseError(w, http.StatusNotFound, "vDS [%s] has no journal", vds.Path)
+			return
+		}
 		srv.log.Printf("get Journal of type [%s]", idPath)
-		result, err = srv.journal.GetJournal(idPath)
+		result, err = vds.Journal.GetJournal(idPath)
 	default:
-		srv.log.Printf("get data of [%s/%s]", dataType, idPath)
-		result, err = srv.data.Get(dataType, idPath)
+		srv.log.Printf("get data of [%s/%s/%s]", vds.Path, dataType, idPath)
+		result, err = vds.Handler.Get(dataType, idPath)
 	}
 	if err != nil {
 		Http.ResponseJson(w, err, err.Status, srv.config.Http)
@@ -281,14 +367,14 @@ func (srv *Server) handleGet(w http.ResponseWriter, dataType string, idPath stri
 	Http.ResponseJson(w, result, http.StatusOK, srv.config.Http)
 }
 
-func (srv *Server) BuildRecord(payload map[string]interface{}, dataType string, dataId string) (*Record.Record, *Http.HttpError) {
+func (srv *Server) BuildRecord(vds *Vds, payload map[string]interface{}, dataType string, dataId string) (*Record.Record, *Http.HttpError) {
 	if dataType == "" {
 		return nil, Http.NewHttpError(fmt.Sprintf("empty data type in path. [%s/%s]=''", Record.DataType, Record.DataId), http.StatusBadRequest)
 	}
 	if dataId == "" {
 		return nil, Http.NewHttpError(fmt.Sprintf("empty data id in path. [%s/%s]=''", Record.DataType, Record.DataId), http.StatusBadRequest)
 	}
-	schema, err := srv.data.LocalSchema(dataType, "")
+	schema, err := vds.Handler.LocalSchema(dataType, "")
 	if err != nil {
 		return nil, err
 	}
@@ -296,7 +382,7 @@ func (srv *Server) BuildRecord(payload map[string]interface{}, dataType string, 
 	return record, nil
 }
 
-func (srv *Server) handlePost(w http.ResponseWriter, r *http.Request, dataType string, dataId string) {
+func (srv *Server) handlePost(w http.ResponseWriter, r *http.Request, vds *Vds, dataType string, dataId string) {
 	reqBody, err := Http.LoadRequest(r)
 	if err != nil {
 		Http.ResponseJson(w, err, err.Status, srv.config.Http)
@@ -311,11 +397,7 @@ func (srv *Server) handlePost(w http.ResponseWriter, r *http.Request, dataType s
 	var ex error
 	if len(r.Header.Values(Record.NotRecord)) == 0 {
 		if dataType != "" {
-			Http.ResponseJson(w, Http.NewHttpError("data type expect to be empty for action=[POST]", http.StatusBadRequest), http.StatusBadRequest, srv.config.Http)
-			return
-		}
-		if dataId != "" {
-			Http.ResponseJson(w, Http.NewHttpError("data id expect to be empty for action=[POST]", http.StatusBadRequest), http.StatusBadRequest, srv.config.Http)
+			Http.ResponseJson(w, Http.NewHttpError(fmt.Sprintf("POST a record to the vDS root [/%s], data type is taken from [%s]", vds.Path, Record.DataType), http.StatusBadRequest), http.StatusBadRequest, srv.config.Http)
 			return
 		}
 		record, ex = Record.LoadMap(payload)
@@ -324,13 +406,13 @@ func (srv *Server) handlePost(w http.ResponseWriter, r *http.Request, dataType s
 			return
 		}
 	} else {
-		record, err = srv.BuildRecord(payload, dataType, dataId)
+		record, err = srv.BuildRecord(vds, payload, dataType, dataId)
 		if err != nil {
 			Http.ResponseJson(w, err, err.Status, srv.config.Http)
 			return
 		}
 	}
-	err = srv.data.Add(record)
+	err = vds.Handler.Add(record)
 	if err != nil {
 		Http.ResponseJson(w, err, err.Status, srv.config.Http)
 		return
@@ -338,7 +420,7 @@ func (srv *Server) handlePost(w http.ResponseWriter, r *http.Request, dataType s
 	Http.ResponseText(w, []byte(record.Id), http.StatusCreated, srv.config.Http)
 }
 
-func (srv *Server) handlePut(w http.ResponseWriter, r *http.Request, dataType string, dataId string) {
+func (srv *Server) handlePut(w http.ResponseWriter, r *http.Request, vds *Vds, dataType string, dataId string) {
 	reqBody, err := Http.LoadRequest(r)
 	if err != nil {
 		Http.ResponseJson(w, err, err.Status, srv.config.Http)
@@ -358,13 +440,13 @@ func (srv *Server) handlePut(w http.ResponseWriter, r *http.Request, dataType st
 			return
 		}
 	} else {
-		record, err = srv.BuildRecord(payload, dataType, dataId)
+		record, err = srv.BuildRecord(vds, payload, dataType, dataId)
 		if err != nil {
 			Http.ResponseJson(w, err, err.Status, srv.config.Http)
 			return
 		}
 	}
-	err = srv.data.Set(dataType, dataId, record)
+	err = vds.Handler.Set(dataType, dataId, record)
 	if err != nil {
 		Http.ResponseJson(w, err, err.Status, srv.config.Http)
 		return
@@ -372,8 +454,8 @@ func (srv *Server) handlePut(w http.ResponseWriter, r *http.Request, dataType st
 	Http.ResponseText(w, []byte(record.Id), http.StatusCreated, srv.config.Http)
 }
 
-func (srv *Server) handleDelete(w http.ResponseWriter, dataType string, dataId string) {
-	err := srv.data.Delete(dataType, dataId)
+func (srv *Server) handleDelete(w http.ResponseWriter, vds *Vds, dataType string, dataId string) {
+	err := vds.Handler.Delete(dataType, dataId)
 	if err != nil {
 		Http.ResponseJson(w, err, err.Status, srv.config.Http)
 		return
@@ -384,7 +466,7 @@ func (srv *Server) handleDelete(w http.ResponseWriter, dataType string, dataId s
 	Http.ResponseJson(w, result, http.StatusAccepted, srv.config.Http)
 }
 
-func (srv *Server) handlePatch(w http.ResponseWriter, r *http.Request, dataType string, idPath string) {
+func (srv *Server) handlePatch(w http.ResponseWriter, r *http.Request, vds *Vds, dataType string, idPath string) {
 	payload, e := Http.LoadRequest(r)
 	if e != nil {
 		srv.log.Printf("PATCH: [%s/%s] failed to load request, Error: %s", dataType, idPath, e)
@@ -392,8 +474,8 @@ func (srv *Server) handlePatch(w http.ResponseWriter, r *http.Request, dataType 
 		return
 	}
 	headers := Http.ParseHeaders(r)
-	srv.log.Printf("PATCH [%s/%s]: call handler Patch", dataType, idPath)
-	response, e := srv.data.Patch(dataType, idPath, headers, payload)
+	srv.log.Printf("PATCH [%s/%s/%s]: call handler Patch", vds.Path, dataType, idPath)
+	response, e := vds.Handler.Patch(dataType, idPath, headers, payload)
 	if e != nil {
 		Http.ResponseJson(w, e, e.Status, srv.config.Http)
 		return

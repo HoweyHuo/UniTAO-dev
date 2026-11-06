@@ -30,8 +30,10 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"regexp"
 
 	"Data/DbConfig"
+	"DataService/Channel"
 
 	"github.com/salesforce/UniTAO/lib/Util/Http"
 	"github.com/salesforce/UniTAO/lib/Util/Json"
@@ -64,6 +66,97 @@ type Confuguration struct {
 	Initialized bool                    `json:"initialized"`
 	ForceInit   bool                    `json:"force-init"`
 	Init        InitConfig              `json:"init"`
+	Vds         VdsConfig               `json:"vds"`
+}
+
+// VdsConfig 列出本实例承载的虚拟 Data Service。出现哪个 key 就启用哪个 vDS；
+// 整段缺省时只启用 local。
+type VdsConfig struct {
+	Local    *LocalVdsConfig     `json:"local,omitempty"`
+	Shared   []SharedVdsConfig   `json:"shared,omitempty"`
+	Mirrored []MirroredVdsConfig `json:"mirrored,omitempty"`
+}
+
+type LocalVdsConfig struct{}
+
+// SharedVdsConfig 是一个 shared vDS：数据全部经 Channel 共享出去。
+type SharedVdsConfig struct {
+	Name                string         `json:"name"`
+	SigningKeyFile      string         `json:"signingKeyFile"`
+	PublishIntervalSec  int            `json:"publishIntervalSec"`
+	SnapshotIntervalSec int            `json:"snapshotIntervalSec"`
+	Channel             Channel.Config `json:"channel"`
+}
+
+// MirroredVdsConfig 是一个 mirrored vDS：只读，所有变化来自 Channel。
+// Name 为来源的共享名；Alias 为本网使用的名字（路径与 Inventory dsId），缺省等于 Name。
+type MirroredVdsConfig struct {
+	Name               string         `json:"name"`
+	Alias              string         `json:"alias,omitempty"`
+	TrustedFingerprint string         `json:"trustedFingerprint"`
+	PullIntervalSec    int            `json:"pullIntervalSec"`
+	Channel            Channel.Config `json:"channel"`
+}
+
+// LocalName 返回 mirrored vDS 在本网使用的名字。
+func (m MirroredVdsConfig) LocalName() string {
+	if m.Alias != "" {
+		return m.Alias
+	}
+	return m.Name
+}
+
+var vdsNamePattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
+// ValidVdsName 判断 vDS 名字是否合法：只允许字母、数字、下划线、连字符
+// （名字会出现在 URL 路径、Inventory dsId 和表名中）。
+func ValidVdsName(name string) bool {
+	return vdsNamePattern.MatchString(name)
+}
+
+// Normalize 补默认值并校验 vds 段。
+func (v *VdsConfig) Normalize() error {
+	if v.Local == nil && len(v.Shared) == 0 && len(v.Mirrored) == 0 {
+		v.Local = &LocalVdsConfig{}
+	}
+	seen := map[string]bool{}
+	for idx := range v.Shared {
+		cfg := &v.Shared[idx]
+		if !ValidVdsName(cfg.Name) {
+			return fmt.Errorf("invalid shared vDS name [%s], only [A-Za-z0-9_-] allowed", cfg.Name)
+		}
+		if seen[cfg.Name] {
+			return fmt.Errorf("duplicate shared vDS name [%s]", cfg.Name)
+		}
+		seen[cfg.Name] = true
+		if cfg.SigningKeyFile == "" {
+			return fmt.Errorf("shared vDS [%s] requires [signingKeyFile]", cfg.Name)
+		}
+		if err := cfg.Channel.Validate(); err != nil {
+			return fmt.Errorf("shared vDS [%s]: %s", cfg.Name, err)
+		}
+	}
+	seen = map[string]bool{}
+	for idx := range v.Mirrored {
+		cfg := &v.Mirrored[idx]
+		if !ValidVdsName(cfg.Name) {
+			return fmt.Errorf("invalid mirrored vDS name [%s], only [A-Za-z0-9_-] allowed", cfg.Name)
+		}
+		if cfg.Alias != "" && !ValidVdsName(cfg.Alias) {
+			return fmt.Errorf("invalid mirrored vDS alias [%s], only [A-Za-z0-9_-] allowed", cfg.Alias)
+		}
+		if seen[cfg.LocalName()] {
+			return fmt.Errorf("duplicate mirrored vDS name [%s]", cfg.LocalName())
+		}
+		seen[cfg.LocalName()] = true
+		if cfg.TrustedFingerprint == "" {
+			return fmt.Errorf("mirrored vDS [%s] requires [trustedFingerprint]", cfg.LocalName())
+		}
+		if err := cfg.Channel.Validate(); err != nil {
+			return fmt.Errorf("mirrored vDS [%s]: %s", cfg.LocalName(), err)
+		}
+	}
+	return nil
 }
 
 type InitConfig struct {
@@ -96,5 +189,5 @@ func Read(configPath string, config *Confuguration) error {
 	if config.DataTable.Data == "" {
 		return fmt.Errorf("missing field data in Config.DataTable")
 	}
-	return nil
+	return config.Vds.Normalize()
 }

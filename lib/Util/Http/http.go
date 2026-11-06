@@ -214,11 +214,12 @@ func SiteReachable(url string) bool {
 	client := http.Client{
 		Timeout: timeout,
 	}
-	_, err := client.Get(url)
+	resp, err := client.Get(url)
 	if err != nil {
 		log.Println("Site unreachable, error: ", err)
 		return false
 	}
+	resp.Body.Close()
 	log.Printf("Site[%s] reached", url)
 	return true
 }

@@ -10,15 +10,15 @@ print("""
 #####################################################################################
 """)
 
-print("get [DataService01] http://localhost:8001/schema")
+print("get [DataService01] http://localhost:8001/local/schema")
 
-resp = requests.get("http://localhost:8001/schema")
+resp = requests.get("http://localhost:8001/local/schema")
 
 print(json.dumps(resp.json(), indent=4))
 
-print("get [DataService02] http://localhost:8002/schema")
+print("get [DataService02] http://localhost:8002/local/schema")
 
-resp = requests.get("http://localhost:8002/schema")
+resp = requests.get("http://localhost:8002/local/schema")
 
 print(json.dumps(resp.json(), indent=4))
 

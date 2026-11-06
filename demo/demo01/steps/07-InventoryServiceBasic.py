@@ -98,22 +98,22 @@ VmLinkSchemaV2 = {
     }
 }
 
-print("POST http://localhost:8001 {}".format(json.dumps(VmLinkSchemaV2, indent=4)))
-resp = requests.post("http://localhost:8001", json=VmLinkSchemaV2)
+print("POST http://localhost:8001/local {}".format(json.dumps(VmLinkSchemaV2, indent=4)))
+resp = requests.post("http://localhost:8001/local", json=VmLinkSchemaV2)
 print(resp.text)
 
-print("GET http://localhost:8001/schema/VmLink")
+print("GET http://localhost:8001/local/schema/VmLink")
 
-resp = requests.get("http://localhost:8001/schema/VmLink")
+resp = requests.get("http://localhost:8001/local/schema/VmLink")
 print(json.dumps(resp.json(), indent=4))
 
 input("press ANY key to continue...")
 
 print("""
 Upgrade VmLink to newer version [0.0.2] directly since 0.0.2 is compatible with 0.0.1
-PATCH http://localhost:8001/VmLink/vm-srv-wireguard-01-link-ext/__ver '0.0.2'
+PATCH http://localhost:8001/local/VmLink/vm-srv-wireguard-01-link-ext/__ver '0.0.2'
 """)
-resp = requests.patch("http://localhost:8001/VmLink/vm-srv-wireguard-01-link-ext/__ver", "0.0.2")
+resp = requests.patch("http://localhost:8001/local/VmLink/vm-srv-wireguard-01-link-ext/__ver", "0.0.2")
 print(json.dumps(resp.json(), indent=4))
 
 print("""
@@ -130,21 +130,21 @@ bridge = {
         "links": []
     }
 }
-print("POST http://localhost:8001 {}".format(json.dumps(bridge, indent=4)))
-resp = requests.post("http://localhost:8001", json=bridge)
+print("POST http://localhost:8001/local {}".format(json.dumps(bridge, indent=4)))
+resp = requests.post("http://localhost:8001/local", json=bridge)
 print(resp.text)
 
 input("press ANY key to continue...")
 
-print("PATCH http://localhost:8001/VmLink/vm-srv-wireguard-01-link-ext/bridge 'br-ext'")
-resp = requests.patch("http://localhost:8001/VmLink/vm-srv-wireguard-01-link-ext/bridge", "br-ext")
+print("PATCH http://localhost:8001/local/VmLink/vm-srv-wireguard-01-link-ext/bridge 'br-ext'")
+resp = requests.patch("http://localhost:8001/local/VmLink/vm-srv-wireguard-01-link-ext/bridge", "br-ext")
 print(json.dumps(resp.json(), indent=4))
 
-print("PATCH http://localhost:8001/VmLink/vm-srv-wireguard-01-link-ext/host 'vmhost-test01'")
-resp = requests.patch("http://localhost:8001/VmLink/vm-srv-wireguard-01-link-ext/host", "vmhost-test01")
+print("PATCH http://localhost:8001/local/VmLink/vm-srv-wireguard-01-link-ext/host 'vmhost-test01'")
+resp = requests.patch("http://localhost:8001/local/VmLink/vm-srv-wireguard-01-link-ext/host", "vmhost-test01")
 print(json.dumps(resp.json(), indent=4))
 
-print("PATCH http://localhost:8001/NetBridge/br-ext/links 'vm-srv-wireguard-01-link-ext'")
-resp = requests.patch("http://localhost:8001/NetBridge/br-ext/links", "vm-srv-wireguard-01-link-ext")
+print("PATCH http://localhost:8001/local/NetBridge/br-ext/links 'vm-srv-wireguard-01-link-ext'")
+resp = requests.patch("http://localhost:8001/local/NetBridge/br-ext/links", "vm-srv-wireguard-01-link-ext")
 print(json.dumps(resp.json(), indent=4))
 

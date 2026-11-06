@@ -68,17 +68,19 @@ func (s *Syncer) Sync() error {
 		return fmt.Errorf("failed to list all inventorys. Error: %s", err)
 	}
 	s.log.Printf("[%d] Data Services to sync", len(idList))
+	// 镜像副本按 cursor 排序，后续访问优先落在最新的副本上
+	s.sortReplicaUrls()
 	refTypes, ex := s.getReferralTypes()
 	if ex != nil {
 		s.log.Printf("failed to collect existing referral types. Error: %s", ex)
 		return ex
 	}
-	dsTypes, ex := s.getDsTypes(idList)
+	dsTypes, schemaIds, ex := s.getDsTypes(idList)
 	if ex != nil {
 		s.log.Printf("failed to collect data types from Data Services. Error: %s", ex)
 		return ex
 	}
-	return s.syncDataTypes(refTypes, dsTypes)
+	return s.syncDataTypes(refTypes, dsTypes, schemaIds)
 }
 
 // SyncDs 定向同步单个新注册/更新的 DS：把该 DS 的 schema 类型 merge 进 referral，
@@ -180,6 +182,13 @@ func (s *Syncer) mergeType(dsId string, dataType string) error {
 		}
 	}
 	desired := dedupeStrings(append(current, dsId))
+	if !contains(current, dsId) && len(current) > 0 {
+		accepted := s.filterConsistent(dataType, desired, nil)
+		if !contains(accepted, dsId) {
+			s.log.Printf("[sync-ds] type[%s] @DS[%s] conflicts with existing referral, not added", dataType, dsId)
+			return nil
+		}
+	}
 	if setEqual(current, desired) {
 		s.log.Printf("[sync-ds] type[%s] @DS[%s] already up to date", dataType, dsId)
 		return nil
@@ -247,39 +256,42 @@ func (s *Syncer) getReferralTypes() (map[string][]string, error) {
 	return refTypes, nil
 }
 
-// getDsTypes 从每个 DS 的 /schema 端点收集其持有的 data type，得到 map[dataType][]dsId。
-func (s *Syncer) getDsTypes(idList []interface{}) (map[string][]string, error) {
+// getDsTypes 从每个 DS 的 /schema 端点收集其持有的 data type，得到 map[dataType][]dsId，
+// 以及每个 DS 的 schema id 列表（供 schema 内容一致性检查）。
+func (s *Syncer) getDsTypes(idList []interface{}) (map[string][]string, map[string][]string, error) {
 	dsTypes := map[string][]string{}
+	schemaIds := map[string][]string{}
 	for _, dsIdObj := range idList {
 		dsId := dsIdObj.(string)
 		ds, err := s.handler.GetDsInfo(dsId)
 		if err != nil {
 			s.log.Printf("failed to get info of DataService[%s], Error: %s", dsId, err)
-			return nil, err
+			return nil, nil, err
 		}
 		dsUrl, e := ds.GetUrl()
 		if e != nil {
 			s.log.Printf("failed to get URL for ds[%s], Error: %s", dsId, e)
-			return nil, e
+			return nil, nil, e
 		}
 		schemaUrl, e := Http.URLPathJoin(dsUrl, JsonKey.Schema)
 		if e != nil {
-			return nil, fmt.Errorf("failed to build schema url for ds[%s], Err:%s", dsId, e)
+			return nil, nil, fmt.Errorf("failed to build schema url for ds[%s], Err:%s", dsId, e)
 		}
 		s.log.Printf("[sync] DataService[%s], schema URL=[%s]", dsId, *schemaUrl)
 		result, code, e := Http.GetRestData(*schemaUrl)
 		if e != nil {
-			return nil, fmt.Errorf("failed to Rest Data from [path]=[%s], Code:%d", *schemaUrl, code)
+			return nil, nil, fmt.Errorf("failed to Rest Data from [path]=[%s], Code:%d", *schemaUrl, code)
 		}
 		typeList, ok := result.([]interface{})
 		if !ok {
-			return nil, fmt.Errorf("schema list from DS[%s] is not an array", dsId)
+			return nil, nil, fmt.Errorf("schema list from DS[%s] is not an array", dsId)
 		}
 		for _, typeObj := range typeList {
 			typeStr, ok := typeObj.(string)
 			if !ok {
 				continue
 			}
+			schemaIds[dsId] = append(schemaIds[dsId], typeStr)
 			dataType, _ := Util.ParseCustomPath(typeStr, JsonKey.ArchivedSchemaIdDiv)
 			if _, ok := Common.InternalTypes[dataType]; ok {
 				s.log.Printf("[sync] type[%s] @DS[%s] is internal type, skip", dataType, dsId)
@@ -293,12 +305,12 @@ func (s *Syncer) getDsTypes(idList []interface{}) (map[string][]string, error) {
 			dsTypes[dataType] = append(dsTypes[dataType], dsId)
 		}
 	}
-	return dsTypes, nil
+	return dsTypes, schemaIds, nil
 }
 
 // syncDataTypes 依据收集结果对账 referral：类型在任一 DS 上已消失则移除；
 // 与期望 DS 列表不一致则重建。
-func (s *Syncer) syncDataTypes(refTypes map[string][]string, dsTypes map[string][]string) error {
+func (s *Syncer) syncDataTypes(refTypes map[string][]string, dsTypes map[string][]string, schemaIds map[string][]string) error {
 	for dataType := range refTypes {
 		if _, ok := dsTypes[dataType]; !ok {
 			s.log.Printf("[sync] data type [%s] no longer exists on any DataService. remove referral", dataType)
@@ -310,7 +322,7 @@ func (s *Syncer) syncDataTypes(refTypes map[string][]string, dsTypes map[string]
 	}
 	for dataType, dsIdList := range dsTypes {
 		current, exists := refTypes[dataType]
-		desired := dedupeStrings(dsIdList)
+		desired := s.filterConsistent(dataType, orderedDsIds(current, dedupeStrings(dsIdList)), schemaIds)
 		if !exists || !setEqual(current, desired) {
 			s.log.Printf("[sync] set referral for type[%s] to DS[%v]", dataType, desired)
 			if err := s.setType(dataType, desired); err != nil {

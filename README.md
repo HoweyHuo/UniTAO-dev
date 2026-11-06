@@ -117,6 +117,97 @@ to run demo:
  ```
  - a schema cannot be changed in place: **PUT** or **PATCH** on `schema` returns 400. to upgrade, **POST** a schema record with the same `__id` and a **strictly higher** `data.version` (equal or lower is rejected). the current version is archived automatically as `__id = <type>__<old version>`; archived ids cannot be POSTed directly, and records that declare the old `__ver` keep validating against the archived schema. the schema record's own `__ver` is the current version of the schema of schema (not `data.version`), while a data record's `__ver` is the version of its type's schema at write time. the same contract is documented on `GET /schema/schema`
 
+## Virtual Data Services (vDS)
+
+one Data Service instance hosts several **virtual Data Services**. each vDS has its own table, schemas, journal and locks, and registers in the Inventory Service as a DS of its own:
+
+| vDS | path | what it holds |
+|---|---|---|
+| `local` | `/local` | data of this network, never shared. the default when the config has no `vds` section |
+| `shared/{name}` | `/shared/{name}` | data this network publishes to other networks through a Communication Channel. writable |
+| `mirrored/{name}` | `/mirrored/{name}` | a read-only copy of another network's `shared/{name}`. writes return `405` |
+
+records from different vDS never overwrite each other: the identity of a record is `(vDS, __type, __id)`. `local` and every `shared` keep their **own** schema copies, even when the content is identical.
+
+### URLs
+
+the Data Service URL is `/{vDS}/{__type}/{__id}` - there is no un-prefixed form any more.
+
+```
+GET  /                         # list vDS: ["local", "shared/prod", "mirrored/lab"]
+GET  /shared                   # names of the shared vDS: ["prod"]
+GET  /local                    # ["config", "schema", <data types>]
+GET  /local/config             # settings and status of the vDS (kind, table, channel, publish/sync progress; no secrets)
+POST /local                    # create a record, type taken from __type
+GET  /local/VirtualMachine/vm-01
+GET  /mirrored/lab/schema
+```
+
+the Inventory Service always qualifies data ids with the DS they live in, so the same `__type`/`__id` from different vDS stays apart:
+
+```
+GET http://localhost:8004/VirtualMachine                     # ["DataService01/vm-01", "prod/vm-01", ...]
+GET http://localhost:8004/VirtualMachine/DataService01/vm-01 # the ds segment is required
+GET http://localhost:8004/VirtualMachine/prod                # ids of one DS
+```
+
+when the Inventory walks a reference it looks in the vDS of the starting record first and falls back to a global lookup.
+
+### Configuration
+
+everything lives in the Data Service `config.json`:
+
+```json
+"vds": {
+    "local": {},
+    "shared": [{
+        "name": "prod",
+        "signingKeyFile": "/opt/UniTAO/keys/prod.pem",
+        "publishIntervalSec": 10,
+        "snapshotIntervalSec": 3600,
+        "channel": { "type": "git", "repo": "git@git.internal:unitao/exchange.git", "branch": "main", "workDir": "/opt/UniTAO/channel/prod" }
+    }],
+    "mirrored": [{
+        "name": "lab",
+        "alias": "lab-west",
+        "trustedFingerprint": "SHA256:6690a72a...",
+        "pullIntervalSec": 60,
+        "channel": { "type": "dir", "path": "/mnt/exchange" }
+    }]
+}
+```
+
+ - table names: `local` uses `table.data`; `shared/{name}` uses `{table.data}_shared_{name}`; `mirrored/{name}` uses `{table.data}_mirrored_{name}`.
+ - removing a `mirrored` entry from the config and restarting **drops its table** and removes its URL from the Inventory. a removed `local` is only logged, its table is kept.
+ - channel types: `dir` (a directory, e.g. a shared mount or a sneakernet folder) and `git` (the `git` CLI must be installed; the publisher pushes, mirrors fetch shallowly). several shared vDS can use the same repository or directory, each writes under its own `{name}/` folder.
+
+### Keys and trust
+
+each shared vDS signs what it publishes with its own ed25519 key; the public key fingerprint is the identity of the source. a mirror only accepts a source whose fingerprint equals its `trustedFingerprint`, and verifies the signed manifest and the sha256 of every file before applying anything.
+
+```
+DataServiceAdmin keygen -out prod.pem             # prints the fingerprint for the mirror side
+DataServiceAdmin fingerprint -key prod.pem
+DataServiceAdmin enckey -identity lab.id -recipient lab.pub
+```
+
+the channel content can optionally be encrypted (X25519 + AES-256-GCM, several recipients): the shared side sets `channel.encrypt.recipientsFile` (one recipient per line, `#` comments allowed), each mirror sets `channel.decrypt.identityFile`.
+
+### How changes travel
+
+every write in a shared vDS goes through the journal into an outbox with a gap-free sequence number. the publisher pushes contiguous batches as signed segments and periodically a full snapshot; the mirror applies segments from its cursor (kept in `state.json`), and rebuilds from the latest snapshot when the channel can no longer serve its cursor. a change is always a full record upsert or a delete, so replaying is idempotent. if the channel is reset, the publisher publishes a new snapshot first and mirrors resync from it.
+
+a shared vDS may only reference records inside the **same** shared vDS (checked when the schema is registered and on every write), otherwise the reference would dangle on the mirror side. `local` may reference any shared vDS. `indexTemplate` cannot target a type that is only available from a mirror.
+
+### Registration in the Inventory
+
+ - `local` registers as `ds.id` with the instance UUID, as before.
+ - `shared` and `mirrored` register with their name and the source fingerprint. instances mirroring the same source (same fingerprint) are merged into **one** record with several URLs (replicas); a shared vDS and its own mirror in the same Inventory merge the same way and stay `kind: shared`. the URL list is ordered by mirror cursor, newest first, and refreshed on every sync.
+ - the same name with a different fingerprint: the later one is renamed `{name}-{first 8 hex of the fingerprint}` and a warning is logged. the same fingerprint under another name (inconsistent `alias`) is merged into the existing record.
+ - `pinnedSources` in the Inventory config (`{"prod": "SHA256:..."}`) reserves a name for one fingerprint.
+ - `DELETE /inventory/{dsId}?url={url}` removes one replica URL; the record is deleted when no URL is left.
+ - the same type with the same schema version but different content on two DS is a conflict: the later DS is left out of that type's referral and a warning is logged.
+
 ## Network Security Model
 
 the Inventory system (Inventory Service + every Data Service) is meant to live **entirely inside a protected internal network**. it must **never be reachable from the public internet**.
@@ -241,14 +332,14 @@ because the target type is declared, DataService validates the value before savi
 
 ```
 # NetworkCard[nic-eth1000-aef] not created yet, rejected by DataService02
-PATCH http://localhost:8002/VmHost/vmhost-test01/nic nic-eth1000-aef
+PATCH http://localhost:8002/local/VmHost/vmhost-test01/nic nic-eth1000-aef
     -> 400 reference inventory:NetworkCard with value=[nic-eth1000-aef] does not exists
 
 # create the entity in its own DataService01 first
-POST http://localhost:8001 { "__id": "nic-eth1000-aef", "__type": "NetworkCard", ... }
+POST http://localhost:8001/local { "__id": "nic-eth1000-aef", "__type": "NetworkCard", ... }
 
 # same PATCH now succeeds
-PATCH http://localhost:8002/VmHost/vmhost-test01/nic nic-eth1000-aef
+PATCH http://localhost:8002/local/VmHost/vmhost-test01/nic nic-eth1000-aef
 ```
 
 note the value is a plain string id, so the validation can only be a [does this record exist] check - the type of the referenced value itself is not inspected here.
@@ -295,7 +386,7 @@ the attribute can also be a nested one, reached through a local **$ref** definit
 after the references are in place, the Inventory Service follows them and lets you walk the graph as if it were one local document. every step of the path below is a **contentMediaType** hop, crossing Data Service borders several times:
 
 ```
-GET http://localhost:8004/VirtualMachine/vm-srv-wireguard-01/network[eth0]/link/bridge/links[vm-srv-wireguard-02-link-ext]/vm
+GET http://localhost:8004/VirtualMachine/DataService01/vm-srv-wireguard-01/network[eth0]/link/bridge/links[vm-srv-wireguard-02-link-ext]/vm
 ```
 
 the helper commands of the path engine make the walk explorable, and all of them are demoed in step 09:

@@ -9,9 +9,9 @@ print("""
 # 1, upgrade schema of VmHost that point to all entities from DataService01
 # 2, upgrade schema version of vmhost-test01 to new version 0.0.2
 # 3, add another record of VirtualHardDrive
-# 4, see that new vhd record registered under http://localhost:8002/VmHost/vmhost-test01/virtualHardDisk
+# 4, see that new vhd record registered under http://localhost:8002/local/VmHost/vmhost-test01/virtualHardDisk
 # 5, remove the record of VirtualHardDrive
-# 6, see that reference being removed from http://localhost:8002/VmHost/vmhost-test01/virtualHardDisk
+# 6, see that reference being removed from http://localhost:8002/local/VmHost/vmhost-test01/virtualHardDisk
 ######################################################################################################################
 """)
 input("press ANY KEY to continue...")
@@ -86,8 +86,8 @@ vmhostSchemaV2 = {
         }
     }
 }
-print("POST http://localhost:8002 {}".format(json.dumps(vmhostSchemaV2, indent=4)))
-resp = requests.post("http://localhost:8002", json=vmhostSchemaV2)
+print("POST http://localhost:8002/local {}".format(json.dumps(vmhostSchemaV2, indent=4)))
+resp = requests.post("http://localhost:8002/local", json=vmhostSchemaV2)
 print(resp.text)
 
 print("""
@@ -103,8 +103,8 @@ print("""
 print("sleep 10 second for journal process to work on the data subscription of [indexTemplate]")
 time.sleep(10)
 
-print("GET http://localhost:8001/cmtIdx")
-resp = requests.get("http://localhost:8001/cmtIdx")
+print("GET http://localhost:8001/local/cmtIdx")
+resp = requests.get("http://localhost:8001/local/cmtIdx")
 print(json.dumps(resp.json(), indent=4))
 
 input("press ANY KEY to continue...")
@@ -117,14 +117,14 @@ print("""
 
 input("press ANY KEY to continue...")
 
-print("GET http://localhost:8001/schema/cmtIdx")
-resp = requests.get("http://localhost:8001/schema/cmtIdx")
+print("GET http://localhost:8001/local/schema/cmtIdx")
+resp = requests.get("http://localhost:8001/local/schema/cmtIdx")
 print(json.dumps(resp.json(), indent=4))
 
 input("press ANY KEY to continue...")
 
-print("GET http://localhost:8001/cmtIdx/NetBridge")
-resp = requests.get("http://localhost:8001/cmtIdx/NetBridge")
+print("GET http://localhost:8001/local/cmtIdx/NetBridge")
+resp = requests.get("http://localhost:8001/local/cmtIdx/NetBridge")
 print(json.dumps(resp.json(), indent=4))
 
 input("press ANY KEY to continue...")
@@ -135,9 +135,9 @@ print("""
 ######################################################################################################################
 """)
 
-print("PATCH http://localhost:8002/VmHost/vmhost-test01/__ver '0.0.2'")
+print("PATCH http://localhost:8002/local/VmHost/vmhost-test01/__ver '0.0.2'")
 
-resp = requests.patch("http://localhost:8002/VmHost/vmhost-test01/__ver", "0.0.2")
+resp = requests.patch("http://localhost:8002/local/VmHost/vmhost-test01/__ver", "0.0.2")
 
 print(json.dumps(resp.json(), indent=4))
 
@@ -162,12 +162,12 @@ vhd = {
     },
 }
 
-print("POST http://localhost:8001 {}".format(json.dumps(vhd, indent=4)))
-resp = requests.post("http://localhost:8001", json=vhd)
+print("POST http://localhost:8001/local {}".format(json.dumps(vhd, indent=4)))
+resp = requests.post("http://localhost:8001/local", json=vhd)
 print(resp.text)
 
-print("GET http://localhost:8002/VmHost/vmhost-test01")
-resp = requests.get("http://localhost:8002/VmHost/vmhost-test01")
+print("GET http://localhost:8002/local/VmHost/vmhost-test01")
+resp = requests.get("http://localhost:8002/local/VmHost/vmhost-test01")
 print(json.dumps(resp.json(), indent=4))
 
 print("sleep 10 second")
@@ -175,12 +175,12 @@ time.sleep(10)
 
 print("""
 ######################################################################################################################
-# 4, see that new vhd record registered under http://localhost:8002/VmHost/vmhost-test01/virtualHardDisk
+# 4, see that new vhd record registered under http://localhost:8002/local/VmHost/vmhost-test01/virtualHardDisk
 ######################################################################################################################
 """)
 
-print("GET http://localhost:8002/VmHost/vmhost-test01")
-resp = requests.get("http://localhost:8002/VmHost/vmhost-test01")
+print("GET http://localhost:8002/local/VmHost/vmhost-test01")
+resp = requests.get("http://localhost:8002/local/VmHost/vmhost-test01")
 print(json.dumps(resp.json(), indent=4))
 
 input("press ANY KEY to continue...")
@@ -191,23 +191,23 @@ print("""
 ######################################################################################################################
 """)
 
-print("DELETE http://localhost:8001/VirtualHardDisk/vhd-vm-test01-sys")
-resp = requests.delete("http://localhost:8001/VirtualHardDisk/vhd-vm-test01-sys")
+print("DELETE http://localhost:8001/local/VirtualHardDisk/vhd-vm-test01-sys")
+resp = requests.delete("http://localhost:8001/local/VirtualHardDisk/vhd-vm-test01-sys")
 print("status {}".format(resp.status_code))
 
 print("""
 ######################################################################################################################
-# 6, see that reference being removed from http://localhost:8002/VmHost/vmhost-test01/virtualHardDisk
+# 6, see that reference being removed from http://localhost:8002/local/VmHost/vmhost-test01/virtualHardDisk
 ######################################################################################################################
 """)
 
-print("GET http://localhost:8002/VmHost/vmhost-test01")
-resp = requests.get("http://localhost:8002/VmHost/vmhost-test01")
+print("GET http://localhost:8002/local/VmHost/vmhost-test01")
+resp = requests.get("http://localhost:8002/local/VmHost/vmhost-test01")
 print(json.dumps(resp.json(), indent=4))
 
 print("sleep 5 second")
 time.sleep(5)
 
-print("GET http://localhost:8002/VmHost/vmhost-test01")
-resp = requests.get("http://localhost:8002/VmHost/vmhost-test01")
+print("GET http://localhost:8002/local/VmHost/vmhost-test01")
+resp = requests.get("http://localhost:8002/local/VmHost/vmhost-test01")
 print(json.dumps(resp.json(), indent=4))

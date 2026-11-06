@@ -41,8 +41,8 @@ vmHost = {
         "storageDevice": []
     }
 }
-print("POST http://localhost:8002 {}".format(json.dumps(vmHost, indent=4)))
-resp = requests.post("http://localhost:8002", json=vmHost)
+print("POST http://localhost:8002/local {}".format(json.dumps(vmHost, indent=4)))
+resp = requests.post("http://localhost:8002/local", json=vmHost)
 print(resp.text)
 input("press ANY key to continue...")
 
@@ -63,9 +63,9 @@ vhd = {
         "host": "vmhost-test01"
     }
 }
-print("POST http://localhost:8001 {}".format(json.dumps(vhd, indent=4)))
+print("POST http://localhost:8001/local {}".format(json.dumps(vhd, indent=4)))
 
-resp = requests.post("http://localhost:8001", json=vhd)
+resp = requests.post("http://localhost:8001/local", json=vhd)
 print(resp.text)
 input("press ANY key to continue...")
 
@@ -75,8 +75,8 @@ print("""
 ######################################################################################################################
 """)
 
-print("PATCH http://localhost:8002/VmHost/vmhost-test01/virtualHardDisk 'vhd-vm-test01-sys'")
-resp = requests.patch("http://localhost:8002/VmHost/vmhost-test01/virtualHardDisk", "vhd-vm-test01-sys")
+print("PATCH http://localhost:8002/local/VmHost/vmhost-test01/virtualHardDisk 'vhd-vm-test01-sys'")
+resp = requests.patch("http://localhost:8002/local/VmHost/vmhost-test01/virtualHardDisk", "vhd-vm-test01-sys")
 print(json.dumps(resp.json(), indent=4))
 
 input("press ANY key to continue...")
@@ -87,8 +87,8 @@ print("""
 ######################################################################################################################
 """)
 
-print("DELETE http://localhost:8001/VirtualHardDisk/vhd-vm-test01-sys")
-resp = requests.delete("http://localhost:8001/VirtualHardDisk/vhd-vm-test01-sys")
+print("DELETE http://localhost:8001/local/VirtualHardDisk/vhd-vm-test01-sys")
+resp = requests.delete("http://localhost:8001/local/VirtualHardDisk/vhd-vm-test01-sys")
 print("delete status: [{}]".format(resp.status_code))
 
 input("press ANY key to continue...")
@@ -99,7 +99,7 @@ print("""
 ######################################################################################################################
 """)
 
-print("PATCH http://localhost:8002/VmHost/vmhost-test01/virtualHardDisk[vhd-vm-test01-sys] ''")
+print("PATCH http://localhost:8002/local/VmHost/vmhost-test01/virtualHardDisk[vhd-vm-test01-sys] ''")
 
-resp = requests.patch("http://localhost:8002/VmHost/vmhost-test01/virtualHardDisk[vhd-vm-test01-sys]", "")
+resp = requests.patch("http://localhost:8002/local/VmHost/vmhost-test01/virtualHardDisk[vhd-vm-test01-sys]", "")
 print(json.dumps(resp.json(), indent=4))
