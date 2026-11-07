@@ -7,7 +7,7 @@ IMAGE="${UNITAO_IMAGE:-ghcr.io/howeyhuo/unitao-dev:latest}"
 # 容器以当前用户运行，生成的文件归当前用户（docker compose 自动读取 .env）
 USER_ID="$(id -u):$(id -g)"
 printf 'UNITAO_UID=%s\nUNITAO_GID=%s\n' "$(id -u)" "$(id -g)" > .env
-mkdir -p keys exchange logs
+mkdir -p keys exchange logs SiteA/inv/data SiteB/inv/data
 if [ ! -f keys/catalog.pem ]; then
     docker run --rm --user "$USER_ID" -v "$PWD/keys:/keys" "$IMAGE" DataServiceAdmin keygen -out /keys/catalog.pem
 fi

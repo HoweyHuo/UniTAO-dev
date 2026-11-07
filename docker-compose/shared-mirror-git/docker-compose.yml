@@ -1,0 +1,86 @@
+# 两个相互隔离的网络：siteA 共享 catalog，siteB 镜像它。两边只通过一个 git 仓库（git 通道）交换数据。
+# 这里用宿主机上的裸仓库 ./remote/exchange.git 充当远端，以 file:// 访问，不需要 SSH；
+# 实际部署把 channel.repo 换成两边都能访问的 git 服务器地址即可。
+# 先运行 ./setup.sh 生成签名密钥、裸仓库、SiteB 的配置和 .env（当前用户的 UID/GID）。
+# UniTAO 容器以该用户运行，写出的仓库、工作目录、state.json、日志都归当前用户；./clean.sh 清理全部生成文件。
+services:
+  dynamodb:
+    image: amazon/dynamodb-local:latest
+    container_name: smg-dynamodb
+    restart: always
+    command: "-jar DynamoDBLocal.jar -inMemory -sharedDb"
+    networks: [siteA, siteB]
+
+  site-a-ds:
+    image: ${UNITAO_IMAGE:-ghcr.io/howeyhuo/unitao-dev:latest}
+    container_name: smg-site-a-ds
+    restart: always
+    user: "${UNITAO_UID:-0}:${UNITAO_GID:-0}"
+    environment:
+      HOME: /tmp
+    volumes:
+      - ./SiteA/ds:/opt/UniTAO/config
+      - ./keys:/opt/UniTAO/keys:ro
+      # 远端仓库：发布方要 push，可写
+      - ./remote:/opt/UniTAO/remote
+      # 发布方自己的克隆（channel.workDir），挂出来方便查看提交历史
+      - ./work/siteA:/opt/UniTAO/channel
+      - ./logs:/opt/UniTAO/log
+    ports:
+      - "8031:80"
+    depends_on: [dynamodb]
+    networks: [siteA]
+    command: "DataService -id SiteA -config /opt/UniTAO/config/config.json -log /opt/UniTAO/log"
+
+  site-a-inv:
+    image: ${UNITAO_IMAGE:-ghcr.io/howeyhuo/unitao-dev:latest}
+    container_name: smg-site-a-inv
+    restart: always
+    user: "${UNITAO_UID:-0}:${UNITAO_GID:-0}"
+    environment:
+      HOME: /tmp
+    volumes:
+      - ./SiteA/inv:/opt/UniTAO/config
+      - ./logs:/opt/UniTAO/log
+    ports:
+      - "8034:80"
+    networks: [siteA]
+    command: "InventoryService -config /opt/UniTAO/config/config.json -log /opt/UniTAO/log"
+
+  site-b-ds:
+    image: ${UNITAO_IMAGE:-ghcr.io/howeyhuo/unitao-dev:latest}
+    container_name: smg-site-b-ds
+    restart: always
+    user: "${UNITAO_UID:-0}:${UNITAO_GID:-0}"
+    environment:
+      HOME: /tmp
+    volumes:
+      - ./SiteB/ds:/opt/UniTAO/config
+      # 镜像方只 fetch，远端仓库只读
+      - ./remote:/opt/UniTAO/remote:ro
+      - ./work/siteB:/opt/UniTAO/channel
+      - ./logs:/opt/UniTAO/log
+    ports:
+      - "8041:80"
+    depends_on: [dynamodb]
+    networks: [siteB]
+    command: "DataService -id SiteB -config /opt/UniTAO/config/config.json -log /opt/UniTAO/log"
+
+  site-b-inv:
+    image: ${UNITAO_IMAGE:-ghcr.io/howeyhuo/unitao-dev:latest}
+    container_name: smg-site-b-inv
+    restart: always
+    user: "${UNITAO_UID:-0}:${UNITAO_GID:-0}"
+    environment:
+      HOME: /tmp
+    volumes:
+      - ./SiteB/inv:/opt/UniTAO/config
+      - ./logs:/opt/UniTAO/log
+    ports:
+      - "8044:80"
+    networks: [siteB]
+    command: "InventoryService -config /opt/UniTAO/config/config.json -log /opt/UniTAO/log"
+
+networks:
+  siteA: {}
+  siteB: {}

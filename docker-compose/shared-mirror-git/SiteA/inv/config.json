@@ -1,0 +1,5 @@
+{
+    "database": { "type": "sysdirfile", "sysdirfile": { "path": "/opt/UniTAO/config/data" } },
+    "http": { "type": "http", "dns": "localhost", "port": "80", "id": "Inventory", "headers": {} },
+    "sync": { "intervalSec": 30 }
+}

@@ -10,8 +10,16 @@ docker-compose/**/logs/*.log
 
 # DataService runtime state written next to its config (see src/DataService/Config/state.go)
 docker-compose/**/state.json
+# shared-mirror demos: Inventory data (sysdirfile under the mounted config dir)
+docker-compose/shared-mirror*/Site*/inv/data/
 # shared-mirror demo: generated keys, channel content and config
 docker-compose/shared-mirror/keys/
 docker-compose/shared-mirror/exchange/
 docker-compose/shared-mirror/SiteB/ds/config.json
 docker-compose/shared-mirror/.env
+# shared-mirror-git demo: generated keys, bare repository, clones and config
+docker-compose/shared-mirror-git/keys/
+docker-compose/shared-mirror-git/remote/
+docker-compose/shared-mirror-git/work/
+docker-compose/shared-mirror-git/SiteB/ds/config.json
+docker-compose/shared-mirror-git/.env
