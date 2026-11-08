@@ -13,7 +13,11 @@
             "name": "catalog",
             "trustedFingerprint": "__TRUSTED_FINGERPRINT__",
             "pullIntervalSec": 10,
-            "channel": { "type": "dir", "path": "/opt/UniTAO/exchange" }
+            "channel": {
+                "type": "dir",
+                "path": "/opt/UniTAO/exchange",
+                "decrypt": { "identityFile": "/opt/UniTAO/keys/identity" }
+            }
         }]
     }
 }

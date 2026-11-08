@@ -124,7 +124,7 @@ subscriber 重新上线后，发现下面任一情况就**重新订阅**（5.2�
 
 ### 5.6 压缩 git 历史
 
-publisher 删除过文件、且距上次压缩超过 `squashIntervalHours`（默认 24）时：
+publisher 删除过文件、且距上次压缩超过 `compactIntervalHours`（默认 24）时：
 
 1. 用当前文件树建一个**没有父提交**的新提交；
 2. `git push --force-with-lease=refs/heads/<branch>:<fetch 到的提交>`：只有远端在这次 fetch 之后没有变化才能成功，不会冲掉别人刚推上去的提交；失败就等下一轮。
@@ -152,7 +152,7 @@ subscriber 现在也要 push，所以**镜像方需要可写的凭据**（之前
   "signingKeyFile": "...",
   "publishIntervalSec": 60,
   "subscriberTimeoutHours": 720,
-  "squashIntervalHours": 24,
+  "compactIntervalHours": 24,
   "channel": { "type": "git", "repo": "...", "branch": "infra", "folder": "dc/catalog", "workDir": "...",
                "encrypt": { "recipientsFile": "..." } }
 }],
@@ -166,7 +166,7 @@ subscriber 现在也要 push，所以**镜像方需要可写的凭据**（之前
 ```
 
 - 删除 `snapshotIntervalSec`。
-- 新增 `subscriberTimeoutHours`、`squashIntervalHours`、`channel.folder`。
+- 新增 `subscriberTimeoutHours`、`compactIntervalHours`、`channel.folder`。
 - `channel.encrypt` / `channel.decrypt` 改为必填。
 - `state.json` 中 mirrored 的状态增加请求 id 和订阅状态。
 - `GET /{vDS}/config`：shared 显示 subscriber 列表（id、状态、cursor、是否判死）和 queue 范围；mirrored 显示订阅状态、请求 id、cursor。
@@ -178,7 +178,7 @@ subscriber 现在也要 push，所以**镜像方需要可写的凭据**（之前
 | Q1 | **直接替换**现有 snapshot + segment 协议，dir 和 git 两种通道都换。不兼容旧格式：publisher 发现 version 1 的 manifest 时清空该 folder 重新开始；镜像方旧状态作废，重新订阅。 |
 | Q2 | 死亡按**延迟**判定（5.5），不用心跳；超时小时数由 shared vDS 配置 `subscriberTimeoutHours`。 |
 | Q3 | subscriber 身份和加密绑定，**加密必须开启**；进度文件第一版不签名。 |
-| Q4 | 压缩历史设最小间隔 `squashIntervalHours`，默认 24 小时。 |
+| Q4 | 压缩历史设最小间隔 `compactIntervalHours`，默认 24 小时。 |
 
 ## 9. 实现步骤
 

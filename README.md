@@ -165,23 +165,33 @@ everything lives in the Data Service `config.json`:
         "name": "prod",
         "signingKeyFile": "/opt/UniTAO/keys/prod.pem",
         "publishIntervalSec": 10,
-        "snapshotIntervalSec": 3600,
-        "channel": { "type": "git", "repo": "git@git.internal:unitao/exchange.git", "branch": "main", "workDir": "/opt/UniTAO/channel/prod" }
+        "subscriberTimeoutHours": 720,
+        "compactIntervalHours": 24,
+        "channel": {
+            "type": "git", "repo": "git@git.internal:unitao/exchange.git", "branch": "infra", "folder": "dc1/prod",
+            "workDir": "/opt/UniTAO/channel/exchange-infra",
+            "encrypt": { "recipientsFile": "/opt/UniTAO/keys/prod.recipients" }
+        }
     }],
     "mirrored": [{
         "name": "lab",
         "alias": "lab-west",
         "trustedFingerprint": "SHA256:6690a72a...",
         "pullIntervalSec": 60,
-        "channel": { "type": "dir", "path": "/mnt/exchange" }
+        "channel": {
+            "type": "dir", "path": "/mnt/exchange",
+            "decrypt": { "identityFile": "/opt/UniTAO/keys/lab.identity" }
+        }
     }]
 }
 ```
 
  - table names: `local` uses `table.data`; `shared/{name}` uses `{table.data}_shared_{name}`; `mirrored/{name}` uses `{table.data}_mirrored_{name}`.
  - removing a `mirrored` entry from the config and restarting **drops its table** and removes its URL from the Inventory. a removed `local` is only logged, its table is kept.
- - channel types: `dir` (a directory, e.g. a shared mount or a sneakernet folder) and `git` (the `git` CLI must be installed; the publisher pushes, mirrors fetch shallowly). several shared vDS can use the same repository or directory, each writes under its own `{name}/` folder.
- - git authentication is left to git itself: the Data Service runs `git` non-interactively (`GIT_TERMINAL_PROMPT=0`) with its own environment, so use an SSH deploy key (e.g. via `GIT_SSH_COMMAND`) or an HTTPS credential helper; the mirror only needs read access. ssh needs an `/etc/passwd` entry for the UID the Data Service runs as. avoid credentials in `channel.repo`: they are redacted from `GET /{vDS}/config` and from git errors in the log, but stay in the config file and the clone's `.git/config`. see `docker-compose/shared-mirror-git/README.md` for examples.
+ - channel types: `dir` (a directory, e.g. a shared mount) and `git` (the `git` CLI must be installed). both sides write to the channel: the publisher its batches, every mirror its own progress file, so the mirror needs write access too.
+ - a vDS's address on the channel is `repo + branch + folder` (`path + folder` for `dir`); `folder` defaults to the vDS name and may have several levels (`dc1/prod`). one repository can hold many vDS; putting related vDS on one branch lets a site pull them together. vDS in one Data Service that use the same `workDir` share one clone, so they must name the same repo and branch.
+ - `subscriberTimeoutHours` (default 720): a mirror whose oldest unprocessed batch has been on the channel this long is considered dead, see below. `compactIntervalHours` (default 24): how often the publisher squashes the git branch history.
+ - git authentication is left to git itself: the Data Service runs `git` non-interactively (`GIT_TERMINAL_PROMPT=0`) with its own environment, so use an SSH deploy key (e.g. via `GIT_SSH_COMMAND`) or an HTTPS credential helper. the publisher additionally needs to force-push (history compaction); if the server forbids it, compaction fails and is logged, everything else keeps working. ssh needs an `/etc/passwd` entry for the UID the Data Service runs as. avoid credentials in `channel.repo`: they are redacted from `GET /{vDS}/config` and from git errors in the log, but stay in the config file and the clone's `.git/config`. see `docker-compose/shared-mirror-git/README.md` for examples.
 
 ### Keys and trust
 
@@ -190,14 +200,28 @@ each shared vDS signs what it publishes with its own ed25519 key; the public key
 ```
 DataServiceAdmin keygen -out prod.pem             # prints the fingerprint for the mirror side
 DataServiceAdmin fingerprint -key prod.pem
-DataServiceAdmin enckey -identity lab.id -recipient lab.pub
+DataServiceAdmin enckey -identity lab.id -recipient lab.pub   # also prints the subscriber id
 ```
 
-the channel content can optionally be encrypted (X25519 + AES-256-GCM, several recipients): the shared side sets `channel.encrypt.recipientsFile` (one recipient per line, `#` comments allowed), each mirror sets `channel.decrypt.identityFile`.
+encryption is mandatory (X25519 + AES-256-GCM). each mirror is a subscriber with its own X25519 key: it sets `channel.decrypt.identityFile`, and its public key goes into the shared side's `channel.encrypt.recipientsFile` (one recipient per line, `#` comments allowed). the recipients file is the subscriber whitelist: the subscriber id is the sha256 of the public key, and the publisher ignores progress files of ids that are not on the list. queue batches are encrypted to all recipients, a history batch only to the subscriber that asked for it. adding a subscriber means appending its recipient and restarting the shared Data Service.
 
 ### How changes travel
 
-every write in a shared vDS goes through the journal into an outbox with a gap-free sequence number. the publisher pushes contiguous batches as signed segments and periodically a full snapshot; the mirror applies segments from its cursor (kept in `state.json`), and rebuilds from the latest snapshot when the channel can no longer serve its cursor. a change is always a full record upsert or a delete, so replaying is idempotent. if the channel is reset, the publisher publishes a new snapshot first and mirrors resync from it.
+the channel works like a low-frequency Kafka topic with one producer. each vDS folder holds:
+
+```
+<folder>/manifest.json, manifest.sig      # signed by the publisher: lastSeq, queue and history files with their sha256
+<folder>/queue/<from>-<to>.jsonl.gz.enc   # incremental batches
+<folder>/history/<subscriber>-<seq>-<request>.jsonl.gz.enc   # full data for one subscriber
+<folder>/subscribers/<subscriber>.json    # written by each mirror: request, state (subscribe | active), cursor
+```
+
+ - **publish**: every write in a shared vDS goes through the journal into an outbox with a gap-free sequence number; the publisher pushes contiguous runs as queue batches. a change is always a full record upsert or a delete, so replaying is idempotent.
+ - **subscribe**: a new mirror writes `state: subscribe` with a fresh request id. the publisher packages all current records at the published seq as a history for it; the mirror replaces its whole table with the history, then consumes the queue from that seq and reports `state: active` with its cursor (kept locally in `state.json`, the progress file is only a report).
+ - **prune**: a batch is deleted once every live subscriber's cursor has passed it; a history is deleted once its subscriber is active past it. with no subscribers the queue is emptied, new subscribers always start from a history.
+ - **death**: if a subscriber's oldest unprocessed batch (or its unloaded history) is older than `subscriberTimeoutHours`, the publisher deletes its progress file and stops keeping batches for it. when the mirror comes back and finds its progress file gone (or its cursor no longer on the channel), it subscribes again and replaces its data from a new history; it keeps serving the old data until then.
+ - **git**: every write fetches the branch, resets to it, writes only its own files, commits and pushes; a rejected push is redone from the start. the publisher squashes the branch to one commit every `compactIntervalHours` (`--force-with-lease`, so a concurrent push is never lost) and garbage-collects its clone.
+ - if the channel is reset or still in the old format, the publisher restarts it at its current seq; mirrors notice and resubscribe.
 
 a shared vDS may only reference records inside the **same** shared vDS (checked when the schema is registered and on every write), otherwise the reference would dangle on the mirror side. `local` may reference any shared vDS. `indexTemplate` cannot target a type that is only available from a mirror.
 

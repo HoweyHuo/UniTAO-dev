@@ -97,9 +97,12 @@ UniTAO 由两类服务组成：
    - `shared/{name}`（表 `{table.data}_shared_{name}`）：经 Communication Channel 发布给其它网络，可写。只能引用同一个 shared vDS 内的记录（`Handler.RefLocalOnly`）。
    - `mirrored/{name}`（表 `{table.data}_mirrored_{name}`）：别的网络的 shared 的只读副本（`Handler.ReadOnly`，写返回 405），没有 Journal。
    - 记录身份是 `(vDS, __type, __id)`；local 与各 shared 的 schema 各存一份，互不共用。
-   - 代码：`DataServer/vds.go`（每个 vDS 的初始化、删除、`/{vDS}/config`）、`Share/`（outbox、`ChannelPublish` JournalProcess、发布器 `Publisher`、镜像同步器 `Mirror`）、`Channel/`（`dir` / `git` 通道、ed25519 签名的 manifest、可选 X25519 加密）、`DataHandler/apply.go`（镜像侧直接写入，跳过引用校验）。
-   - 发布：写入 → Journal → outbox（无空洞的 seq，先写记录再推进计数器）→ `Publisher` 按连续 seq 发 segment，定期发 snapshot；发布前与通道对账（通道领先则追上，通道落后则先发 snapshot）。
-   - 镜像：`Mirror` 从 `state.json` 中的 cursor 拉取，校验来源指纹与文件 hash；通道无法连续提供时从最新 snapshot 重建。
+   - 代码：`DataServer/vds.go`（每个 vDS 的初始化、删除、`/{vDS}/config`）、`Share/`（outbox、`ChannelPublish` JournalProcess、发布器 `Publisher`、镜像同步器 `Mirror`）、`Channel/`（`dir` / `git` 通道、ed25519 签名的 manifest、必选的 X25519 加密）、`DataHandler/apply.go`（镜像侧直接写入，跳过引用校验）。
+   - 通道是单 publisher 的低频队列：vDS 在通道上的地址是 `repo + branch + folder`（dir 为 `path + folder`，`folder` 默认是 vDS 名，可多级）；一个仓库可容纳多个 vDS，同一 DS 内 `workDir` 相同的 vDS 共用一份克隆（`sharedGitRepo`，必须同 repo + branch）。folder 下有签名的 `manifest.json`（version 2：lastSeq、queue、histories 及各文件 sha256）、`queue/` 增量 batch、`history/` 给单个 subscriber 的全量 batch、`subscribers/<id>.json` 各 mirror 自己写的进度（request、`subscribe|active`、cursor）。
+   - 加密是必选：shared 的 `encrypt.recipientsFile` 就是 subscriber 白名单，subscriber id = X25519 公钥的 sha256（`Channel.SubscriberId`）；queue 对所有接收方加密，history 只对请求者加密。
+   - 发布：写入 → Journal → outbox（无空洞的 seq，先写记录再推进计数器）→ `Publisher.PublishPending` 按连续 seq 发 queue batch；发布前与通道对账（通道领先则追上，通道落后或旧格式则 `Reset` 到本地 seq）。`Maintain` 为订阅请求打包 history、判定死亡（第一个未处理 batch 或未加载的 history 发布超过 `subscriberTimeoutHours`，默认 720，删其进度文件）、删除所有存活 subscriber 都处理过的 batch；`CompactIfDue` 每 `compactIntervalHours`（默认 24）把 git 分支压成一个提交（`--force-with-lease`）并本地 gc。
+   - 镜像：`Mirror` 先登记订阅（来源未发布时也可以），拿到自己的 history 后整体替换本表，再从 history 的 seq 消费 queue 并汇报进度；本地的 request/loaded/cursor 存在 `state.json`，进度文件只是汇报。进度文件被删、请求不符、cursor 不在通道上（`ErrGap`）或本地状态丢失时重新订阅，等新 history 期间继续提供旧数据。
+   - git 写入：fetch → reset 到远端 → 只写自己的文件 → commit → push，被拒（`errRetry`）就从头重做（`fileStore.write`），不做 rebase。mirror 也要写通道（进度），所以要有写权限。
    - 运行时状态在 `state.json` 的 `vds` 下（每个 vDS 的 `initialized`、`table`、Inventory 分配的 id、镜像 cursor）。从 config 删除 mirrored 并重启会删表并从 Inventory 注销其 URL：待注销的 URL 先记进 `state.json` 的 `unregister`，启动时注销完才开始注册当前的 vDS（否则改 alias 后的新名字会因指纹相同被合并进旧记录）。撞名被改名的镜像，给它配 `alias` 即可让 DS 路径和 Inventory 的 dsId 一致，但同一来源的所有副本要用同一个 alias。
    - 签名密钥与加密密钥用 `DataServiceAdmin keygen|fingerprint|enckey` 生成。
 
@@ -166,7 +169,7 @@ src/                           # 源码包（无 main）
     DataHandler/               # Record 校验、CRUD 操作、跨 DS 代理
     DataServer/                # HTTP 服务器及 REST 端点路由
     DataJournal/               # 写入后的异步处理队列（驱动 indexTemplate / cmtIdx / 共享发布）
-    Channel/                   # Communication Channel：dir / git，签名与加密
+    Channel/                   # Communication Channel：dir / git 上的队列（manifest v2、queue、history、subscribers），签名与加密
     Share/                     # shared 发布（outbox + Publisher）与 mirrored 同步（Mirror）
     DataLock/                  # 并发访问的逐记录锁
   InventoryService/            # Inventory Service 核心 — 跨 DS 查询路由

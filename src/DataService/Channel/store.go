@@ -510,7 +510,14 @@ func (s *fileStore) PublishHistory(subscriber string, request string, h *History
 }
 
 func (s *fileStore) Prune(p Prune) error {
-	return s.write(fmt.Sprintf("%s: prune queue up to seq %d", s.folder, p.QueueUpTo), func() (bool, error) {
+	parts := []string{fmt.Sprintf("queue up to seq %d", p.QueueUpTo)}
+	if len(p.Histories) > 0 {
+		parts = append(parts, fmt.Sprintf("%d histories", len(p.Histories)))
+	}
+	if len(p.Subscribers) > 0 {
+		parts = append(parts, fmt.Sprintf("%d dead subscribers", len(p.Subscribers)))
+	}
+	return s.write(fmt.Sprintf("%s: prune %s", s.folder, strings.Join(parts, ", ")), func() (bool, error) {
 		m, err := s.ownManifest()
 		if err != nil {
 			return false, err
