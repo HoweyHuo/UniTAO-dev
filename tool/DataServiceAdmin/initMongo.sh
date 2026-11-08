@@ -31,7 +31,7 @@ fi
 
 DataServiceAdmin  table \
     -config config/config.json \
-    -table schema/MongoDBTables.json \
+    -table schema/DataServiceMongoDBTables.json \
     -reset true \
     -log $1
 
