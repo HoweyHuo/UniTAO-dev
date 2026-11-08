@@ -181,6 +181,7 @@ everything lives in the Data Service `config.json`:
  - table names: `local` uses `table.data`; `shared/{name}` uses `{table.data}_shared_{name}`; `mirrored/{name}` uses `{table.data}_mirrored_{name}`.
  - removing a `mirrored` entry from the config and restarting **drops its table** and removes its URL from the Inventory. a removed `local` is only logged, its table is kept.
  - channel types: `dir` (a directory, e.g. a shared mount or a sneakernet folder) and `git` (the `git` CLI must be installed; the publisher pushes, mirrors fetch shallowly). several shared vDS can use the same repository or directory, each writes under its own `{name}/` folder.
+ - git authentication is left to git itself: the Data Service runs `git` non-interactively (`GIT_TERMINAL_PROMPT=0`) with its own environment, so use an SSH deploy key (e.g. via `GIT_SSH_COMMAND`) or an HTTPS credential helper; the mirror only needs read access. ssh needs an `/etc/passwd` entry for the UID the Data Service runs as. avoid credentials in `channel.repo`: they are redacted from `GET /{vDS}/config` and from git errors in the log, but stay in the config file and the clone's `.git/config`. see `docker-compose/shared-mirror-git/README.md` for examples.
 
 ### Keys and trust
 
