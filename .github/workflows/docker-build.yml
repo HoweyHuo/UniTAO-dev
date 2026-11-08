@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [ "main" ]
 
+# main 上的构建串行执行：清理步骤只在本次推送完成后运行，不会碰到另一个正在推送的构建
+concurrency:
+  group: docker-build-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
@@ -67,3 +72,12 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # 只保留 latest、版本号 tag（x.y.z，冻结的回滚点）及其子 manifest，删除只有 sha tag 的旧构建。
+      # 规则见 scripts/cleanup-images.sh；KEEP_RECENT 可多保留最近几个 sha 构建。
+      - name: Clean up old images
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          KEEP_RECENT: "0"
+        run: ./scripts/cleanup-images.sh "${{ github.repository_owner }}" "${{ github.event.repository.name }}"
