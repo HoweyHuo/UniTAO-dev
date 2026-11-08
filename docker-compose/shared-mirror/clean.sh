@@ -5,9 +5,9 @@ set -euo pipefail
 cd "$(dirname "$0")"
 IMAGE="${UNITAO_IMAGE:-ghcr.io/howeyhuo/unitao-dev:latest}"
 docker compose down --remove-orphans >/dev/null 2>&1 || true
-GENERATED=(keys exchange SiteA/ds/state.json SiteB/ds/state.json SiteA/inv/data SiteB/inv/data SiteB/ds/config.json logs/*.log .env)
+GENERATED=(keys exchange SiteA/ds/state.json SiteB/ds/state.json SiteA/inv/data SiteB/inv/data SiteB/ds/config.json logs/*.log .env passwd)
 if ! rm -rf "${GENERATED[@]}" 2>/dev/null; then
     echo "some files are owned by root (left by an older run), removing them through a container"
-    docker run --rm -v "$PWD:/w" -w /w --entrypoint sh "$IMAGE" -c 'rm -rf keys exchange SiteA/ds/state.json SiteB/ds/state.json SiteA/inv/data SiteB/inv/data SiteB/ds/config.json logs/*.log .env'
+    docker run --rm -v "$PWD:/w" -w /w --entrypoint sh "$IMAGE" -c 'rm -rf keys exchange SiteA/ds/state.json SiteB/ds/state.json SiteA/inv/data SiteB/inv/data SiteB/ds/config.json logs/*.log .env passwd'
 fi
 echo "cleaned"

@@ -51,7 +51,12 @@ func (g *gitRepo) run(dir string, args ...string) (string, error) {
 	cmd.Stderr = &out
 	err := cmd.Run()
 	if err != nil {
-		return out.String(), fmt.Errorf("git %s failed: %s, output: %s", strings.Join(args, " "), err, strings.TrimSpace(out.String()))
+		// 参数（remote add origin <repo>）和 git 的输出都可能带远端地址，写进错误（日志）前隐去凭据
+		msg := fmt.Sprintf("git %s failed: %s, output: %s", strings.Join(args, " "), err, strings.TrimSpace(out.String()))
+		if safe := RedactRepo(g.repo); safe != g.repo {
+			msg = strings.ReplaceAll(msg, g.repo, safe)
+		}
+		return out.String(), fmt.Errorf("%s", msg)
 	}
 	return out.String(), nil
 }

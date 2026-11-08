@@ -302,7 +302,7 @@ func channelInfo(cfg Channel.Config) map[string]interface{} {
 	case Channel.TypeDir:
 		info["path"] = cfg.Path
 	case Channel.TypeGit:
-		info["repo"] = cfg.Repo
+		info["repo"] = Channel.RedactRepo(cfg.Repo)
 		branch := cfg.Branch
 		if branch == "" {
 			branch = Channel.DefaultBranch

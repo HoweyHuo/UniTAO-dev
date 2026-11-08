@@ -113,7 +113,7 @@ Data Service 的 URL 是 `/{vDS}/{type}[/{id}]`（`{vDS}` 为 `local`、`shared/
 |------|------|------|------|
 | Data Service | `GET` | `/` | 列出 vDS 路径；`/shared`、`/mirrored` 列出该组的名字 |
 | Data Service | `GET` | `/{vDS}` | `["config", "schema", <data types>]` |
-| Data Service | `GET` | `/{vDS}/config` | 该 vDS 的设置与状态（kind、表、通道、发布/同步进度），不含密钥 |
+| Data Service | `GET` | `/{vDS}/config` | 该 vDS 的设置与状态（kind、表、通道、发布/同步进度），不含密钥；git 通道 `repo` 地址里的凭据显示为 `***`（`Channel.RedactRepo`） |
 | Data Service | `POST` | `/{vDS}` | 创建 Record，类型取自 body 的 `__type` |
 | Data Service | `GET` | `/{vDS}/{type}` | 列出该类型的所有 `__id` |
 | Data Service | `GET` | `/{vDS}/{type}/{id}[/{attrPath}]` | 查询 Record，可带属性路径深入 |

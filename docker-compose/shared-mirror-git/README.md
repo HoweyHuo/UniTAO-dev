@@ -12,7 +12,7 @@ docker build -f ./docker/unitao/dockerfile -t ghcr.io/howeyhuo/unitao-dev:latest
 
 ```
 cd docker-compose/shared-mirror-git
-./setup.sh                      # signing key, trusted fingerprint for siteB, bare repository, .env with your UID/GID
+./setup.sh                      # signing key, trusted fingerprint for siteB, bare repository, .env with your UID/GID, passwd
 docker compose up -d
 
 # write into the shared vDS on siteA
@@ -47,11 +47,24 @@ catalog/
 
 ## Using a real git server
 
-replace `channel.repo` on both sides, drop the `./remote` mount, and give each Data Service its credentials:
+replace `channel.repo` on both sides, drop the `./remote` mount, and give each Data Service its credentials. git runs non-interactively, so they must be in place before the Data Service starts. give the mirror read-only credentials, only the publisher pushes.
 
- - **SSH** (`git@git.internal:unitao/exchange.git`): mount a private key and `known_hosts` for the container user, e.g. `- ./ssh:/tmp/.ssh:ro` (the containers run with `HOME=/tmp`). the mirror only needs read access, use a read-only deploy key there.
- - **HTTPS** (`https://git.internal/unitao/exchange.git`): put a token in the URL (`https://<token>@git.internal/...`) or configure a git credential helper in `$HOME/.gitconfig`.
+ - **SSH** (`ssh://git@git.internal/unitao/exchange.git` or `git@git.internal:unitao/exchange.git`): mount a deploy key and a `known_hosts` file and point ssh at them, so nothing depends on the home directory:
+   ```yaml
+   environment:
+     GIT_SSH_COMMAND: "ssh -i /opt/UniTAO/gitkey/id_ed25519 -o IdentitiesOnly=yes -o UserKnownHostsFile=/opt/UniTAO/gitkey/known_hosts"
+   volumes:
+     - ./gitkey:/opt/UniTAO/gitkey:ro     # id_ed25519 (mode 600, owned by your user) + known_hosts (ssh-keyscan git.internal)
+   ```
+   ssh refuses to run for a UID that has no `/etc/passwd` entry (`No user exists for uid 1000`), and the containers run as your UID. that is why `setup.sh` writes `./passwd` (the image's file plus your user, home `/tmp`) and every UniTAO container mounts it at `/etc/passwd`; keep that mount when you run as a non-root UID.
+ - **HTTPS** (`https://git.internal/unitao/exchange.git`): configure a credential helper in `$HOME` (`/tmp` in the containers):
+   ```yaml
+   volumes:
+     - ./git/.gitconfig:/tmp/.gitconfig:ro              # [credential] helper = store
+     - ./git/.git-credentials:/tmp/.git-credentials:ro  # https://unitao-bot:<token>@git.internal
+   ```
+   do not put the token in `channel.repo`: the URL is also stored in the clone's `.git/config`. the Data Service redacts credentials in the URL from `GET /{vDS}/config` and from git errors in its log, but the config file itself still holds them.
 
 the image built from `docker/unitao/dockerfile` contains `git` and `openssh-client`.
 
-`keys/`, `remote/`, `work/`, `SiteB/ds/config.json`, `.env`, every `state.json` and the logs are generated and ignored by git. `./clean.sh` stops the example and removes all of them.
+`keys/`, `remote/`, `work/`, `SiteB/ds/config.json`, `passwd`, `.env`, every `state.json`, the Inventory data and the logs are generated and ignored by git. `./clean.sh` stops the example and removes all of them.
