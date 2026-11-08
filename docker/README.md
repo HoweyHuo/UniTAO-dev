@@ -44,7 +44,7 @@ the former per-service images (`docker/DataService`, `docker/InventoryService`) 
 |-----|--------|-----------|
 | `<version>` | `docker/meta_data.json` | depends on the release model below |
 | `latest` | — | every push to `main` |
-| `sha-<short>` | git commit | never — unique per build |
+| `sha-<short>` | git commit | never — unique per build, deleted once it carries no other tag (see below) |
 
 ### Release Model
 
@@ -54,7 +54,17 @@ While a version is still in development, its tag and `latest` point at the **sam
 
 Bumping `version` for the next release is what freezes the previous one: from that build onward the old version tag stops advancing and stays pinned to its last image, while `latest` moves on to the new version. Only then does the version tag become an immutable, usable reference to that release.
 
-To pin a build independently of any bump, use the `sha-<short>` tag or an image digest.
+To pin a build of the current version, use its `sha-<short>` tag or digest only until the next merge to `main`: the cleanup below deletes it.
+
+### Cleanup
+
+after pushing, the main-branch workflow runs `scripts/cleanup-images.sh`. it keeps every build tagged `latest` or with a version (`x.y.z`, the frozen rollback points) together with their child manifests (platform image, attestation), and deletes everything else: builds that only carry a `sha-<short>` tag and orphaned untagged manifests. set `KEEP_RECENT` in the workflow to also keep the newest N sha-only builds. main builds run one at a time (`concurrency`), so the cleanup never sees a half-pushed build.
+
+check what it would delete:
+
+```bash
+scripts/cleanup-images.sh HoweyHuo unitao-dev --dry-run   # needs gh with read:packages, python3, docker buildx
+```
 
 ### Image Digests
 
