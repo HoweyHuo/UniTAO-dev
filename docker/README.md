@@ -1,52 +1,34 @@
 # build docker images
 
-### Image List
+### Image
 
- - DataService
- - InventoryService
+there is a single image, built from `docker/unitao/dockerfile`. it contains `DataService`, `InventoryService`, `DataServiceAdmin`, `InventoryServiceAdmin`, plus `git` and `openssh-client` for the vDS `git` Communication Channel. every compose environment under `docker-compose/` runs both services from it, choosing the program with the container `command`. CI publishes it as `ghcr.io/howeyhuo/unitao-dev` (see below).
+
+the former per-service images (`docker/DataService`, `docker/InventoryService`) were removed; `docker/UIServer` is a separate Node.js image.
 
 ### Local Build
- - build image into local registry
+ - build image into local registry as `unitao:localbuild`
  ```
- cd docker/{service name}
- ./build.sh
+ ./docker/unitao/build.sh
  ```
- - this will generate a image in local docker registry
-   - REPOSITORY=unitao/{service name} TAG=localbuild
- - list images
+ - or tag it like the published image, so the compose environments pick it up without changes
  ```
- docker images
+ docker build -f ./docker/unitao/dockerfile -t ghcr.io/howeyhuo/unitao-dev:latest .
  ```
- - to check content of the image
+ - pass a Go module proxy when the default one is unreachable, e.g. in the US
  ```
- docker run -it --rm -v "$(pwd)"/DataService01:/opt/UniTAO/config unitao/dataservice:localbuild 
+ docker build --build-arg GOPROXY=https://goproxy.io,direct -f ./docker/unitao/dockerfile -t unitao:localbuild .
  ```
 
- - run DataServiceAdmin
+### Run the admin tools
+ - DataServiceAdmin
  ```
- docker run -it --rm --network {network_name} -v "$(pwd)"/DataService01:/opt/UniTAO/config unitao/dataservice:localbuild DataServiceAdmin {data service admin arguments}
+ docker run -it --rm --network {network_name} -v "$(pwd)"/DataService01:/opt/UniTAO/config ghcr.io/howeyhuo/unitao-dev:latest DataServiceAdmin {data service admin arguments}
  ```
-   - example - (init table):
-   ```
-   docker run -it --rm --network 2data1inv_default -v "$(pwd)"/DataService01:/opt/UniTAO/config unitao/dataservice:localbuild initTable.sh 
-   ```
-
-  - reset data for data service
-  ```
-   docker container restart {data service admin container name}
-   example:
-   docker container restart unitao-data-service01-admin
-  ```
-
-- run InventoryServiceAdmin manually
-```
-docker run -it --rm --network 2data1inv_default -v "$(pwd)"/InventoryService/config:/opt/UniTAO/config -v "$(pwd)"/InventoryService/data:/opt/UniTAO/data unitao/inventoryservice:localbuild InventoryServiceAdmin sync -config /opt/UniTAO/config/config.json
-```
-  - Sync schema from all Data Sources
-  ```
-  docker container restart unitao-inv-service-admin
-  ```
-
+ - InventoryServiceAdmin, e.g. sync schema from all Data Services
+ ```
+ docker run -it --rm --network 2data1inv_default -v "$(pwd)"/InventoryService/config:/opt/UniTAO/config ghcr.io/howeyhuo/unitao-dev:latest InventoryServiceAdmin sync -config /opt/UniTAO/config/config.json
+ ```
 
 ### Clean Up
  - Clean up stopped Containers:
