@@ -269,7 +269,11 @@ func (srv *Server) setupShared(vds *Vds, journalLogger *log.Logger) error {
 		return err
 	}
 	outbox := Share.NewOutbox(srv.db, vds.Table)
-	vds.Publisher = Share.NewPublisher(cfg.Name, vds.Handler, outbox, channel, signer, cfg.PublishIntervalSec, cfg.SnapshotIntervalSec, srv.log)
+	vds.Publisher = Share.NewPublisher(cfg.Name, vds.Handler, outbox, channel, signer, Share.PublisherOptions{
+		PublishIntervalSec:     cfg.PublishIntervalSec,
+		SubscriberTimeoutHours: cfg.SubscriberTimeoutHours,
+		CompactIntervalHours:   cfg.CompactIntervalHours,
+	}, srv.log)
 	vds.InstanceId = vds.Publisher.Fingerprint()
 	return srv.setupJournal(vds, journalLogger, Share.NewChannelPublish(cfg.Name, outbox, journalLogger))
 }
@@ -283,10 +287,11 @@ func (srv *Server) setupMirrored(vds *Vds) error {
 	path := vds.Path
 	loadState := func() Share.MirrorState {
 		st := srv.state.VdsState(path)
-		return Share.MirrorState{Loaded: st.Loaded, Cursor: st.Cursor, SourceFingerprint: st.SourceFingerprint}
+		return Share.MirrorState{Request: st.Request, Loaded: st.Loaded, Cursor: st.Cursor, SourceFingerprint: st.SourceFingerprint}
 	}
 	saveState := func(ms Share.MirrorState) error {
 		return srv.state.UpdateVds(path, &srv.config, func(st *Config.VdsState) {
+			st.Request = ms.Request
 			st.Loaded = ms.Loaded
 			st.Cursor = ms.Cursor
 			st.SourceFingerprint = ms.SourceFingerprint
@@ -296,18 +301,14 @@ func (srv *Server) setupMirrored(vds *Vds) error {
 	return nil
 }
 
-func channelInfo(cfg Channel.Config) map[string]interface{} {
-	info := map[string]interface{}{"type": cfg.Type}
+func channelInfo(cfg Channel.Config, name string) map[string]interface{} {
+	info := map[string]interface{}{"type": cfg.Type, "folder": cfg.ResolvedFolder(name)}
 	switch cfg.Type {
 	case Channel.TypeDir:
 		info["path"] = cfg.Path
 	case Channel.TypeGit:
 		info["repo"] = Channel.RedactRepo(cfg.Repo)
-		branch := cfg.Branch
-		if branch == "" {
-			branch = Channel.DefaultBranch
-		}
-		info["branch"] = branch
+		info["branch"] = cfg.ResolvedBranch()
 		info["workDir"] = cfg.WorkDir
 	}
 	info["encrypt"] = cfg.Encrypt != nil && cfg.Encrypt.RecipientsFile != ""
@@ -334,7 +335,7 @@ func (srv *Server) vdsConfigInfo(vds *Vds) map[string]interface{} {
 	switch vds.Kind {
 	case KindShared:
 		info["name"] = vds.Name
-		info["channel"] = channelInfo(vds.SharedConfig.Channel)
+		info["channel"] = channelInfo(vds.SharedConfig.Channel, vds.SharedConfig.Name)
 		info["signingKeyConfigured"] = vds.SharedConfig.SigningKeyFile != ""
 		for key, value := range vds.Publisher.Status() {
 			info[key] = value
@@ -342,7 +343,7 @@ func (srv *Server) vdsConfigInfo(vds *Vds) map[string]interface{} {
 	case KindMirrored:
 		info["name"] = vds.MirroredConfig.Name
 		info["alias"] = vds.MirroredConfig.Alias
-		info["channel"] = channelInfo(vds.MirroredConfig.Channel)
+		info["channel"] = channelInfo(vds.MirroredConfig.Channel, vds.MirroredConfig.Name)
 		for key, value := range vds.Mirror.Status() {
 			info[key] = value
 		}

@@ -20,18 +20,19 @@ func TestMirroredAliasUnifiesInventoryId(t *testing.T) {
 	inv := startInventory(t, nil)
 	channelDir := filepath.Join(t.TempDir(), "channel")
 	keyFile, fingerprint := newSigningKey(t)
+	keyB := newSubKey(t)
 
 	// 来源在另一个网络，不注册到这个 Inventory
 	dsA := newDsNode(t, "dsA", "")
 	dsA.start(t, map[string]interface{}{
 		"shared": []interface{}{map[string]interface{}{
-			"name": "prod", "signingKeyFile": keyFile, "publishIntervalSec": 3600, "snapshotIntervalSec": 3600,
-			"channel": dirChannel(channelDir),
+			"name": "prod", "signingKeyFile": keyFile, "publishIntervalSec": 3600,
+			"channel": withEncrypt(dirChannel(channelDir), recipientsFile(t, keyB)),
 		}},
 	})
 	expectStatus(t, call(t, http.MethodPost, dsA.Url+"/shared/prod", schemaRecord("rack", "0.0.1", rackSchema)), http.StatusCreated, "post rack schema")
 	waitJournal(t, dsA, "shared/prod", 1)
-	dsA.srv.GetVds("shared/prod").Publisher.RunOnce()
+	pub := dsA.srv.GetVds("shared/prod").Publisher
 
 	// 本网已有另一个同名来源占着 prod
 	otherFp := "SHA256:ffffffff99999999"
@@ -42,13 +43,11 @@ func TestMirroredAliasUnifiesInventoryId(t *testing.T) {
 
 	mirrorCfg := map[string]interface{}{
 		"name": "prod", "trustedFingerprint": fingerprint, "pullIntervalSec": 3600,
-		"channel": dirChannel(channelDir),
+		"channel": withDecrypt(dirChannel(channelDir), keyB),
 	}
 	dsB := newDsNode(t, "dsB", inv.Url)
 	dsB.start(t, map[string]interface{}{"local": map[string]interface{}{}, "mirrored": []interface{}{mirrorCfg}})
-	if err := dsB.srv.GetVds("mirrored/prod").Mirror.SyncOnce(); err != nil {
-		t.Fatalf("mirror sync failed: %s", err)
-	}
+	syncAll(t, pub, dsB.srv.GetVds("mirrored/prod").Mirror)
 	derived := DataHandler.DerivedDsId("prod", fingerprint)
 	waitFor(t, "mirror registered under derived id", func() bool {
 		return dsB.srv.GetVds("mirrored/prod").InvId() == derived
@@ -84,10 +83,8 @@ func TestMirroredAliasUnifiesInventoryId(t *testing.T) {
 		t.Fatalf("expect the other prod untouched, got %v", other)
 	}
 
-	// 新路径重新同步，旧路径不存在
-	if err := vds.Mirror.SyncOnce(); err != nil {
-		t.Fatalf("mirror sync after alias change failed: %s", err)
-	}
+	// 新路径重新同步（新 vDS 的 state 是空的，重新订阅），旧路径不存在
+	syncAll(t, pub, vds.Mirror)
 	expectStatus(t, call(t, http.MethodGet, dsB.Url+"/mirrored/prod-b/schema/rack", nil), http.StatusOK, "rack schema on new path")
 	expectStatus(t, call(t, http.MethodGet, dsB.Url+"/mirrored/prod/schema/rack", nil), http.StatusNotFound, "old path")
 

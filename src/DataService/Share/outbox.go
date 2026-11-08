@@ -31,11 +31,10 @@ type Outbox struct {
 
 // PublishState 记录发布进度。
 type PublishState struct {
-	LastPublished    uint64 `json:"lastPublished"`
-	LastPublishTime  string `json:"lastPublishTime,omitempty"`
-	LastSnapshot     uint64 `json:"lastSnapshot"`
-	LastSnapshotTime string `json:"lastSnapshotTime,omitempty"`
-	HasSnapshot      bool   `json:"hasSnapshot"`
+	LastPublished   uint64 `json:"lastPublished"`
+	LastPublishTime string `json:"lastPublishTime,omitempty"`
+	// LastCompactTime 为上次检查 / 压缩通道历史的时间
+	LastCompactTime string `json:"lastCompactTime,omitempty"`
 }
 
 func NewOutbox(db DbIface.Database, table string) *Outbox {

@@ -94,7 +94,11 @@ func RunKeyCommand(args []string) bool {
 		}
 		writeNew(*identityFile, []byte(identity+"\n"), 0o600)
 		writeNew(*recipientFile, []byte(recipient+"\n"), 0o644)
-		fmt.Printf("identity (keep private, for decrypt.identityFile): %s\nrecipient (append to encrypt.recipientsFile): %s\n", *identityFile, *recipientFile)
+		subscriberId, err := Channel.RecipientSubscriberId(recipient)
+		if err != nil {
+			log.Fatalf("failed to derive subscriber id, Err:%s", err)
+		}
+		fmt.Printf("identity (keep private, for decrypt.identityFile): %s\nrecipient (append to encrypt.recipientsFile): %s\nsubscriber id: %s\n", *identityFile, *recipientFile, subscriberId)
 	default:
 		return false
 	}

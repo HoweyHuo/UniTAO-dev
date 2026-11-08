@@ -33,6 +33,26 @@ func Fingerprint(pub ed25519.PublicKey) string {
 	return FingerprintPrefix + hex.EncodeToString(sum[:])
 }
 
+// SubscriberId 返回 subscriber 的 id：X25519 公钥原始字节 sha256 的小写十六进制。
+// 它用作通道上 subscribers/<id>.json 的文件名，publisher 用接收方列表判断 id 是否可信。
+func SubscriberId(pub *ecdh.PublicKey) string {
+	sum := sha256.Sum256(pub.Bytes())
+	return hex.EncodeToString(sum[:])
+}
+
+// RecipientSubscriberId 返回 base64 编码的接收方公钥（enckey 生成的 recipient）对应的 subscriber id。
+func RecipientSubscriberId(recipient string) (string, error) {
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(recipient))
+	if err != nil {
+		return "", err
+	}
+	pub, err := ecdh.X25519().NewPublicKey(raw)
+	if err != nil {
+		return "", err
+	}
+	return SubscriberId(pub), nil
+}
+
 // FingerprintShort 返回指纹的前 8 位十六进制，用于撞名时派生名字。
 func FingerprintShort(fingerprint string) string {
 	hexPart := strings.TrimPrefix(fingerprint, FingerprintPrefix)

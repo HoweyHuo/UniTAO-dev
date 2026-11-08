@@ -2,49 +2,74 @@ package Channel
 
 import (
 	"bytes"
-	"crypto/ecdh"
-	"crypto/ed25519"
 	"fmt"
 	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
+	"sync"
 )
 
 const (
 	DefaultBranch = "main"
-	gitRetry      = 3
 	gitUserName   = "UniTAO"
 	gitUserEmail  = "unitao@localhost"
 )
 
-// gitRepo 用 git 命令行维护通道的本地工作目录。
-// 发布方：完整克隆，写入后 commit + push，推送冲突时 rebase 重试（不同来源写不同目录，不会真正冲突）。
-// 订阅方：浅克隆，只 fetch --depth 1 + reset --hard，从不写入。
+// gitRepo 用 git 命令行维护通道的本地工作目录（浅克隆）。
+//
+// 同一个 branch 上可能有多个写入方（各 vDS 的 publisher、各 subscriber 写自己的进度），
+// publisher 还会强推压缩后的历史，所以不做 rebase：每次写入都先 fetch 并 reset 到远端，
+// 只写自己负责的文件，提交后普通推送；被拒就从头重做（见 fileStore.write）。
+// 每个写入方只碰自己的文件，重做不会冲掉别人的修改。
+//
+// 同一进程里 workDir 相同的 vDS 共用一个 gitRepo（必须是同一个 repo + branch），由 mu 串行化所有文件访问。
+// 它们共用一份克隆，任何一个 vDS 的拉取都会更新整个 branch 的内容。
 type gitRepo struct {
-	repo    string
-	branch  string
-	workDir string
-	shallow bool
-	log     *log.Logger
+	repo       string
+	branch     string
+	workDir    string
+	log        *log.Logger
+	mu         sync.Mutex
+	remoteHead string // 最近一次对齐时远端分支的提交；分支不存在时为空
 }
 
-func newGitRepo(cfg Config, shallow bool, logger *log.Logger) (*gitRepo, error) {
+var (
+	gitReposLock sync.Mutex
+	gitRepos     = map[string]*gitRepo{}
+)
+
+// sharedGitRepo 返回 workDir 对应的 gitRepo，同一个 workDir 只创建一个。
+func sharedGitRepo(cfg Config, logger *log.Logger) (*gitRepo, error) {
 	if cfg.Repo == "" || cfg.WorkDir == "" {
 		return nil, fmt.Errorf("channel type [%s] requires [repo] and [workDir]", TypeGit)
 	}
-	branch := cfg.Branch
-	if branch == "" {
-		branch = DefaultBranch
+	key, err := filepath.Abs(cfg.WorkDir)
+	if err != nil {
+		return nil, err
 	}
-	return &gitRepo{repo: cfg.Repo, branch: branch, workDir: cfg.WorkDir, shallow: shallow, log: logger}, nil
+	branch := cfg.ResolvedBranch()
+	gitReposLock.Lock()
+	defer gitReposLock.Unlock()
+	if repo, ok := gitRepos[key]; ok {
+		if repo.repo != cfg.Repo || repo.branch != branch {
+			return nil, fmt.Errorf("git workDir [%s] is already used for repo [%s] branch [%s], cannot reuse it for repo [%s] branch [%s]",
+				cfg.WorkDir, RedactRepo(repo.repo), repo.branch, RedactRepo(cfg.Repo), branch)
+		}
+		return repo, nil
+	}
+	repo := &gitRepo{repo: cfg.Repo, branch: branch, workDir: key, log: logger}
+	gitRepos[key] = repo
+	return repo, nil
 }
 
-func (g *gitRepo) run(dir string, args ...string) (string, error) {
+func (g *gitRepo) Lock()   { g.mu.Lock() }
+func (g *gitRepo) Unlock() { g.mu.Unlock() }
+
+func (g *gitRepo) run(args ...string) (string, error) {
 	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
+	cmd.Dir = g.workDir
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	var out bytes.Buffer
 	cmd.Stdout = &out
@@ -61,15 +86,11 @@ func (g *gitRepo) run(dir string, args ...string) (string, error) {
 	return out.String(), nil
 }
 
-func (g *gitRepo) remoteHasBranch() (bool, error) {
-	out, err := g.run(g.workDir, "ls-remote", "--heads", "origin", g.branch)
-	if err != nil {
-		return false, err
-	}
-	return strings.TrimSpace(out) != "", nil
+func (g *gitRepo) withIdentity(args ...string) []string {
+	return append([]string{"-c", "user.name=" + gitUserName, "-c", "user.email=" + gitUserEmail}, args...)
 }
 
-// ensure 保证工作目录是该仓库的克隆。远端还是空仓库时，在本地建好分支，首次 push 时创建远端分支。
+// ensure 保证工作目录是一个指向远端的 git 仓库。
 func (g *gitRepo) ensure() error {
 	if _, err := os.Stat(filepath.Join(g.workDir, ".git")); err == nil {
 		return nil
@@ -77,108 +98,120 @@ func (g *gitRepo) ensure() error {
 	if err := os.MkdirAll(g.workDir, 0755); err != nil {
 		return err
 	}
-	if _, err := g.run(g.workDir, "init", "-q"); err != nil {
+	if _, err := g.run("init", "-q"); err != nil {
 		return err
 	}
-	if _, err := g.run(g.workDir, "remote", "add", "origin", g.repo); err != nil {
+	if _, err := g.run("remote", "add", "origin", g.repo); err != nil {
 		return err
 	}
-	if _, err := g.run(g.workDir, "checkout", "-q", "-b", g.branch); err != nil {
-		return err
-	}
-	return nil
-}
-
-// sync 把工作目录对齐到远端分支。
-func (g *gitRepo) sync() error {
-	hasBranch, err := g.remoteHasBranch()
-	if err != nil {
-		return err
-	}
-	if !hasBranch {
-		return nil
-	}
-	fetchArgs := []string{"fetch", "-q", "origin", g.branch}
-	if g.shallow {
-		fetchArgs = []string{"fetch", "-q", "--depth", "1", "origin", g.branch}
-	}
-	if _, err := g.run(g.workDir, fetchArgs...); err != nil {
-		return err
-	}
-	if g.shallow {
-		_, err := g.run(g.workDir, "reset", "-q", "--hard", "FETCH_HEAD")
-		return err
-	}
-	// 发布方：本地可能有未推送的提交，rebase 到远端之上
-	if _, err := g.run(g.workDir, "rev-parse", "--verify", "-q", "HEAD"); err != nil {
-		_, err := g.run(g.workDir, "reset", "-q", "--hard", "FETCH_HEAD")
-		return err
-	}
-	_, err = g.run(g.workDir, "rebase", "-q", "FETCH_HEAD")
+	_, err := g.run("symbolic-ref", "HEAD", "refs/heads/"+g.branch)
 	return err
 }
 
-func (g *gitRepo) commitAndPush(paths []string, message string) error {
-	addArgs := append([]string{"add", "-A", "--"}, paths...)
-	if _, err := g.run(g.workDir, addArgs...); err != nil {
+// sync 把工作目录对齐到远端分支最新提交，丢弃本地未推送的提交和修改。
+// 远端还没有这个分支时，工作目录变成空的未出生分支，第一次推送时创建远端分支。
+func (g *gitRepo) sync() error {
+	if err := g.ensure(); err != nil {
 		return err
 	}
-	status, err := g.run(g.workDir, "status", "--porcelain", "--")
+	if _, err := g.run("fetch", "-q", "--depth", "1", "origin", g.branch); err != nil {
+		if !strings.Contains(err.Error(), "couldn't find remote ref") {
+			return err
+		}
+		if err := g.makeEmpty(); err != nil {
+			return err
+		}
+		g.remoteHead = ""
+		return nil
+	}
+	head, err := g.run("rev-parse", "FETCH_HEAD")
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(status) != "" {
-		if _, err := g.run(g.workDir, "-c", "user.name="+gitUserName, "-c", "user.email="+gitUserEmail, "commit", "-q", "-m", message); err != nil {
-			return err
-		}
+	g.remoteHead = strings.TrimSpace(head)
+	if _, err := g.run("checkout", "-q", "-f", "-B", g.branch, g.remoteHead); err != nil {
+		return err
 	}
-	var lastErr error
-	for attempt := 0; attempt < gitRetry; attempt++ {
-		_, err := g.run(g.workDir, "push", "-q", "origin", "HEAD:refs/heads/"+g.branch)
-		if err == nil {
-			return nil
-		}
-		lastErr = err
-		g.log.Printf("GitChannel: push failed, rebase and retry. Error:%s", err)
-		time.Sleep(time.Duration(attempt+1) * 500 * time.Millisecond)
-		if err := g.sync(); err != nil {
-			lastErr = err
-		}
-	}
-	return lastErr
+	_, err = g.run("clean", "-q", "-f", "-d")
+	return err
 }
 
-func newGitPublisher(cfg Config, source string, signer ed25519.PrivateKey, recipients []*ecdh.PublicKey, logger *log.Logger) (Publisher, error) {
-	repo, err := newGitRepo(cfg, false, logger)
-	if err != nil {
-		return nil, err
+func (g *gitRepo) makeEmpty() error {
+	if _, err := g.run("symbolic-ref", "HEAD", "refs/heads/"+g.branch); err != nil {
+		return err
 	}
-	store := newFileStore(cfg.WorkDir, source, signer, recipients, nil, "", logger)
-	prepare := func() error {
-		if err := repo.ensure(); err != nil {
-			return err
-		}
-		return repo.sync()
+	// 删掉本地分支（如果有），回到未出生状态
+	g.run("update-ref", "-d", "refs/heads/"+g.branch)
+	if _, err := g.run("read-tree", "--empty"); err != nil {
+		return err
 	}
-	store.beforeRead = prepare
-	store.beforeWrite = prepare
-	store.afterWrite = func(message string) error {
-		return repo.commitAndPush([]string{source}, message)
-	}
-	return store, nil
+	_, err := g.run("clean", "-q", "-f", "-d", "-x")
+	return err
 }
 
-func newGitSubscriber(cfg Config, source string, identity *ecdh.PrivateKey, trusted string, logger *log.Logger) (Subscriber, error) {
-	repo, err := newGitRepo(cfg, true, logger)
+func (g *gitRepo) Pull() error {
+	return g.sync()
+}
+
+func (g *gitRepo) Prepare() error {
+	return g.sync()
+}
+
+func (g *gitRepo) Commit(folder string, message string) error {
+	if _, err := g.run("add", "-A", "--", filepath.FromSlash(folder)); err != nil {
+		return err
+	}
+	if _, err := g.run("diff", "--cached", "--quiet"); err == nil {
+		return nil // 没有修改
+	}
+	if _, err := g.run(g.withIdentity("commit", "-q", "-m", message)...); err != nil {
+		return err
+	}
+	if _, err := g.run("push", "-q", "origin", "HEAD:refs/heads/"+g.branch); err != nil {
+		return fmt.Errorf("%w: %s", errRetry, err)
+	}
+	head, err := g.run("rev-parse", "HEAD")
 	if err != nil {
-		return nil, err
+		return err
 	}
-	store := newFileStore(cfg.WorkDir, source, nil, nil, identity, trusted, logger)
-	store.beforeRead = func() error {
-		if err := repo.ensure(); err != nil {
-			return err
-		}
-		return repo.sync()
+	g.remoteHead = strings.TrimSpace(head)
+	return nil
+}
+
+// Compact 用当前文件树建一个没有父提交的新提交，强推替换整个分支历史。
+// --force-with-lease 保证只有远端在这次对齐之后没有变化时才替换，不会冲掉别人刚推上去的提交；
+// 失败时返回错误，下一轮再试。成功后回收本地旧对象。
+func (g *gitRepo) Compact(message string) (bool, error) {
+	if err := g.sync(); err != nil {
+		return false, err
 	}
-	return store, nil
+	if g.remoteHead == "" {
+		return false, nil
+	}
+	// 浅克隆里看不到父提交本身，但提交对象里仍有 parent 行
+	commit, err := g.run("cat-file", "-p", g.remoteHead)
+	if err != nil {
+		return false, err
+	}
+	if !strings.Contains(commit, "\nparent ") {
+		return false, nil
+	}
+	out, err := g.run(g.withIdentity("commit-tree", g.remoteHead+"^{tree}", "-m", message)...)
+	if err != nil {
+		return false, err
+	}
+	squashed := strings.TrimSpace(out)
+	lease := fmt.Sprintf("--force-with-lease=refs/heads/%s:%s", g.branch, g.remoteHead)
+	if _, err := g.run("push", "-q", lease, "origin", squashed+":refs/heads/"+g.branch); err != nil {
+		return false, fmt.Errorf("compact rejected (remote changed or force push not allowed): %s", err)
+	}
+	if _, err := g.run("checkout", "-q", "-f", "-B", g.branch, squashed); err != nil {
+		return true, err
+	}
+	g.remoteHead = squashed
+	g.run("reflog", "expire", "--expire=now", "--all")
+	if _, err := g.run("gc", "-q", "--prune=now"); err != nil {
+		g.log.Printf("GitChannel: local gc after compact failed: %s", err)
+	}
+	return true, nil
 }

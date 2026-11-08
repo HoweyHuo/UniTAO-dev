@@ -104,7 +104,8 @@ type VdsState struct {
 	// 请求名字（config 中的名字）改变后 AssignedId 作废。
 	AssignedId   string `json:"assignedId,omitempty"`
 	AssignedFrom string `json:"assignedFrom,omitempty"`
-	// mirrored：是否已从 snapshot 完成过加载、已应用到的最大 seq、同步到的来源公钥指纹
+	// mirrored：当前订阅请求 id、该请求的 history 是否已加载、已应用到的最大 seq、同步到的来源公钥指纹
+	Request           string `json:"request,omitempty"`
 	Loaded            bool   `json:"loaded,omitempty"`
 	Cursor            uint64 `json:"cursor,omitempty"`
 	SourceFingerprint string `json:"sourceFingerprint,omitempty"`
