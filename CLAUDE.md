@@ -322,5 +322,5 @@ docker compose -f docker-compose/2data1inv/docker-compose.yml up -d
 # CI 构建（GitHub Actions 推送到 ghcr.io）
 ```
 
-CI 发布到 `ghcr.io/howeyhuo/unitao-dev` 的 tag 规则（`latest` / `<version>` / `sha-<short>` 各自何时前移、为什么未 bump 的 version tag 不能当回滚点）、以及各 tag 的镜像摘要，见 `docker/README.md`。
+CI 发布到 `ghcr.io/howeyhuo/unitao-dev` 的 tag 规则（`latest` / `<version>` / `sha-<short>` 各自何时前移、为什么未 bump 的 version tag 不能当回滚点）、以及查询各 tag 当前镜像摘要的命令，见 `docker/README.md`。
 

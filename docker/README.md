@@ -56,20 +56,9 @@ Bumping `version` for the next release is what freezes the previous one: from th
 
 To pin a build independently of any bump, use the `sha-<short>` tag or an image digest.
 
-### Image Digests (snapshot)
+### Image Digests
 
-A point-in-time record of what each tag resolved to. Nothing keeps this up to date, and it goes stale on the next version bump — regenerate it with the command below rather than trusting the table.
-
-**as of 2026-11-08:**
-
-| Tag | amd64 manifest digest | Status |
-|-----|----------------------|--------|
-| `1.1.0` | `sha256:62350e78383cb7bd8c635802850aff46401dc3fa7fbb7272b0f9e056a4ff8fb3` | in development (= `latest`) |
-| `latest` | `sha256:62350e78383cb7bd8c635802850aff46401dc3fa7fbb7272b0f9e056a4ff8fb3` | — |
-
-all builds before 1.1.0 (the `1.0.x` tags and their `sha-<short>` tags) were deleted from the registry on 2026-11-08; 1.1.0 changed the channel protocol incompatibly (queue channel, mandatory encryption). to run a 1.0.x version, build it from its git tag or commit.
-
-Regenerate:
+every push to `main` rebuilds the image, so a digest written down here would be stale after the next merge. look up what a tag resolves to now:
 
 ```bash
 for t in 1.1.0 latest; do
@@ -79,6 +68,4 @@ for t in 1.1.0 latest; do
 done
 ```
 
-
-
-
+all builds before 1.1.0 (the `1.0.x` tags and their `sha-<short>` tags) were deleted from the registry on 2026-11-08; 1.1.0 changed the channel protocol incompatibly (queue channel, mandatory encryption). to run a 1.0.x version, build it from its git tag or commit.
