@@ -60,20 +60,19 @@ To pin a build independently of any bump, use the `sha-<short>` tag or an image 
 
 A point-in-time record of what each tag resolved to. Nothing keeps this up to date, and it goes stale on the next version bump — regenerate it with the command below rather than trusting the table.
 
-**as of 2026-10-26:**
+**as of 2026-11-08:**
 
 | Tag | amd64 manifest digest | Status |
 |-----|----------------------|--------|
-| `1.0.0` | `sha256:51c722ccfd367f86ff145e87e2007248d92cb0ba56a5b2a2b7f0f952b65085c8` | frozen |
-| `1.0.1` | `sha256:0058c3f8909ccd94b3600d1ee2e12f1fd7cda46483f0d2efb68a6276bf8ffce8` | frozen |
-| `1.0.2` | `sha256:accce9f130c6fd8b4037d179a598aeb2660da4a954737c7783ba0286893347d9` | frozen |
-| `1.0.3` | `sha256:f8df3a379c521d62f1c6f52ac4e6a52bb1a3ccf4a03733eaf7b96055a9397254` | in development (= `latest`) |
-| `latest` | `sha256:f8df3a379c521d62f1c6f52ac4e6a52bb1a3ccf4a03733eaf7b96055a9397254` | — |
+| `1.1.0` | `sha256:62350e78383cb7bd8c635802850aff46401dc3fa7fbb7272b0f9e056a4ff8fb3` | in development (= `latest`) |
+| `latest` | `sha256:62350e78383cb7bd8c635802850aff46401dc3fa7fbb7272b0f9e056a4ff8fb3` | — |
+
+all builds before 1.1.0 (the `1.0.x` tags and their `sha-<short>` tags) were deleted from the registry on 2026-11-08; 1.1.0 changed the channel protocol incompatibly (queue channel, mandatory encryption). to run a 1.0.x version, build it from its git tag or commit.
 
 Regenerate:
 
 ```bash
-for t in 1.0.0 1.0.1 1.0.2 1.0.3 latest; do
+for t in 1.1.0 latest; do
   echo -n "$t  "
   docker manifest inspect ghcr.io/howeyhuo/unitao-dev:$t \
     | jq -r '.manifests[] | select(.platform.architecture=="amd64") | .digest'
