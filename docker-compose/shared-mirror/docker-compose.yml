@@ -18,7 +18,7 @@ services:
       HOME: /tmp
     volumes:
       - ./SiteA/ds:/opt/UniTAO/config
-      - ./keys:/opt/UniTAO/keys:ro
+      - ./keys/siteA:/opt/UniTAO/keys:ro
       - ./exchange:/opt/UniTAO/exchange
       - ./logs:/opt/UniTAO/log
       - ./passwd:/etc/passwd:ro
@@ -53,7 +53,9 @@ services:
       HOME: /tmp
     volumes:
       - ./SiteB/ds:/opt/UniTAO/config
-      - ./exchange:/opt/UniTAO/exchange:ro
+      - ./keys/siteB:/opt/UniTAO/keys:ro
+      # mirror 也要写：它把自己的处理进度写进 exchange/catalog/subscribers/
+      - ./exchange:/opt/UniTAO/exchange
       - ./logs:/opt/UniTAO/log
       - ./passwd:/etc/passwd:ro
     ports:

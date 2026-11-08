@@ -12,7 +12,7 @@ docker build -f ./docker/unitao/dockerfile -t ghcr.io/howeyhuo/unitao-dev:latest
 
 ```
 cd docker-compose/shared-mirror-git
-./setup.sh                      # signing key, trusted fingerprint for siteB, bare repository, .env with your UID/GID, passwd
+./setup.sh                      # signing key (siteA), encryption identity (siteB) + recipients (siteA), trusted fingerprint, bare repository, .env, passwd
 docker compose up -d
 
 # write into the shared vDS on siteA
@@ -21,33 +21,35 @@ curl -X POST localhost:8031/shared/catalog -d '{"__type":"rack","__id":"r1","__v
 
 # what siteA pushed
 git -C remote/exchange.git log --oneline main
-git -C remote/exchange.git ls-tree -r --name-only main   # catalog/manifest.json, manifest.sig, segments/, snapshots/
+git -C remote/exchange.git ls-tree -r --name-only main   # infra/catalog/manifest.json, manifest.sig, subscribers/<siteB id>.json
 
 # within ~15 seconds (publish every 5s, pull every 10s) it is on siteB, read-only
 curl localhost:8041/mirrored/catalog/rack/r1
-curl localhost:8041/mirrored/catalog/config      # cursor, source fingerprint, sync status
+curl localhost:8041/mirrored/catalog/config      # subscription (waiting | active), cursor, sync status
+curl localhost:8031/shared/catalog/config        # publisher view: subscribers with their state and cursor
 curl localhost:8044/rack                         # ["catalog/r1"] in siteB's Inventory
 ```
 
 ## How the git channel works
 
-the repository has the same layout as a `dir` channel, one folder per shared vDS:
+both sides use `"folder": "infra/catalog"`, so the vDS lives under that folder on branch `main`; other vDS can share the repository and branch under other folders. the layout is the same as a `dir` channel (see the main README, "How changes travel"):
 
 ```
-catalog/
-  manifest.json        # segments and snapshots on the channel, with the sha256 of every file
-  manifest.sig         # ed25519 signature of the manifest by keys/catalog.pem
-  segments/<from>-<to>.jsonl.gz
-  snapshots/<seq>.jsonl.gz
+infra/catalog/
+  manifest.json, manifest.sig             # signed by siteA: lastSeq, queue and history files with their sha256
+  queue/<from>-<to>.jsonl.gz.enc          # incremental batches, encrypted to all recipients
+  history/<id>-<seq>-<request>.jsonl.gz.enc   # full data for one subscriber, encrypted only to it
+  subscribers/<id>.json                   # written by siteB: request, state, cursor
 ```
 
- - **publisher (siteA)**: keeps a full clone in `channel.workDir` (`./work/siteA/catalog`). before reading or writing it fetches and rebases onto the remote branch; after writing it commits only its own `catalog/` folder and pushes (retried 3 times, rebasing in between). an empty remote is fine, the first push creates the branch. several shared vDS may share one repository, each writes its own folder.
- - **mirror (siteB)**: keeps a shallow clone in `./work/siteB/catalog`; every `pullIntervalSec` it runs `fetch --depth 1` + `reset --hard`, verifies the manifest signature against `trustedFingerprint` and the sha256 of each file, then applies the segments after its cursor. it never pushes, so siteB mounts `./remote` read-only.
+ - **every write, both sides**: `fetch --depth 1`, reset the clone in `channel.workDir` (`./work/siteA`, `./work/siteB`) to the remote branch, write only its own files, commit, push. a rejected push (someone else pushed first) is redone from the fetch, no rebase. an empty remote is fine, the first push creates the branch.
+ - **siteA** pushes batches and histories and prunes what siteB has passed; at most every `compactIntervalHours` it squashes the branch into one commit (`push --force-with-lease`, so a concurrent push is never lost) and runs `gc` on its clone. `git -C remote/exchange.git log --oneline main` shows the commits since the last squash.
+ - **siteB** pushes its progress only when it changes, so an idle channel gets no commits. it needs write access to the repository; `./remote` is mounted read-write on both sides.
  - git runs non-interactively (`GIT_TERMINAL_PROMPT=0`): credentials must be in place before the Data Service starts.
 
 ## Using a real git server
 
-replace `channel.repo` on both sides, drop the `./remote` mount, and give each Data Service its credentials. git runs non-interactively, so they must be in place before the Data Service starts. give the mirror read-only credentials, only the publisher pushes.
+replace `channel.repo` on both sides, drop the `./remote` mount, and give each Data Service its credentials. git runs non-interactively, so they must be in place before the Data Service starts. the mirror needs push access too (it writes `subscribers/<id>.json`); the publisher additionally needs force-push for history compaction. if the server forbids force-push, compaction fails and is logged, everything else works.
 
  - **SSH** (`ssh://git@git.internal/unitao/exchange.git` or `git@git.internal:unitao/exchange.git`): mount a deploy key and a `known_hosts` file and point ssh at them, so nothing depends on the home directory:
    ```yaml

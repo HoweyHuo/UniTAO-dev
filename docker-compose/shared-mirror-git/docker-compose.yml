@@ -20,7 +20,7 @@ services:
       HOME: /tmp
     volumes:
       - ./SiteA/ds:/opt/UniTAO/config
-      - ./keys:/opt/UniTAO/keys:ro
+      - ./keys/siteA:/opt/UniTAO/keys:ro
       # 远端仓库：发布方要 push，可写
       - ./remote:/opt/UniTAO/remote
       # 发布方自己的克隆（channel.workDir），挂出来方便查看提交历史
@@ -59,7 +59,9 @@ services:
     volumes:
       - ./SiteB/ds:/opt/UniTAO/config
       # 镜像方只 fetch，远端仓库只读
-      - ./remote:/opt/UniTAO/remote:ro
+      - ./keys/siteB:/opt/UniTAO/keys:ro
+      # mirror 也要推送：它把自己的处理进度写进仓库
+      - ./remote:/opt/UniTAO/remote
       - ./work/siteB:/opt/UniTAO/channel
       - ./logs:/opt/UniTAO/log
       - ./passwd:/etc/passwd:ro

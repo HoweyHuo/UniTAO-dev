@@ -13,8 +13,13 @@
             "name": "catalog",
             "signingKeyFile": "/opt/UniTAO/keys/catalog.pem",
             "publishIntervalSec": 5,
-            "snapshotIntervalSec": 60,
-            "channel": { "type": "dir", "path": "/opt/UniTAO/exchange" }
+            "subscriberTimeoutHours": 720,
+            "compactIntervalHours": 24,
+            "channel": {
+                "type": "dir",
+                "path": "/opt/UniTAO/exchange",
+                "encrypt": { "recipientsFile": "/opt/UniTAO/keys/recipients" }
+            }
         }]
     }
 }

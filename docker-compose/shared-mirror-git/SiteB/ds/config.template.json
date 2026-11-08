@@ -17,7 +17,9 @@
                 "type": "git",
                 "repo": "file:///opt/UniTAO/remote/exchange.git",
                 "branch": "main",
-                "workDir": "/opt/UniTAO/channel/catalog"
+                "folder": "infra/catalog",
+                "workDir": "/opt/UniTAO/channel",
+                "decrypt": { "identityFile": "/opt/UniTAO/keys/identity" }
             }
         }]
     }

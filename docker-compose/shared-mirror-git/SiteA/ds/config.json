@@ -13,12 +13,15 @@
             "name": "catalog",
             "signingKeyFile": "/opt/UniTAO/keys/catalog.pem",
             "publishIntervalSec": 5,
-            "snapshotIntervalSec": 60,
+            "subscriberTimeoutHours": 720,
+            "compactIntervalHours": 24,
             "channel": {
                 "type": "git",
                 "repo": "file:///opt/UniTAO/remote/exchange.git",
                 "branch": "main",
-                "workDir": "/opt/UniTAO/channel/catalog"
+                "folder": "infra/catalog",
+                "workDir": "/opt/UniTAO/channel",
+                "encrypt": { "recipientsFile": "/opt/UniTAO/keys/recipients" }
             }
         }]
     }

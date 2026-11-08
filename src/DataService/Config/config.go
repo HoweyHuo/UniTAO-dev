@@ -79,16 +79,19 @@ type VdsConfig struct {
 
 type LocalVdsConfig struct{}
 
-// SharedVdsConfig 是一个 shared vDS：数据全部经 Channel 共享出去。
+// SharedVdsConfig 是一个 shared vDS：数据全部经 Channel 共享出去（publisher）。
 type SharedVdsConfig struct {
-	Name                string         `json:"name"`
-	SigningKeyFile      string         `json:"signingKeyFile"`
-	PublishIntervalSec  int            `json:"publishIntervalSec"`
-	SnapshotIntervalSec int            `json:"snapshotIntervalSec"`
-	Channel             Channel.Config `json:"channel"`
+	Name               string `json:"name"`
+	SigningKeyFile     string `json:"signingKeyFile"`
+	PublishIntervalSec int    `json:"publishIntervalSec"`
+	// SubscriberTimeoutHours：subscriber 的第一个未处理 batch 发布超过这么久，判定它死亡（默认 720）
+	SubscriberTimeoutHours int `json:"subscriberTimeoutHours"`
+	// CompactIntervalHours：压缩通道历史的最小间隔（默认 24，只对 git 通道有效）
+	CompactIntervalHours int            `json:"compactIntervalHours"`
+	Channel              Channel.Config `json:"channel"`
 }
 
-// MirroredVdsConfig 是一个 mirrored vDS：只读，所有变化来自 Channel。
+// MirroredVdsConfig 是一个 mirrored vDS（subscriber）：只读，所有变化来自 Channel。
 // Name 为来源的共享名；Alias 为本网使用的名字（路径与 Inventory dsId），缺省等于 Name。
 type MirroredVdsConfig struct {
 	Name               string         `json:"name"`
@@ -135,6 +138,9 @@ func (v *VdsConfig) Normalize() error {
 		if err := cfg.Channel.Validate(); err != nil {
 			return fmt.Errorf("shared vDS [%s]: %s", cfg.Name, err)
 		}
+		if cfg.Channel.Encrypt == nil || cfg.Channel.Encrypt.RecipientsFile == "" {
+			return fmt.Errorf("shared vDS [%s] requires [channel.encrypt.recipientsFile] (the subscriber whitelist)", cfg.Name)
+		}
 	}
 	seen = map[string]bool{}
 	for idx := range v.Mirrored {
@@ -154,6 +160,9 @@ func (v *VdsConfig) Normalize() error {
 		}
 		if err := cfg.Channel.Validate(); err != nil {
 			return fmt.Errorf("mirrored vDS [%s]: %s", cfg.LocalName(), err)
+		}
+		if cfg.Channel.Decrypt == nil || cfg.Channel.Decrypt.IdentityFile == "" {
+			return fmt.Errorf("mirrored vDS [%s] requires [channel.decrypt.identityFile] (the subscriber identity)", cfg.LocalName())
 		}
 	}
 	return nil

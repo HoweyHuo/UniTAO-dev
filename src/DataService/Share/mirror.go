@@ -17,16 +17,23 @@ import (
 const (
 	DefaultPullIntervalSec = 60
 	MaxFetchChanges        = 5000
+
+	// mirror 在 /config 中显示的订阅阶段
+	PhaseNone    = "none"    // 还没有订阅
+	PhaseWaiting = "waiting" // 已请求订阅，等待 publisher 打包 history
+	PhaseActive  = "active"  // 已加载 history，按 queue 消费
 )
 
 // MirrorState 是 mirrored vDS 需要持久化的同步进度（保存在 state.json）。
+// 本地状态是真实进度，通道上的进度文件只是汇报。
 type MirrorState struct {
-	Loaded            bool
-	Cursor            uint64
+	Request           string // 当前订阅请求 id，空表示还没订阅
+	Loaded            bool   // 当前请求的 history 已加载
+	Cursor            uint64 // 已应用到的最大 seq
 	SourceFingerprint string
 }
 
-// Mirror 是 mirrored vDS 的后台同步器：定期从 Channel 拉取并应用变更。
+// Mirror 是 mirrored vDS 的后台同步器（subscriber）：订阅、加载 history、按顺序消费 queue、汇报进度。
 type Mirror struct {
 	Source       string // 来源共享名
 	LocalName    string // 本网使用的名字
@@ -112,48 +119,82 @@ func (m *Mirror) SyncOnce() error {
 	return nil
 }
 
-func (m *Mirror) syncOnce() error {
-	if err := m.channel.Refresh(); err != nil {
-		if errors.Is(err, Channel.ErrNotPublished) {
-			return fmt.Errorf("source [%s] has not published anything yet", m.Source)
-		}
+// subscribe 发起一个新的订阅请求。旧数据保留到新 history 加载时整体替换。
+func (m *Mirror) subscribe(state MirrorState, why string) error {
+	state.Request = Channel.NewRequestId()
+	state.Loaded = false
+	state.Cursor = 0
+	if err := m.saveState(state); err != nil {
 		return err
 	}
+	m.Log(fmt.Sprintf("subscribe with request %s: %s", state.Request, why))
+	return m.channel.WriteProgress(Channel.Progress{Request: state.Request, State: Channel.StateSubscribe})
+}
+
+func (m *Mirror) syncOnce() error {
+	refreshErr := m.channel.Refresh()
+	if refreshErr != nil && !errors.Is(refreshErr, Channel.ErrNotPublished) {
+		return refreshErr
+	}
 	state := m.loadState()
-	fingerprint := m.channel.SourceFingerprint()
-	if state.SourceFingerprint != fingerprint {
+	own := m.channel.Progress()
+	if refreshErr != nil {
+		// 来源还没发布：先登记订阅，publisher 上线后为我们打包 history
+		switch {
+		case state.Request == "":
+			return m.subscribe(state, "first subscription")
+		case !state.Loaded && own == nil:
+			return m.channel.WriteProgress(Channel.Progress{Request: state.Request, State: Channel.StateSubscribe})
+		}
+		return nil
+	}
+	if fingerprint := m.channel.SourceFingerprint(); state.SourceFingerprint != fingerprint {
 		state.SourceFingerprint = fingerprint
 		if err := m.saveState(state); err != nil {
 			return err
 		}
 	}
-	rebuilt := false
+	lastSeq := m.channel.LastSeq()
+	switch {
+	case state.Request == "":
+		return m.subscribe(state, "first subscription")
+	case own == nil && state.Loaded:
+		return m.subscribe(state, "progress file was removed (considered dead by the publisher)")
+	case own != nil && own.Request != state.Request:
+		return m.subscribe(state, fmt.Sprintf("progress file belongs to request %s", own.Request))
+	case state.Loaded && own != nil && own.Cursor > state.Cursor:
+		return m.subscribe(state, fmt.Sprintf("reported cursor %d is ahead of local cursor %d (local state lost)", own.Cursor, state.Cursor))
+	case !state.Loaded && own != nil && own.State == Channel.StateActive:
+		return m.subscribe(state, "progress file is active but the history was not loaded locally (local state lost)")
+	case state.Loaded && state.Cursor > lastSeq:
+		return m.subscribe(state, fmt.Sprintf("local cursor %d is beyond published seq %d (channel was reset)", state.Cursor, lastSeq))
+	}
 	if !state.Loaded {
-		if err := m.rebuild(); err != nil {
+		if own == nil {
+			return m.channel.WriteProgress(Channel.Progress{Request: state.Request, State: Channel.StateSubscribe})
+		}
+		history, err := m.channel.History(state.Request)
+		if errors.Is(err, Channel.ErrNoHistory) {
+			return nil // 等 publisher 打包
+		}
+		if err != nil {
 			return err
 		}
-		rebuilt = true
+		if err := m.load(history); err != nil {
+			return err
+		}
 		state = m.loadState()
 	}
 	for {
 		changes, err := m.channel.Fetch(state.Cursor, MaxFetchChanges)
 		if errors.Is(err, Channel.ErrGap) {
-			if rebuilt {
-				return fmt.Errorf("channel cannot serve changes after snapshot seq %d", state.Cursor)
-			}
-			rebuilt = true
-			m.Log(fmt.Sprintf("cannot continue from cursor %d, rebuild from snapshot", state.Cursor))
-			if err := m.rebuild(); err != nil {
-				return err
-			}
-			state = m.loadState()
-			continue
+			return m.subscribe(state, fmt.Sprintf("seq %d is no longer on the channel", state.Cursor+1))
 		}
 		if err != nil {
 			return err
 		}
 		if len(changes) == 0 {
-			return nil
+			break
 		}
 		for _, change := range changes {
 			if change.Seq != state.Cursor+1 {
@@ -172,6 +213,12 @@ func (m *Mirror) syncOnce() error {
 		}
 		m.Log(fmt.Sprintf("applied up to seq %d", state.Cursor))
 	}
+	// 只有进度变化时才写，空闲时不产生提交
+	own = m.channel.Progress()
+	if own == nil || own.State != Channel.StateActive || own.Cursor != state.Cursor || own.Request != state.Request {
+		return m.channel.WriteProgress(Channel.Progress{Request: state.Request, State: Channel.StateActive, Cursor: state.Cursor})
+	}
+	return nil
 }
 
 func (m *Mirror) apply(change Channel.Change) *Http.HttpError {
@@ -187,17 +234,10 @@ func (m *Mirror) apply(change Channel.Change) *Http.HttpError {
 	return Http.NewHttpError(fmt.Sprintf("unknown op [%s]", change.Op), 400)
 }
 
-// rebuild 清空本 vDS 的同步数据，从最新 snapshot 重新加载。
-func (m *Mirror) rebuild() error {
-	snap, err := m.channel.LatestSnapshot()
-	if err != nil {
-		if errors.Is(err, Channel.ErrNoSnapshot) {
-			return fmt.Errorf("source [%s] has no snapshot yet, wait for it", m.Source)
-		}
-		return err
-	}
-	if snap.Source != m.Source {
-		return fmt.Errorf("snapshot comes from source [%s], expect [%s]", snap.Source, m.Source)
+// load 用 history 整体替换本 vDS 的同步数据。
+func (m *Mirror) load(history *Channel.History) error {
+	if history.Source != m.Source {
+		return fmt.Errorf("history comes from source [%s], expect [%s]", history.Source, m.Source)
 	}
 	before, httpErr := m.handler.ListDataTypes()
 	if httpErr != nil {
@@ -206,9 +246,9 @@ func (m *Mirror) rebuild() error {
 	if httpErr := m.handler.ClearSynced(); httpErr != nil {
 		return httpErr
 	}
-	for _, record := range snap.Records {
+	for _, record := range history.Records {
 		if httpErr := m.handler.ApplyUpsert(record); httpErr != nil {
-			return fmt.Errorf("failed to load snapshot record: %s", httpErr)
+			return fmt.Errorf("failed to load history record: %s", httpErr)
 		}
 	}
 	after, httpErr := m.handler.ListDataTypes()
@@ -218,11 +258,11 @@ func (m *Mirror) rebuild() error {
 	m.notifyRemovedTypes(before, after)
 	state := m.loadState()
 	state.Loaded = true
-	state.Cursor = snap.Seq
+	state.Cursor = history.Seq
 	if err := m.saveState(state); err != nil {
 		return err
 	}
-	m.Log(fmt.Sprintf("rebuilt from snapshot seq %d with %d records", snap.Seq, len(snap.Records)))
+	m.Log(fmt.Sprintf("loaded history at seq %d with %d records", history.Seq, len(history.Records)))
 	return nil
 }
 
@@ -250,10 +290,20 @@ func (m *Mirror) Status() map[string]interface{} {
 	if m.paused {
 		status = "paused"
 	}
+	phase := PhaseNone
+	switch {
+	case state.Request != "" && state.Loaded:
+		phase = PhaseActive
+	case state.Request != "":
+		phase = PhaseWaiting
+	}
 	result := map[string]interface{}{
 		"source":             m.Source,
+		"subscriberId":       m.channel.Id(),
 		"trustedFingerprint": m.Trusted,
 		"sourceFingerprint":  state.SourceFingerprint,
+		"subscription":       phase,
+		"request":            state.Request,
 		"loaded":             state.Loaded,
 		"cursor":             state.Cursor,
 		"status":             status,

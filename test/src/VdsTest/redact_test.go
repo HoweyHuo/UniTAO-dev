@@ -48,7 +48,7 @@ func TestGitChannelErrorRedactsCredentials(t *testing.T) {
 	key, _ := signer(t)
 	// 端口 1 上没有服务，git 会立即连接失败
 	repo := "https://unitao-bot:s3cret-token@127.0.0.1:1/exchange.git"
-	pub, err := Channel.NewPublisher(Channel.Config{Type: Channel.TypeGit, Repo: repo, WorkDir: filepath.Join(t.TempDir(), "pub")}, "prod", key, nil)
+	pub, err := Channel.NewPublisher(pubConfig(Channel.Config{Type: Channel.TypeGit, Repo: repo, WorkDir: filepath.Join(t.TempDir(), "pub")}, recipientsFile(t, newSubKey(t))), "prod", key, nil)
 	mustNoErr(t, err, "new git publisher")
 	err = pub.Publish(changes("prod", 1, 1))
 	if err == nil {
@@ -67,11 +67,11 @@ func TestVdsConfigRedactsRepoCredentials(t *testing.T) {
 		"local": map[string]interface{}{},
 		"shared": []interface{}{map[string]interface{}{
 			"name": "prod", "signingKeyFile": keyFile,
-			"publishIntervalSec": 3600, "snapshotIntervalSec": 3600,
-			"channel": map[string]interface{}{
+			"publishIntervalSec": 3600,
+			"channel": withEncrypt(map[string]interface{}{
 				"type": "git", "repo": "https://unitao-bot:s3cret-token@127.0.0.1:1/exchange.git",
 				"workDir": filepath.Join(t.TempDir(), "work"),
-			},
+			}, recipientsFile(t, newSubKey(t))),
 		}},
 	})
 	resp := call(t, http.MethodGet, ds.Url+"/shared/prod/config", nil)

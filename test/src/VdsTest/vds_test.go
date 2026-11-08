@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"DataService/Share"
 	"InventoryService/DataHandler"
 )
 
@@ -20,6 +21,47 @@ var serverSchema = map[string]interface{}{
 
 func dirChannel(path string) map[string]interface{} {
 	return map[string]interface{}{"type": "dir", "path": path}
+}
+
+// withEncrypt 给 shared 的 channel 配置加上接收方列表（subscriber 白名单）。
+func withEncrypt(channel map[string]interface{}, recipients string) map[string]interface{} {
+	result := map[string]interface{}{}
+	for k, v := range channel {
+		result[k] = v
+	}
+	result["encrypt"] = map[string]interface{}{"recipientsFile": recipients}
+	return result
+}
+
+// withDecrypt 给 mirrored 的 channel 配置加上自己的身份。
+func withDecrypt(channel map[string]interface{}, key subKey) map[string]interface{} {
+	result := map[string]interface{}{}
+	for k, v := range channel {
+		result[k] = v
+	}
+	result["decrypt"] = map[string]interface{}{"identityFile": key.IdentityFile}
+	return result
+}
+
+// syncAll 走一轮完整的订阅 / 消费：mirror 登记或汇报进度 → publisher 打包 history、清理 →
+// mirror 加载 history 并消费 queue、汇报进度 → publisher 按新进度清理。
+func syncAll(t *testing.T, pub *Share.Publisher, mirrors ...*Share.Mirror) {
+	t.Helper()
+	for round := 0; round < 2; round++ {
+		for _, m := range mirrors {
+			if err := m.SyncOnce(); err != nil {
+				t.Fatalf("mirror %s sync failed: %s", m.LocalName, err)
+			}
+		}
+		if err := pub.RunOnce(); err != nil {
+			t.Fatalf("publisher %s run failed: %s", pub.Name, err)
+		}
+	}
+	for _, m := range mirrors {
+		if err := m.SyncOnce(); err != nil {
+			t.Fatalf("mirror %s sync failed: %s", m.LocalName, err)
+		}
+	}
 }
 
 func getInvRecord(t *testing.T, inv *invNode, id string) (map[string]interface{}, bool) {
@@ -44,14 +86,14 @@ func TestSharedMirroredEndToEnd(t *testing.T) {
 	inv := startInventory(t, nil)
 	channelDir := filepath.Join(t.TempDir(), "channel")
 	keyFile, fingerprint := newSigningKey(t)
+	keyB := newSubKey(t)
 
 	dsA := newDsNode(t, "dsA", inv.Url)
 	dsA.start(t, map[string]interface{}{
 		"local": map[string]interface{}{},
 		"shared": []interface{}{map[string]interface{}{
-			"name": "prod", "signingKeyFile": keyFile,
-			"publishIntervalSec": 3600, "snapshotIntervalSec": 3600,
-			"channel": dirChannel(channelDir),
+			"name": "prod", "signingKeyFile": keyFile, "publishIntervalSec": 3600,
+			"channel": withEncrypt(dirChannel(channelDir), recipientsFile(t, keyB)),
 		}},
 	})
 	dsB := newDsNode(t, "dsB", inv.Url)
@@ -59,9 +101,11 @@ func TestSharedMirroredEndToEnd(t *testing.T) {
 		"local": map[string]interface{}{},
 		"mirrored": []interface{}{map[string]interface{}{
 			"name": "prod", "trustedFingerprint": fingerprint, "pullIntervalSec": 3600,
-			"channel": dirChannel(channelDir),
+			"channel": withDecrypt(dirChannel(channelDir), keyB),
 		}},
 	})
+	pub := dsA.srv.GetVds("shared/prod").Publisher
+	mirror := dsB.srv.GetVds("mirrored/prod").Mirror
 
 	// 路由
 	expectList(t, call(t, http.MethodGet, dsA.Url+"/", nil), []string{"local", "shared/prod"}, "GET / on dsA")
@@ -97,12 +141,9 @@ func TestSharedMirroredEndToEnd(t *testing.T) {
 	// 同名同版本但内容不同的 server schema：D6 冲突，dsA 不进入 server 的 referral
 	expectStatus(t, call(t, http.MethodPost, localUrl, schemaRecord("server", "0.0.1", map[string]interface{}{"hostname": map[string]interface{}{"type": "string"}})), http.StatusCreated, "post conflicting local server schema")
 
-	// 发布并镜像
+	// 发布并镜像：mirror 订阅 → publisher 打包 history → mirror 加载
 	waitJournal(t, dsA, "shared/prod", 4)
-	dsA.srv.GetVds("shared/prod").Publisher.RunOnce()
-	if err := dsB.srv.GetVds("mirrored/prod").Mirror.SyncOnce(); err != nil {
-		t.Fatalf("mirror sync failed: %s", err)
-	}
+	syncAll(t, pub, mirror)
 	mirroredUrl := dsB.Url + "/mirrored/prod"
 	got := call(t, http.MethodGet, mirroredUrl+"/server/s1", nil)
 	expectStatus(t, got, http.StatusOK, "get mirrored s1")
@@ -118,29 +159,34 @@ func TestSharedMirroredEndToEnd(t *testing.T) {
 	expectStatus(t, call(t, http.MethodPost, sharedUrl, dataRecord("rack", "r2", map[string]interface{}{"name": "rack two"})), http.StatusCreated, "post rack r2")
 	expectStatus(t, call(t, http.MethodDelete, sharedUrl+"/rack/r2", nil), http.StatusAccepted, "delete r2")
 	waitJournal(t, dsA, "shared/prod", 7)
-	dsA.srv.GetVds("shared/prod").Publisher.RunOnce()
-	if err := dsB.srv.GetVds("mirrored/prod").Mirror.SyncOnce(); err != nil {
-		t.Fatalf("mirror incremental sync failed: %s", err)
-	}
+	syncAll(t, pub, mirror)
 	got = call(t, http.MethodGet, mirroredUrl+"/server/s1", nil)
 	if hostname := got.Map(t)["data"].(map[string]interface{})["hostname"]; hostname != "web-01b" {
 		t.Fatalf("expect incremental update web-01b, got %v", hostname)
 	}
 	expectStatus(t, call(t, http.MethodGet, mirroredUrl+"/rack/r2", nil), http.StatusNotFound, "deleted r2 on mirror")
-	// 通道被清空（仓库重置）：发布端先补一个当前 seq 的 snapshot，之后的增量照常
+	// 全部消费后 queue 被清空，通道上只剩 manifest 和进度文件
+	if queue := channelFiles(t, filepath.Join(channelDir, "prod", "queue")); len(queue) != 0 {
+		t.Fatalf("expect queue emptied after the only subscriber consumed it, got %v", queue)
+	}
+	if history := channelFiles(t, filepath.Join(channelDir, "prod", "history")); len(history) != 0 {
+		t.Fatalf("expect history removed after it was loaded, got %v", history)
+	}
+	pcfg := call(t, http.MethodGet, sharedUrl+"/config", nil).Map(t)
+	subs, _ := pcfg["subscribers"].([]interface{})
+	if len(subs) != 1 || subs[0].(map[string]interface{})["state"] != "active" || subs[0].(map[string]interface{})["id"] != keyB.Id {
+		t.Fatalf("unexpected subscribers in shared config: %v", pcfg["subscribers"])
+	}
+	// 通道被清空（仓库重置）：publisher 让通道从当前 seq 重新开始，mirror 发现进度文件没了，重新订阅
 	if err := os.RemoveAll(channelDir); err != nil {
 		t.Fatal(err)
 	}
-	dsA.srv.GetVds("shared/prod").Publisher.RunOnce()
 	expectStatus(t, call(t, http.MethodPost, sharedUrl, dataRecord("rack", "r3", map[string]interface{}{"name": "rack three"})), http.StatusCreated, "post rack r3")
 	waitJournal(t, dsA, "shared/prod", 8)
-	dsA.srv.GetVds("shared/prod").Publisher.RunOnce()
-	if err := dsB.srv.GetVds("mirrored/prod").Mirror.SyncOnce(); err != nil {
-		t.Fatalf("mirror sync after channel reset failed: %s", err)
-	}
+	syncAll(t, pub, mirror)
 	expectStatus(t, call(t, http.MethodGet, mirroredUrl+"/rack/r3", nil), http.StatusOK, "r3 on mirror after channel reset")
 	mcfg := call(t, http.MethodGet, mirroredUrl+"/config", nil).Map(t)
-	if mcfg["status"] != "ok" || mcfg["sourceFingerprint"] != fingerprint {
+	if mcfg["status"] != "ok" || mcfg["sourceFingerprint"] != fingerprint || mcfg["subscription"] != "active" || mcfg["subscriberId"] != keyB.Id {
 		t.Fatalf("unexpected mirror status: %v", mcfg)
 	}
 
@@ -191,26 +237,24 @@ func TestRemoveMirroredVds(t *testing.T) {
 	inv := startInventory(t, nil)
 	channelDir := filepath.Join(t.TempDir(), "channel")
 	keyFile, fingerprint := newSigningKey(t)
+	keyB := newSubKey(t)
 	dsA := newDsNode(t, "dsA", "")
 	dsA.start(t, map[string]interface{}{
 		"shared": []interface{}{map[string]interface{}{
-			"name": "prod", "signingKeyFile": keyFile, "publishIntervalSec": 3600, "snapshotIntervalSec": 3600,
-			"channel": dirChannel(channelDir),
+			"name": "prod", "signingKeyFile": keyFile, "publishIntervalSec": 3600,
+			"channel": withEncrypt(dirChannel(channelDir), recipientsFile(t, keyB)),
 		}},
 	})
 	expectStatus(t, call(t, http.MethodPost, dsA.Url+"/shared/prod", schemaRecord("rack", "0.0.1", rackSchema)), http.StatusCreated, "post rack schema")
 	waitJournal(t, dsA, "shared/prod", 1)
-	dsA.srv.GetVds("shared/prod").Publisher.RunOnce()
 
 	mirrorCfg := map[string]interface{}{
 		"name": "prod", "trustedFingerprint": fingerprint, "pullIntervalSec": 3600,
-		"channel": dirChannel(channelDir),
+		"channel": withDecrypt(dirChannel(channelDir), keyB),
 	}
 	dsB := newDsNode(t, "dsB", inv.Url)
 	dsB.start(t, map[string]interface{}{"local": map[string]interface{}{}, "mirrored": []interface{}{mirrorCfg}})
-	if err := dsB.srv.GetVds("mirrored/prod").Mirror.SyncOnce(); err != nil {
-		t.Fatalf("mirror sync failed: %s", err)
-	}
+	syncAll(t, dsA.srv.GetVds("shared/prod").Publisher, dsB.srv.GetVds("mirrored/prod").Mirror)
 	table := "dsB_mirrored_prod"
 	if !dsB.db.HasTable(table) {
 		t.Fatalf("expect table %s", table)
@@ -296,8 +340,8 @@ func TestSharedSchemaClosure(t *testing.T) {
 	ds.start(t, map[string]interface{}{
 		"local": map[string]interface{}{},
 		"shared": []interface{}{map[string]interface{}{
-			"name": "prod", "signingKeyFile": keyFile, "publishIntervalSec": 3600, "snapshotIntervalSec": 3600,
-			"channel": dirChannel(filepath.Join(t.TempDir(), "channel")),
+			"name": "prod", "signingKeyFile": keyFile, "publishIntervalSec": 3600,
+			"channel": withEncrypt(dirChannel(filepath.Join(t.TempDir(), "channel")), recipientsFile(t, newSubKey(t))),
 		}},
 	})
 	expectStatus(t, call(t, http.MethodPost, ds.Url+"/local", schemaRecord("rack", "0.0.1", rackSchema)), http.StatusCreated, "post local rack schema")
