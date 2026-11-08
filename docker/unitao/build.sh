@@ -29,8 +29,8 @@ IMAGE_NAME="$(echo "unitao:localbuild" | awk '{print tolower($0)}';)"
 
 pushd $SCRIPT_DIR/../../
 
-docker pull golang:1.22
-docker pull ubuntu:24.04
+docker pull golang:1.25-alpine3.21
+docker pull alpine:3.21
 
 # Create the docker image with tag localbuild the image with same tag will be set as empty
 docker build --no-cache -t $IMAGE_NAME -f $SCRIPT_DIR/dockerfile .
