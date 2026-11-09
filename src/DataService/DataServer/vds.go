@@ -332,6 +332,13 @@ func (srv *Server) vdsConfigInfo(vds *Vds) map[string]interface{} {
 		},
 		"urls": srv.vdsUrls(vds),
 	}
+	if srv.sshIdentity != nil {
+		// 公钥：加到 git 服务器上，git 通道即可经 SSH 访问远端（私钥不输出）
+		info["instance"].(map[string]interface{})["ssh"] = map[string]interface{}{
+			"publicKey":   srv.sshIdentity.PublicKey,
+			"fingerprint": srv.sshIdentity.Fingerprint,
+		}
+	}
 	switch vds.Kind {
 	case KindShared:
 		info["name"] = vds.Name

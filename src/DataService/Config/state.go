@@ -32,6 +32,8 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+
+	"DataService/Channel"
 )
 
 const StateFile = "state.json"
@@ -53,8 +55,30 @@ type State struct {
 	// 启动时先处理完它们再注册当前的 vDS：否则改了 alias 的 mirrored 用新名字注册时，
 	// 旧记录还在，会因指纹相同被合并进旧记录，拿回旧名字。
 	Unregister []UnregisterTask `json:"unregister,omitempty"`
-	path       string
-	lock       sync.Mutex
+	// SSH 为 DS 自己生成的 git 通道 SSH 身份（私钥在 config 目录的 ssh/ 下），每次启动从私钥重新计算。
+	// 把 publicKey 加到 git 服务器上，git 通道即可经 SSH 访问远端。
+	SSH  *SSHState `json:"ssh,omitempty"`
+	path string
+	lock sync.Mutex
+}
+
+// SSHState 是 state.json 中 DS 的 SSH 公钥信息（只读展示，以私钥为准）。
+type SSHState struct {
+	PublicKey   string `json:"publicKey"`
+	Fingerprint string `json:"fingerprint"`
+	KeyFile     string `json:"keyFile"`
+}
+
+// SetSSH 设置 SSH 公钥信息。
+func (s *State) SetSSH(ssh *SSHState) {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+	s.SSH = ssh
+}
+
+// SSHDir 返回 DS 的 SSH 身份目录：config 同目录下的 ssh/。
+func SSHDir(configPath string) string {
+	return filepath.Join(filepath.Dir(configPath), Channel.SSHDirName)
 }
 
 // UnregisterTask 是一个待从 Inventory 注销的 vDS URL。

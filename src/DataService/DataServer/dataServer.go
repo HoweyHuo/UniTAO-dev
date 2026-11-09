@@ -37,6 +37,7 @@ import (
 	"strings"
 	"time"
 
+	"DataService/Channel"
 	"DataService/Common"
 	"DataService/Config"
 	"DataService/DataJournal"
@@ -66,6 +67,8 @@ type Server struct {
 	BackendCtl *Thread.ThreadCtrl
 	logPath    string
 	log        *log.Logger
+	// sshIdentity 为 git 通道访问 SSH 远端用的身份（setupSSHIdentity 生成或读取）
+	sshIdentity *Channel.SSHIdentity
 	// ConnectDb 建立数据库连接，测试时可替换。
 	ConnectDb func(config DbConfig.DatabaseConfig, logger *log.Logger) (DbIface.Database, error)
 }
@@ -143,12 +146,34 @@ func (srv *Server) Start(logger *log.Logger, journalLogger *log.Logger) error {
 	}
 	srv.log = logger
 	srv.BackendCtl = Thread.NewThreadController(srv.log)
+	if err := srv.setupSSHIdentity(); err != nil {
+		return err
+	}
 	srv.connectDb()
 	if err := srv.setupVds(journalLogger); err != nil {
 		return err
 	}
 	srv.StartSelfRegistration()
 	return nil
+}
+
+// setupSSHIdentity 读取（不存在则生成）DS 自己的 SSH 私钥，供 git 通道访问 SSH 远端，
+// 并把公钥写进 state.json。在连数据库之前做：git 服务器上加公钥不必等 DS 完全启动。
+func (srv *Server) setupSSHIdentity() error {
+	dir := Config.SSHDir(srv.args[CONFIG])
+	comment := fmt.Sprintf("unitao-%s", srv.Id)
+	id, created, err := Channel.EnsureSSHIdentity(dir, comment)
+	if err != nil {
+		return fmt.Errorf("failed to set up ssh identity in [%s], Err:%s", dir, err)
+	}
+	if created {
+		srv.log.Printf("generated ssh key [%s]", id.KeyFile)
+	}
+	srv.log.Printf("ssh public key for git channel (fingerprint %s): %s", id.Fingerprint, id.PublicKey)
+	Channel.SetSSHIdentity(id)
+	srv.sshIdentity = id
+	srv.state.SetSSH(&Config.SSHState{PublicKey: id.PublicKey, Fingerprint: id.Fingerprint, KeyFile: id.KeyFile})
+	return srv.state.Save(&srv.config)
 }
 
 func (srv *Server) RunHttp() {
