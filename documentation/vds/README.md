@@ -88,14 +88,14 @@ docker run --rm --user 1000:1000 -v unitao-ds01-keys:/keys $IMG \
 
 ### 3.2 准备订阅方白名单
 
-`recipientsFile` 是订阅方白名单，**至少要有一个** recipient，否则 DS 启动失败。一行一个 recipient（base64），可以用 `#` 写注释。它只含公钥，可以放在 config 目录：
+`recipientsFile` 是订阅方白名单：一行一个 recipient（base64），可以用 `#` 写注释。它只含公钥，可以放在 config 目录。文件必须存在（防止路径写错），但可以是空的：
 
 ```
 # <订阅方名字> subscriber id dcf15914...
 DN2e4U7yVl5OaTpc4+83AeFdDtHFNXZBmLa241bd9zA=
 ```
 
-还没有订阅方时，可以先按 4.1 生成一个订阅方身份，把它的 recipient 放进来。
+**还没有订阅方时，白名单留空即可**：DS 照常启动、写出 manifest，`/config` 显示 `"recipients": 0`。这期间的变更只推进 manifest 的 `lastSeq`，不写 queue batch（没有人能解密）。订阅方的 recipient 加进来并重启 DS 后，它订阅时拿到的 history 就包含之前的全部数据，之后的变更正常走 queue。
 
 ### 3.3 配置
 
@@ -144,7 +144,7 @@ volumes:
 ```bash
 docker compose up -d
 curl -s localhost:8001/                                  # 应包含 "shared/UniTao-Modeling"
-curl -s localhost:8001/shared/UniTao-Modeling/config   # 看 fingerprint、lastPublishedSeq、subscribers、lastError
+curl -s localhost:8001/shared/UniTao-Modeling/config   # 看 fingerprint、recipients、lastPublishedSeq、subscribers、lastError
 curl -s localhost:8004/inventory                         # 应包含 "UniTao-Modeling"
 ```
 
@@ -168,7 +168,7 @@ curl -s -X POST localhost:8001/shared/UniTao-Modeling -H 'Content-Type: applicat
 }'
 ```
 
-一个 `publishIntervalSec` 之内，`/config` 里的 `outboxSeq` 和 `lastPublishedSeq` 增加，仓库里出现 `queue/<from>-<to>.jsonl.gz.enc`。没有订阅方时 queue 会被清空（新订阅方总是从 history 开始），这是正常的。
+一个 `publishIntervalSec` 之内，`/config` 里的 `outboxSeq` 和 `lastPublishedSeq` 增加，仓库里出现 `queue/<from>-<to>.jsonl.gz.enc`。白名单为空时只有 manifest 的 `lastSeq` 前进、不会出现 queue 文件；有接收方但没有订阅方时 queue 会被清空。两者都是正常的：新订阅方总是从 history 开始。
 
 ## 4. 订阅方：开 mirrored vDS
 
@@ -262,4 +262,5 @@ curl -s localhost:<port>/mirrored/UniTao-Modeling/wireguard_site/site-01
 | 发布方 `subscribers[].state` 为 `untrusted` | 该订阅方的 recipient 不在 `recipientsFile` 里，或加了之后没有重启发布方 |
 | 订阅方 `status` 为 `paused` | 最近一轮同步出错，下一轮自动重试，原因在 `reason`。网络 / git 错误会自己恢复；`does not match trusted fingerprint` 是 `trustedFingerprint` 与发布方不一致；解密失败是身份与白名单里的 recipient 不配对 |
 | 订阅方一直 `waiting` | 发布方没有处理它的请求：检查发布方是否在跑、白名单、发布方日志 |
-| 发布方启动失败 `requires [channel.encrypt.recipientsFile]` / `has no key` | 白名单缺失或为空，至少要有一个 recipient |
+| 发布方启动失败 `requires [channel.encrypt.recipientsFile]` / `failed to read recipients file` | 没有配置白名单，或文件不存在（路径写错）。还没有订阅方时放一个空文件即可 |
+| 发布方日志 `no recipients: advanced to seq N without a queue batch` | 白名单为空，变更没有写进 queue；加入订阅方的 recipient 并重启后，订阅方从 history 拿到全部数据 |

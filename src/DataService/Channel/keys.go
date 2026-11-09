@@ -131,9 +131,8 @@ func loadRecipients(cfg *EncryptConfig) ([]*ecdh.PublicKey, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to read recipients file [%s], Error:%s", cfg.RecipientsFile, err)
 	}
-	if len(lines) == 0 {
-		return nil, fmt.Errorf("recipients file [%s] has no key", cfg.RecipientsFile)
-	}
+	// 白名单可以为空（还没有订阅方）：publisher 照常启动、写 manifest，只是不写 queue batch，见 fileStore.Publish。
+	// 文件本身必须存在（readKeyLines 读不到就报错），防止路径写错时静默地不发布。
 	result := []*ecdh.PublicKey{}
 	for _, line := range lines {
 		raw, err := base64.StdEncoding.DecodeString(line)

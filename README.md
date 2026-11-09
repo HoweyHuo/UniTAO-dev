@@ -205,7 +205,7 @@ DataServiceAdmin fingerprint -key prod.pem
 DataServiceAdmin enckey -identity lab.id -recipient lab.pub   # also prints the subscriber id
 ```
 
-encryption is mandatory (X25519 + AES-256-GCM). each mirror is a subscriber with its own X25519 key: it sets `channel.decrypt.identityFile`, and its public key goes into the shared side's `channel.encrypt.recipientsFile` (one recipient per line, `#` comments allowed). the recipients file is the subscriber whitelist: the subscriber id is the sha256 of the public key, and the publisher ignores progress files of ids that are not on the list. queue batches are encrypted to all recipients, a history batch only to the subscriber that asked for it. adding a subscriber means appending its recipient and restarting the shared Data Service.
+encryption is mandatory (X25519 + AES-256-GCM). each mirror is a subscriber with its own X25519 key: it sets `channel.decrypt.identityFile`, and its public key goes into the shared side's `channel.encrypt.recipientsFile` (one recipient per line, `#` comments allowed). the recipients file is the subscriber whitelist: the subscriber id is the sha256 of the public key, and the publisher ignores progress files of ids that are not on the list. queue batches are encrypted to all recipients, a history batch only to the subscriber that asked for it. adding a subscriber means appending its recipient and restarting the shared Data Service. the file must exist but may be empty (no subscribers yet): the publisher still starts and writes its manifest, and changes only advance `lastSeq` without writing queue batches nobody could decrypt; a subscriber added later starts from a history that holds all current records.
 
 ### How changes travel
 
