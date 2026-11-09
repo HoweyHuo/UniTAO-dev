@@ -70,7 +70,7 @@ func (g *gitRepo) Unlock() { g.mu.Unlock() }
 func (g *gitRepo) run(args ...string) (string, error) {
 	cmd := exec.Command("git", args...)
 	cmd.Dir = g.workDir
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	cmd.Env = append(append(os.Environ(), "GIT_TERMINAL_PROMPT=0"), gitSSHEnv()...)
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
