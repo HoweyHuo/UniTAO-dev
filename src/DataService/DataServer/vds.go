@@ -312,6 +312,9 @@ func channelInfo(cfg Channel.Config, name string) map[string]interface{} {
 		info["workDir"] = cfg.WorkDir
 	}
 	info["encrypt"] = cfg.Encrypt != nil && cfg.Encrypt.RecipientsFile != ""
+	if cfg.Encrypt != nil && cfg.Encrypt.RecipientsFile != "" {
+		info["recipientsFile"] = cfg.Encrypt.RecipientsFile
+	}
 	info["decrypt"] = cfg.Decrypt != nil && cfg.Decrypt.IdentityFile != ""
 	return info
 }

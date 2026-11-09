@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"DataService/Channel"
 	"DataService/Share"
 )
 
@@ -356,5 +357,47 @@ func TestEmptyRecipients(t *testing.T) {
 	expectStatus(t, call(t, http.MethodGet, mirroredUrl+"/rack/rack-2", nil), http.StatusOK, "rack-2 through the queue")
 	if c := mirror.Status()["cursor"]; c != uint64(3) {
 		t.Fatalf("expect mirror cursor 3, got %v", c)
+	}
+}
+
+// 白名单文件不存在时，DS 在配置路径上建一个空白名单并照常启动；已有文件不被改动；目录不存在则启动失败。
+func TestCreateMissingRecipientsFile(t *testing.T) {
+	keyFile, _ := newSigningKey(t)
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "recipients")
+	dsA := newDsNode(t, "dsA", "")
+	dsA.start(t, map[string]interface{}{
+		"shared": []interface{}{map[string]interface{}{
+			"name": "prod", "signingKeyFile": keyFile, "publishIntervalSec": 3600,
+			"channel": withEncrypt(dirChannel(filepath.Join(dir, "channel")), missing),
+		}},
+	})
+	content, err := os.ReadFile(missing)
+	if err != nil {
+		t.Fatalf("recipients file not created: %s", err)
+	}
+	if pub := dsA.srv.GetVds("shared/prod").Publisher; pub.Status()["recipients"] != 0 {
+		t.Fatalf("expect 0 recipients, got %v", pub.Status()["recipients"])
+	}
+	var cfg map[string]interface{}
+	resp := call(t, http.MethodGet, dsA.Url+"/shared/prod/config", nil)
+	expectStatus(t, resp, http.StatusOK, "get config")
+	if err := json.Unmarshal(resp.Body, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg["channel"].(map[string]interface{})["recipientsFile"]; got != missing {
+		t.Fatalf("expect channel.recipientsFile=%s, got %v", missing, got)
+	}
+
+	// 已有文件不改动
+	if created, err := Channel.EnsureRecipientsFile(missing); err != nil || created {
+		t.Fatalf("existing file: created=%v err=%v", created, err)
+	}
+	if again, _ := os.ReadFile(missing); string(again) != string(content) {
+		t.Fatalf("existing recipients file modified")
+	}
+	// 目录不存在
+	if _, err := Channel.EnsureRecipientsFile(filepath.Join(dir, "no-such-dir", "recipients")); err == nil {
+		t.Fatalf("expect error for missing directory")
 	}
 }

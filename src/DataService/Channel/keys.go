@@ -123,6 +123,29 @@ func readKeyLines(path string) ([]string, error) {
 	return lines, nil
 }
 
+const recipientsFileHeader = "# subscriber whitelist of this shared vDS: one recipient (base64 X25519 public key from\n" +
+	"# `DataServiceAdmin enckey`) per line, # starts a comment. restart the Data Service after editing.\n"
+
+// EnsureRecipientsFile 在白名单文件不存在时创建它（只有注释，即空白名单），返回是否新建。
+// 只建文件、不建目录：目录不存在多半是路径写错，直接报错。已有的文件不会被改动。
+func EnsureRecipientsFile(path string) (bool, error) {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if errors.Is(err, os.ErrExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("failed to create recipients file [%s], Error:%s", path, err)
+	}
+	if _, err := f.WriteString(recipientsFileHeader); err != nil {
+		f.Close()
+		return false, fmt.Errorf("failed to write recipients file [%s], Error:%s", path, err)
+	}
+	if err := f.Close(); err != nil {
+		return false, fmt.Errorf("failed to write recipients file [%s], Error:%s", path, err)
+	}
+	return true, nil
+}
+
 func loadRecipients(cfg *EncryptConfig) ([]*ecdh.PublicKey, error) {
 	if cfg == nil || cfg.RecipientsFile == "" {
 		return nil, nil
@@ -132,7 +155,7 @@ func loadRecipients(cfg *EncryptConfig) ([]*ecdh.PublicKey, error) {
 		return nil, fmt.Errorf("failed to read recipients file [%s], Error:%s", cfg.RecipientsFile, err)
 	}
 	// 白名单可以为空（还没有订阅方）：publisher 照常启动、写 manifest，只是不写 queue batch，见 fileStore.Publish。
-	// 文件本身必须存在（readKeyLines 读不到就报错），防止路径写错时静默地不发布。
+	// 文件不存在时由 EnsureRecipientsFile 在配置的路径上建出来，路径写错时能看到多出来的文件。
 	result := []*ecdh.PublicKey{}
 	for _, line := range lines {
 		raw, err := base64.StdEncoding.DecodeString(line)

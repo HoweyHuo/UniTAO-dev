@@ -88,7 +88,7 @@ docker run --rm --user 1000:1000 -v unitao-ds01-keys:/keys $IMG \
 
 ### 3.2 准备订阅方白名单
 
-`recipientsFile` 是订阅方白名单：一行一个 recipient（base64），可以用 `#` 写注释。它只含公钥，可以放在 config 目录。文件必须存在（防止路径写错），但可以是空的：
+`recipientsFile` 是订阅方白名单：一行一个 recipient（base64），可以用 `#` 写注释。它只含公钥，可以放在 config 目录。可以是空的；文件不存在时 DS 启动时会在配置的路径上建一个只有注释的空文件（日志 `created empty recipients file [...]`，`/config` 的 `channel.recipientsFile` 显示路径），路径写错时能看到这个多出来的文件。所在目录必须已经存在：
 
 ```
 # <订阅方名字> subscriber id dcf15914...
@@ -262,5 +262,5 @@ curl -s localhost:<port>/mirrored/UniTao-Modeling/wireguard_site/site-01
 | 发布方 `subscribers[].state` 为 `untrusted` | 该订阅方的 recipient 不在 `recipientsFile` 里，或加了之后没有重启发布方 |
 | 订阅方 `status` 为 `paused` | 最近一轮同步出错，下一轮自动重试，原因在 `reason`。网络 / git 错误会自己恢复；`does not match trusted fingerprint` 是 `trustedFingerprint` 与发布方不一致；解密失败是身份与白名单里的 recipient 不配对 |
 | 订阅方一直 `waiting` | 发布方没有处理它的请求：检查发布方是否在跑、白名单、发布方日志 |
-| 发布方启动失败 `requires [channel.encrypt.recipientsFile]` / `failed to read recipients file` | 没有配置白名单，或文件不存在（路径写错）。还没有订阅方时放一个空文件即可 |
+| 发布方启动失败 `requires [channel.encrypt.recipientsFile]` / `failed to create recipients file` | 没有配置白名单，或白名单所在目录不存在 / 不可写（路径写错、只读挂载） |
 | 发布方日志 `no recipients: advanced to seq N without a queue batch` | 白名单为空，变更没有写进 queue；加入订阅方的 recipient 并重启后，订阅方从 history 拿到全部数据 |
