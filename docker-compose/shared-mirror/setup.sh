@@ -9,12 +9,6 @@ IMAGE="${UNITAO_IMAGE:-ghcr.io/howeyhuo/unitao-dev:latest}"
 USER_ID="$(id -u):$(id -g)"
 printf 'UNITAO_UID=%s\nUNITAO_GID=%s\n' "$(id -u)" "$(id -g)" > .env
 mkdir -p keys/siteA keys/siteB exchange logs SiteA/inv/data SiteB/inv/data
-# 容器以当前用户运行，镜像的 /etc/passwd 里没有这个 UID，ssh 会报 "No user exists for uid"（git 通道用 SSH 远端时）。
-# 生成一份带当前用户的 passwd 挂进容器；home 与 compose 里的 HOME 一致（/tmp）。
-docker run --rm --entrypoint cat "$IMAGE" /etc/passwd > passwd
-if ! grep -q "^[^:]*:[^:]*:$(id -u):" passwd; then
-    echo "unitao:x:$(id -u):$(id -g):UniTAO:/tmp:/sbin/nologin" >> passwd
-fi
 # siteA 的签名密钥（只留在 siteA）
 if [ ! -f keys/siteA/catalog.pem ]; then
     docker run --rm --user "$USER_ID" -v "$PWD/keys/siteA:/keys" "$IMAGE" DataServiceAdmin keygen -out /keys/catalog.pem

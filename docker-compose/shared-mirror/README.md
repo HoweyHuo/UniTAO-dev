@@ -10,7 +10,7 @@ docker build -f ./docker/unitao/dockerfile -t ghcr.io/howeyhuo/unitao-dev:latest
 
 ```
 cd docker-compose/shared-mirror
-./setup.sh                      # signing key (siteA), encryption identity (siteB) + recipients (siteA), trusted fingerprint, .env, passwd
+./setup.sh                      # signing key (siteA), encryption identity (siteB) + recipients (siteA), trusted fingerprint, .env
 docker compose up -d
 
 # write into the shared vDS on siteA
@@ -36,6 +36,6 @@ if siteB stays away longer than `subscriberTimeoutHours` (720 in `SiteA/ds/confi
 
 `keys/siteA/` (signing key, recipients) is mounted only into siteA and `keys/siteB/` (identity) only into siteB. to add another mirror, run `DataServiceAdmin enckey` for it, append its recipient to `keys/siteA/recipients` and restart siteA. both sides mount `./exchange` read-write: siteB writes its progress file.
 
-the UniTAO containers run as your user (`UNITAO_UID` / `UNITAO_GID` in `.env`, written by `setup.sh`), so everything they write is yours and can be deleted normally. without `.env` they run as root. since your UID is not in the image's `/etc/passwd`, `setup.sh` also writes `./passwd` (the image's file plus your user) and the containers mount it at `/etc/passwd`; tools such as ssh refuse to run for a UID without an entry.
+the UniTAO containers run as your user (`UNITAO_UID` / `UNITAO_GID` in `.env`, written by `setup.sh`), so everything they write is yours and can be deleted normally. without `.env` they run as root. your UID is not in the image's `/etc/passwd`, so the image's entrypoint adds an entry for it when the container starts; tools such as ssh refuse to run for a UID without one.
 
-`keys/`, `exchange/`, `SiteB/ds/config.json`, `passwd`, `.env`, every `state.json`, the Inventory data and the logs are generated and ignored by git. `./clean.sh` stops the example and removes all of them; files left owned by root by an older run are removed through a container.
+`keys/`, `exchange/`, `SiteB/ds/config.json`, `.env`, every `state.json`, the Inventory data and the logs are generated and ignored by git. `./clean.sh` stops the example and removes all of them; files left owned by root by an older run are removed through a container.
