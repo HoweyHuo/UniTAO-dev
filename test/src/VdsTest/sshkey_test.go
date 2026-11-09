@@ -208,3 +208,31 @@ func TestDataServiceGeneratesSSHKey(t *testing.T) {
 		t.Fatalf("expect the same key after restart, got %s", again.PublicKey)
 	}
 }
+
+func TestDataServiceSSHDirConfig(t *testing.T) {
+	ds := newDsNode(t, "SshDirDS", "")
+	keyDir := filepath.Join(t.TempDir(), "volume")
+	ds.extra = map[string]interface{}{"ssh": map[string]interface{}{"dir": keyDir}}
+	ds.start(t, map[string]interface{}{"local": map[string]interface{}{}})
+	t.Cleanup(func() { Channel.SetSSHIdentity(nil) })
+
+	// 私钥在 ssh.dir，不在 config 目录
+	keyFile := filepath.Join(keyDir, Channel.SSHKeyFile)
+	if _, err := os.Stat(keyFile); err != nil {
+		t.Fatalf("expect ssh key at [%s]: %s", keyFile, err)
+	}
+	if _, err := os.Stat(filepath.Join(ds.dir, Channel.SSHDirName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expect no ssh dir next to config, got err=%v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(ds.dir, Config.StateFile))
+	mustNoErr(t, err, "read state.json")
+	if strings.Contains(string(raw), "PRIVATE KEY") || !strings.Contains(string(raw), keyFile) {
+		t.Fatalf("expect state.json to point at [%s] without the private key: %s", keyFile, raw)
+	}
+
+	// 相对路径相对 config 所在目录
+	cfg := &Config.Confuguration{SSH: Config.SSHConfig{Dir: "keys/ssh"}}
+	if got := Config.SSHDir(filepath.Join(ds.dir, "config.json"), cfg); got != filepath.Join(ds.dir, "keys", "ssh") {
+		t.Fatalf("relative ssh.dir resolved to [%s]", got)
+	}
+}

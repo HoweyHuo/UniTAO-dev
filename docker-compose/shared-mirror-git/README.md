@@ -51,7 +51,18 @@ infra/catalog/
 
 replace `channel.repo` on both sides, drop the `./remote` mount, and give each Data Service its credentials. git runs non-interactively, so they must be in place before the Data Service starts. the mirror needs push access too (it writes `subscribers/<id>.json`); the publisher additionally needs force-push for history compaction. if the server forbids force-push, compaction fails and is logged, everything else works.
 
- - **SSH** (`ssh://git@git.internal/unitao/exchange.git` or `git@git.internal:unitao/exchange.git`): the Data Service makes its own key. on first start it generates an ed25519 key in `ssh/` next to its config (`ssh/id_ed25519`, mode 600; an existing key there is reused) and writes the public key to `state.json` (`ssh.publicKey`, `ssh.fingerprint`), to its log and to `GET /{vDS}/config` (`instance.ssh`). add that public key to the git server (a deploy key with write access, or the account of a bot user); the private key never leaves the Data Service. git uses it through `GIT_SSH_COMMAND` with `StrictHostKeyChecking=accept-new`: the server's host key is recorded in `ssh/known_hosts` on the first connection and checked afterwards. to pin it in advance, put `ssh-keyscan git.internal` output into that file before the first start. the config directory must be writable and persistent, or a new key is generated on every start. a `GIT_SSH_COMMAND` set in the container environment takes precedence, for bringing your own key:
+ - **SSH** (`ssh://git@git.internal/unitao/exchange.git` or `git@git.internal:unitao/exchange.git`): the Data Service makes its own key. on first start it generates an ed25519 key `id_ed25519` (mode 600; an existing key is reused) in `ssh.dir` of its config, by default `ssh/` next to the config and writes the public key to `state.json` (`ssh.publicKey`, `ssh.fingerprint`), to its log and to `GET /{vDS}/config` (`instance.ssh`). add that public key to the git server (a deploy key with write access, or the account of a bot user); the private key never leaves the Data Service. git uses it through `GIT_SSH_COMMAND` with `StrictHostKeyChecking=accept-new`: the server's host key is recorded in `ssh/known_hosts` on the first connection and checked afterwards. to pin it in advance, put `ssh-keyscan git.internal` output into that file before the first start. the key directory must be writable and persistent, or a new key is generated on every start. to keep the private key out of bind-mounted host directories, put it in a Docker named volume: the image has `/opt/UniTAO/ssh` with mode 1777, which a new named volume inherits, so a Data Service running as your UID can write into it:
+   ```json
+   "ssh": { "dir": "/opt/UniTAO/ssh" }
+   ```
+   ```yaml
+   volumes:
+     - ds-ssh:/opt/UniTAO/ssh
+   # top level
+   volumes:
+     ds-ssh:
+   ```
+   the key then survives `docker compose down` / recreating the container and is lost only with the volume (`docker compose down -v`). a `GIT_SSH_COMMAND` set in the container environment takes precedence, for bringing your own key:
    ```yaml
    environment:
      GIT_SSH_COMMAND: "ssh -i /opt/UniTAO/gitkey/id_ed25519 -o IdentitiesOnly=yes -o UserKnownHostsFile=/opt/UniTAO/gitkey/known_hosts"

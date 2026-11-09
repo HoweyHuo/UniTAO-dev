@@ -20,6 +20,9 @@ COPY --from=build /go/src/github.com/salesforce/UniTAO/bin/. ./
 RUN chmod +x ./dataservice_init_dynamo.sh
 RUN chmod +x ./dataservice_init_mongo.sh
 RUN mkdir -p ./config ./data ./log ./schema
+# DataService 的 SSH 私钥目录（config 中 ssh.dir 指向它，挂 Docker 命名卷）。1777 同 /tmp：新的命名卷继承这个权限，
+# 以任意 UID 运行的 DataService 都能在里面生成私钥（私钥本身是 0600）。
+RUN mkdir -p ./ssh && chmod 1777 ./ssh
 RUN echo 'alias ll="ls -alF"' >> ~/.bashrc
 
 COPY --from=build /go/src/github.com/salesforce/UniTAO/dbSchemas/DynamoDB/Tables.json ./schema/DataServiceDynamoDBTables.json

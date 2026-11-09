@@ -67,6 +67,14 @@ type Confuguration struct {
 	ForceInit   bool                    `json:"force-init"`
 	Init        InitConfig              `json:"init"`
 	Vds         VdsConfig               `json:"vds"`
+	SSH         SSHConfig               `json:"ssh"`
+}
+
+// SSHConfig 是 git 通道 SSH 身份的设置。Dir 为私钥（及 known_hosts）所在目录，
+// 缺省为 config 同目录的 ssh/。容器部署建议指向一个 Docker 命名卷（如 /opt/UniTAO/ssh），
+// 让私钥不出现在宿主机的 bind-mount 目录里，同时跨容器重建保留。
+type SSHConfig struct {
+	Dir string `json:"dir,omitempty"`
 }
 
 // VdsConfig 列出本实例承载的虚拟 Data Service。出现哪个 key 就启用哪个 vDS；

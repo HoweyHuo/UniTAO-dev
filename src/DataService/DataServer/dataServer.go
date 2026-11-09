@@ -160,7 +160,7 @@ func (srv *Server) Start(logger *log.Logger, journalLogger *log.Logger) error {
 // setupSSHIdentity 读取（不存在则生成）DS 自己的 SSH 私钥，供 git 通道访问 SSH 远端，
 // 并把公钥写进 state.json。在连数据库之前做：git 服务器上加公钥不必等 DS 完全启动。
 func (srv *Server) setupSSHIdentity() error {
-	dir := Config.SSHDir(srv.args[CONFIG])
+	dir := Config.SSHDir(srv.args[CONFIG], &srv.config)
 	comment := fmt.Sprintf("unitao-%s", srv.Id)
 	id, created, err := Channel.EnsureSSHIdentity(dir, comment)
 	if err != nil {
