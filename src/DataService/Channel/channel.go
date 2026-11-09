@@ -202,13 +202,21 @@ func newBackend(cfg Config, logger *log.Logger) (backend, string, error) {
 	return nil, "", fmt.Errorf("unknown channel type [%s]", cfg.Type)
 }
 
-// NewPublisher 创建 Publisher。source 为共享名，signer 为签名私钥。接收方列表（encrypt.recipientsFile）必填。
+// NewPublisher 创建 Publisher。source 为共享名，signer 为签名私钥。接收方列表（encrypt.recipientsFile）必须配置；
+// 文件不存在时创建一个空白名单（目录必须存在）。
 func NewPublisher(cfg Config, source string, signer ed25519.PrivateKey, logger *log.Logger) (Publisher, error) {
 	if logger == nil {
 		logger = log.Default()
 	}
 	if cfg.Encrypt == nil || cfg.Encrypt.RecipientsFile == "" {
 		return nil, fmt.Errorf("channel of shared vDS [%s] requires [encrypt.recipientsFile] (the subscriber whitelist)", source)
+	}
+	created, err := EnsureRecipientsFile(cfg.Encrypt.RecipientsFile)
+	if err != nil {
+		return nil, err
+	}
+	if created {
+		logger.Printf("created empty recipients file [%s] for shared vDS [%s]; add subscribers' recipients there and restart", cfg.Encrypt.RecipientsFile, source)
 	}
 	recipients, err := loadRecipients(cfg.Encrypt)
 	if err != nil {
