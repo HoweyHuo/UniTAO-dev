@@ -224,6 +224,11 @@ func (p *Publisher) reconcileLocked(state *PublishState) error {
 	case view.OldFormat:
 		p.Log(fmt.Sprintf("channel holds an old-format manifest; reset it at seq %d", state.LastPublished))
 		return p.channel.Reset(state.LastPublished)
+	case !view.Published:
+		// 通道上还没有本来源：立即写出（签名的）manifest，不等第一条数据。
+		// 订阅方由此能确认来源存在、校验指纹并开始订阅；git 不保存空目录，folder 的存在就体现为这份 manifest。
+		p.Log(fmt.Sprintf("channel has no manifest of this source yet; initialize it at seq %d", state.LastPublished))
+		return p.channel.Reset(state.LastPublished)
 	case view.LastSeq > state.LastPublished:
 		p.Log(fmt.Sprintf("channel is at seq %d, local progress %d; catch up", view.LastSeq, state.LastPublished))
 		state.LastPublished = view.LastSeq

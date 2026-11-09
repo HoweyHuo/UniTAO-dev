@@ -1,6 +1,7 @@
 package VdsTest
 
 import (
+	"encoding/json"
 	"net/http"
 	"os"
 	"os/exec"
@@ -157,16 +158,29 @@ func TestDeadSubscriberResubscribe(t *testing.T) {
 	}
 }
 
-// TestSubscribeBeforePublishAndUntrusted：publisher 还没发布任何内容时 subscriber 就能订阅；
-// 不在白名单里的 subscriber 被忽略，一直等待。
+// TestSubscribeBeforePublishAndUntrusted：publisher 启动后立即在通道上建出自己的 manifest（还没有数据，lastSeq 0），
+// subscriber 在第一条数据之前就能订阅；不在白名单里的 subscriber 被忽略，一直等待。
+// （来源完全没有 manifest 时订阅的情形见 TestGitQueueChannel 的 ErrNotPublished。）
 func TestSubscribeBeforePublishAndUntrusted(t *testing.T) {
 	channelDir := filepath.Join(t.TempDir(), "channel")
 	q := newQueueSetup(t, dirChannel(channelDir), 1, 1)
-	for i := range q.mirrors {
-		mustNoErr(t, q.mirror(i).SyncOnce(), "subscribe before anything is published")
+	manifestFile := filepath.Join(channelDir, "prod", "manifest.json")
+	waitFor(t, "publisher to initialize its manifest", func() bool {
+		_, err := os.Stat(manifestFile)
+		return err == nil
+	})
+	raw, err := os.ReadFile(manifestFile)
+	mustNoErr(t, err, "read initial manifest")
+	var manifest map[string]interface{}
+	mustNoErr(t, json.Unmarshal(raw, &manifest), "parse initial manifest")
+	if manifest["lastSeq"] != float64(0) || manifest["fingerprint"] == "" {
+		t.Fatalf("expect an empty manifest at seq 0, got %s", raw)
 	}
-	if _, err := os.Stat(filepath.Join(channelDir, "prod", "manifest.json")); !os.IsNotExist(err) {
-		t.Fatalf("expect nothing published yet, got %v", err)
+	if _, err := os.Stat(filepath.Join(channelDir, "prod", "manifest.sig")); err != nil {
+		t.Fatalf("expect the initial manifest to be signed: %s", err)
+	}
+	for i := range q.mirrors {
+		mustNoErr(t, q.mirror(i).SyncOnce(), "subscribe before any data is published")
 	}
 	syncAll(t, q.pub, q.mirror(0), q.mirror(1))
 	if q.mirror(0).Status()["subscription"] != Share.PhaseActive {
