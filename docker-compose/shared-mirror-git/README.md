@@ -12,7 +12,7 @@ docker build -f ./docker/unitao/dockerfile -t ghcr.io/howeyhuo/unitao-dev:latest
 
 ```
 cd docker-compose/shared-mirror-git
-./setup.sh                      # signing key (siteA), encryption identity (siteB) + recipients (siteA), trusted fingerprint, bare repository, .env, passwd
+./setup.sh                      # signing key (siteA), encryption identity (siteB) + recipients (siteA), trusted fingerprint, bare repository, .env
 docker compose up -d
 
 # write into the shared vDS on siteA
@@ -69,7 +69,7 @@ replace `channel.repo` on both sides, drop the `./remote` mount, and give each D
    volumes:
      - ./gitkey:/opt/UniTAO/gitkey:ro     # id_ed25519 (mode 600, owned by your user) + known_hosts (ssh-keyscan git.internal)
    ```
-   ssh refuses to run for a UID that has no `/etc/passwd` entry (`No user exists for uid 1000`), and the containers run as your UID. that is why `setup.sh` writes `./passwd` (the image's file plus your user, home `/tmp`) and every UniTAO container mounts it at `/etc/passwd`; keep that mount when you run as a non-root UID.
+   ssh refuses to run for a UID that has no `/etc/passwd` entry (`No user exists for uid 1000`), and the containers run as your UID. the image's entrypoint adds an entry for the running UID (home `$HOME`, `/tmp` here) when the container starts, so nothing has to be mounted. if you mount your own `/etc/passwd` read-only, it must already contain that UID.
  - **HTTPS** (`https://git.internal/unitao/exchange.git`): configure a credential helper in `$HOME` (`/tmp` in the containers):
    ```yaml
    volumes:
@@ -80,4 +80,4 @@ replace `channel.repo` on both sides, drop the `./remote` mount, and give each D
 
 the image built from `docker/unitao/dockerfile` contains `git` and `openssh-client`.
 
-`keys/`, `remote/`, `work/`, `SiteB/ds/config.json`, `passwd`, `.env`, every `state.json`, the Inventory data and the logs are generated and ignored by git. `./clean.sh` stops the example and removes all of them.
+`keys/`, `remote/`, `work/`, `SiteB/ds/config.json`, `.env`, every `state.json`, the Inventory data and the logs are generated and ignored by git. `./clean.sh` stops the example and removes all of them.

@@ -68,7 +68,7 @@ docker exec <ds 容器> sh -c "ssh -i /opt/UniTAO/ssh/id_ed25519 -o IdentitiesOn
 # 期望：Hi <账号>! You've successfully authenticated ...
 ```
 
-注意：容器以非 root UID 运行时，`/etc/passwd` 里必须有这个 UID，否则 ssh 报 `No user exists for uid`。做法见 `docker-compose/shared-mirror-git`（生成 `passwd` 并挂到 `/etc/passwd`）。
+注意：ssh 要求运行它的 UID 在 `/etc/passwd` 里有记录，否则报 `No user exists for uid`。镜像的入口脚本会在容器启动时给非 root UID 自动补上，不用另外处理；只有自己以只读方式挂了 `/etc/passwd` 时，才需要保证里面有这个 UID。
 
 ## 3. 发布方：开 shared vDS
 
@@ -257,7 +257,7 @@ curl -s localhost:<port>/mirrored/UniTao-Modeling/wireguard_site/site-01
 | 发布方 `/config` 有 `lastError` | 最近一轮失败的原因，下一轮自动重试 |
 | `DeployKey only supports pull/fetch operations` | gitee 部署公钥只读，改用账号 SSH 公钥 |
 | `Permission denied (publickey)` | DS 的 SSH 公钥还没加到 git 服务器，或加错了账号 |
-| `No user exists for uid` | 容器里 `/etc/passwd` 缺少运行 UID，挂上生成的 `passwd` |
+| `No user exists for uid` | 容器里 `/etc/passwd` 缺少运行 UID：镜像太旧（入口脚本自动补记录之前的版本），或者以只读方式挂了不含这个 UID 的 `/etc/passwd` |
 | `git ... timed out after 10m0s` / `Connection reset by peer` | 网络问题；每条 git 命令最多 10 分钟，ssh 连接卡住约 1 分钟断开，下一轮重试 |
 | 发布方 `subscribers[].state` 为 `untrusted` | 该订阅方的 recipient 不在 `recipientsFile` 里，或加了之后没有重启发布方 |
 | 订阅方 `status` 为 `paused` | 最近一轮同步出错，下一轮自动重试，原因在 `reason`。网络 / git 错误会自己恢复；`does not match trusted fingerprint` 是 `trustedFingerprint` 与发布方不一致；解密失败是身份与白名单里的 recipient 不配对 |

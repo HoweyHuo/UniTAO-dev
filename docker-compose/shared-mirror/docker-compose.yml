@@ -1,5 +1,5 @@
 # 两个相互隔离的网络：siteA 共享 catalog，siteB 镜像它。两边只通过 ./exchange 目录（dir 通道）交换数据。
-# 先运行 ./setup.sh 生成签名密钥、SiteB 的配置、.env（当前用户的 UID/GID）和带当前用户的 passwd。
+# 先运行 ./setup.sh 生成签名密钥、SiteB 的配置、.env（当前用户的 UID/GID）。
 # UniTAO 容器以该用户运行，写出的 exchange、state.json、日志都归当前用户，可以直接删除；./clean.sh 清理全部生成文件。
 services:
   dynamodb:
@@ -21,7 +21,6 @@ services:
       - ./keys/siteA:/opt/UniTAO/keys:ro
       - ./exchange:/opt/UniTAO/exchange
       - ./logs:/opt/UniTAO/log
-      - ./passwd:/etc/passwd:ro
     ports:
       - "8011:80"
     depends_on: [dynamodb]
@@ -38,7 +37,6 @@ services:
     volumes:
       - ./SiteA/inv:/opt/UniTAO/config
       - ./logs:/opt/UniTAO/log
-      - ./passwd:/etc/passwd:ro
     ports:
       - "8014:80"
     networks: [siteA]
@@ -57,7 +55,6 @@ services:
       # mirror 也要写：它把自己的处理进度写进 exchange/catalog/subscribers/
       - ./exchange:/opt/UniTAO/exchange
       - ./logs:/opt/UniTAO/log
-      - ./passwd:/etc/passwd:ro
     ports:
       - "8021:80"
     depends_on: [dynamodb]
@@ -74,7 +71,6 @@ services:
     volumes:
       - ./SiteB/inv:/opt/UniTAO/config
       - ./logs:/opt/UniTAO/log
-      - ./passwd:/etc/passwd:ro
     ports:
       - "8024:80"
     networks: [siteB]
