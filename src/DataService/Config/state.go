@@ -76,9 +76,16 @@ func (s *State) SetSSH(ssh *SSHState) {
 	s.SSH = ssh
 }
 
-// SSHDir 返回 DS 的 SSH 身份目录：config 同目录下的 ssh/。
-func SSHDir(configPath string) string {
-	return filepath.Join(filepath.Dir(configPath), Channel.SSHDirName)
+// SSHDir 返回 DS 的 SSH 身份目录：config 中的 ssh.dir（相对路径相对 config 所在目录），缺省为 config 同目录下的 ssh/。
+func SSHDir(configPath string, config *Confuguration) string {
+	dir := config.SSH.Dir
+	if dir == "" {
+		return filepath.Join(filepath.Dir(configPath), Channel.SSHDirName)
+	}
+	if !filepath.IsAbs(dir) {
+		return filepath.Join(filepath.Dir(configPath), dir)
+	}
+	return filepath.Clean(dir)
 }
 
 // UnregisterTask 是一个待从 Inventory 注销的 vDS URL。

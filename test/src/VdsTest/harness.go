@@ -120,6 +120,7 @@ type dsNode struct {
 	dir    string
 	Url    string
 	invUrl string
+	extra  map[string]interface{} // 额外的 config 顶层字段
 }
 
 func newDsNode(t *testing.T, id string, invUrl string) *dsNode {
@@ -143,6 +144,9 @@ func (n *dsNode) start(t *testing.T, vds map[string]interface{}) *DataServer.Ser
 	}
 	if n.invUrl != "" {
 		cfg["inventory"] = map[string]interface{}{"url": n.invUrl}
+	}
+	for key, value := range n.extra {
+		cfg[key] = value
 	}
 	path := writeJson(t, filepath.Join(n.dir, "config.json"), cfg)
 	srv, err := DataServer.NewServer(n.Id, path, "0")
