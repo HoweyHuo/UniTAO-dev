@@ -2,6 +2,7 @@ package Channel
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 const (
@@ -67,14 +69,51 @@ func sharedGitRepo(cfg Config, logger *log.Logger) (*gitRepo, error) {
 func (g *gitRepo) Lock()   { g.mu.Lock() }
 func (g *gitRepo) Unlock() { g.mu.Unlock() }
 
+// DefaultGitTimeout 是单条 git 命令的最长运行时间。网络连接可能停在半路（两端都不再收发、也不断开），
+// 没有超时的话 git 会一直挂着，并一直占着这个工作目录的锁。
+const DefaultGitTimeout = 10 * time.Minute
+
+var (
+	gitTimeoutLock sync.Mutex
+	gitTimeout     = DefaultGitTimeout
+)
+
+// SetGitTimeout 设置单条 git 命令的超时（测试使用），返回恢复原值的函数。
+func SetGitTimeout(d time.Duration) func() {
+	gitTimeoutLock.Lock()
+	defer gitTimeoutLock.Unlock()
+	old := gitTimeout
+	gitTimeout = d
+	return func() {
+		gitTimeoutLock.Lock()
+		defer gitTimeoutLock.Unlock()
+		gitTimeout = old
+	}
+}
+
+func currentGitTimeout() time.Duration {
+	gitTimeoutLock.Lock()
+	defer gitTimeoutLock.Unlock()
+	return gitTimeout
+}
+
 func (g *gitRepo) run(args ...string) (string, error) {
-	cmd := exec.Command("git", args...)
+	timeout := currentGitTimeout()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = g.workDir
 	cmd.Env = append(append(os.Environ(), "GIT_TERMINAL_PROMPT=0"), gitSSHEnv()...)
+	// 超时时连同 git 启动的 ssh / git-remote-https 一起结束：它们拿着输出管道，只杀 git 的话 Wait 会等它们
+	killProcessGroup(cmd)
+	cmd.WaitDelay = 5 * time.Second
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
 	err := cmd.Run()
+	if ctx.Err() == context.DeadlineExceeded {
+		err = fmt.Errorf("timed out after %s (%v)", timeout, err)
+	}
 	if err != nil {
 		// 参数（remote add origin <repo>）和 git 的输出都可能带远端地址，写进错误（日志）前隐去凭据
 		msg := fmt.Sprintf("git %s failed: %s, output: %s", strings.Join(args, " "), err, strings.TrimSpace(out.String()))

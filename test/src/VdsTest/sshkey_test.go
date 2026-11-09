@@ -7,8 +7,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"DataService/Channel"
 	"DataService/Config"
@@ -147,7 +150,7 @@ func TestGitChannelUsesSSHIdentity(t *testing.T) {
 	refresh()
 	args, err := os.ReadFile(argsFile)
 	mustNoErr(t, err, "fake ssh was not called")
-	for _, want := range []string{"-i " + id.KeyFile, "IdentitiesOnly=yes", "UserKnownHostsFile=" + id.KnownHostsFile, "StrictHostKeyChecking=accept-new", "unitao.invalid"} {
+	for _, want := range []string{"-i " + id.KeyFile, "IdentitiesOnly=yes", "UserKnownHostsFile=" + id.KnownHostsFile, "StrictHostKeyChecking=accept-new", "ConnectTimeout=30", "ServerAliveInterval=15", "ServerAliveCountMax=4", "unitao.invalid"} {
 		if !strings.Contains(string(args), want) {
 			t.Fatalf("ssh args [%s] missing [%s]", strings.TrimSpace(string(args)), want)
 		}
@@ -235,4 +238,46 @@ func TestDataServiceSSHDirConfig(t *testing.T) {
 	if got := Config.SSHDir(filepath.Join(ds.dir, "config.json"), cfg); got != filepath.Join(ds.dir, "keys", "ssh") {
 		t.Fatalf("relative ssh.dir resolved to [%s]", got)
 	}
+}
+
+// TestGitCommandTimeout：远端连接停在半路（ssh 不退出）时，git 命令按超时结束，连同 ssh 一起被杀掉，
+// 不会一直占着工作目录。
+func TestGitCommandTimeout(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	bin := t.TempDir()
+	pidFile := filepath.Join(bin, "pid")
+	script := filepath.Join(bin, "hang-ssh")
+	// exec：sleep 直接替换脚本进程，pid 文件里记的就是要确认被杀掉的进程
+	body := "#!/bin/sh\necho $$ > '" + pidFile + "'\nexec sleep 3600\n"
+	mustNoErr(t, os.WriteFile(script, []byte(body), 0o755), "write hanging ssh")
+	t.Setenv("GIT_SSH_COMMAND", script)
+	restore := Channel.SetGitTimeout(2 * time.Second)
+	defer restore()
+
+	_, fingerprint := signer(t)
+	cfg := Channel.Config{Type: Channel.TypeGit, Repo: "ssh://git@unitao.invalid/channel.git", WorkDir: filepath.Join(t.TempDir(), "work"), Folder: "infra"}
+	sub, err := Channel.NewSubscriber(subConfig(cfg, newSubKey(t)), "prod", fingerprint, nil)
+	mustNoErr(t, err, "new subscriber")
+
+	start := time.Now()
+	err = sub.Refresh()
+	elapsed := time.Since(start)
+	if err == nil || !strings.Contains(err.Error(), "timed out after 2s") {
+		t.Fatalf("expect a timeout error, got %v", err)
+	}
+	if elapsed > 15*time.Second {
+		t.Fatalf("expect the command to stop soon after the timeout, took %s", elapsed)
+	}
+	raw, err := os.ReadFile(pidFile)
+	mustNoErr(t, err, "hanging ssh did not start")
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	mustNoErr(t, err, "parse pid")
+	waitFor(t, "hanging ssh to be killed", func() bool {
+		return syscall.Kill(pid, 0) != nil
+	})
 }
