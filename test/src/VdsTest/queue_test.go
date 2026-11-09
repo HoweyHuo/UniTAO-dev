@@ -277,3 +277,84 @@ func splitLines(s string) []string {
 	}
 	return result
 }
+
+// TestEmptyRecipients：白名单为空时 shared vDS 照常启动并写出 manifest；变更只推进 lastSeq，不写 queue batch。
+// 订阅方在此期间是 untrusted；把它的 recipient 加进白名单、重启发布方后，它拿到包含之前全部数据的 history，
+// 之后的变更正常走 queue。
+func TestEmptyRecipients(t *testing.T) {
+	channelDir := filepath.Join(t.TempDir(), "channel")
+	channel := dirChannel(channelDir)
+	keyFile, fingerprint := newSigningKey(t)
+	key := newSubKey(t)
+	sharedCfg := func(recipients string) map[string]interface{} {
+		return map[string]interface{}{
+			"shared": []interface{}{map[string]interface{}{
+				"name": "prod", "signingKeyFile": keyFile, "publishIntervalSec": 3600,
+				"channel": withEncrypt(channel, recipients),
+			}},
+		}
+	}
+	dsA := newDsNode(t, "dsA", "")
+	dsA.start(t, sharedCfg(recipientsFile(t))) // 只有注释
+	pub := dsA.srv.GetVds("shared/prod").Publisher
+	if pub.Status()["recipients"] != 0 {
+		t.Fatalf("expect 0 recipients, got %v", pub.Status()["recipients"])
+	}
+	manifestFile := filepath.Join(channelDir, "prod", "manifest.json")
+	waitFor(t, "publisher to initialize its manifest", func() bool {
+		_, err := os.Stat(manifestFile)
+		return err == nil
+	})
+
+	dsB := newDsNode(t, "dsB", "")
+	dsB.start(t, map[string]interface{}{
+		"mirrored": []interface{}{map[string]interface{}{
+			"name": "prod", "trustedFingerprint": fingerprint, "pullIntervalSec": 3600,
+			"channel": withDecrypt(channel, key),
+		}},
+	})
+	mirror := dsB.srv.GetVds("mirrored/prod").Mirror
+	sharedUrl, mirroredUrl := dsA.Url+"/shared/prod", dsB.Url+"/mirrored/prod"
+
+	expectStatus(t, call(t, http.MethodPost, sharedUrl, schemaRecord("rack", "0.0.1", rackSchema)), http.StatusCreated, "post schema")
+	expectStatus(t, call(t, http.MethodPost, sharedUrl, dataRecord("rack", "rack-1", map[string]interface{}{"name": "r1"})), http.StatusCreated, "post rack-1")
+	waitJournal(t, dsA, "shared/prod", 2)
+	syncAll(t, pub, mirror)
+
+	if seq := pub.Status()["lastPublishedSeq"]; seq != uint64(2) {
+		t.Fatalf("expect lastPublishedSeq 2 without recipients, got %v", seq)
+	}
+	raw, err := os.ReadFile(manifestFile)
+	mustNoErr(t, err, "read manifest")
+	var manifest map[string]interface{}
+	mustNoErr(t, json.Unmarshal(raw, &manifest), "parse manifest")
+	if manifest["lastSeq"] != float64(2) || len(manifest["queue"].([]interface{})) != 0 {
+		t.Fatalf("expect lastSeq 2 and an empty queue, got %s", raw)
+	}
+	if entries, _ := os.ReadDir(filepath.Join(channelDir, "prod", "queue")); len(entries) != 0 {
+		t.Fatalf("expect no queue batch without recipients, got %d files", len(entries))
+	}
+	if states := subscriberStates(t, pub); states[key.Id].State != Share.SubscriberUntrusted {
+		t.Fatalf("expect subscriber untrusted while the whitelist is empty, got %+v", states)
+	}
+	if mirror.Status()["subscription"] != Share.PhaseWaiting {
+		t.Fatalf("expect mirror waiting, got %v", mirror.Status())
+	}
+
+	// 加入 recipient 并重启发布方：订阅方拿到 seq 2 的 history（含之前的数据），之后的变更走 queue
+	dsA.start(t, sharedCfg(recipientsFile(t, key)))
+	pub = dsA.srv.GetVds("shared/prod").Publisher
+	syncAll(t, pub, mirror)
+	if mirror.Status()["subscription"] != Share.PhaseActive {
+		t.Fatalf("expect mirror active after its recipient is added, got %v", mirror.Status())
+	}
+	expectStatus(t, call(t, http.MethodGet, mirroredUrl+"/rack/rack-1", nil), http.StatusOK, "rack-1 from history")
+
+	expectStatus(t, call(t, http.MethodPost, sharedUrl, dataRecord("rack", "rack-2", map[string]interface{}{"name": "r2"})), http.StatusCreated, "post rack-2")
+	waitJournal(t, dsA, "shared/prod", 3)
+	syncAll(t, pub, mirror)
+	expectStatus(t, call(t, http.MethodGet, mirroredUrl+"/rack/rack-2", nil), http.StatusOK, "rack-2 through the queue")
+	if c := mirror.Status()["cursor"]; c != uint64(3) {
+		t.Fatalf("expect mirror cursor 3, got %v", c)
+	}
+}

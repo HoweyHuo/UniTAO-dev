@@ -80,6 +80,9 @@ func NewPublisher(name string, handler *DataHandler.Handler, outbox *Outbox, cha
 	if opts.CompactIntervalHours <= 0 {
 		opts.CompactIntervalHours = DefaultCompactIntervalHours
 	}
+	if channel.RecipientCount() == 0 {
+		logger.Printf("Publisher[shared/%s]: recipients file has no key; changes are not written to the queue until a subscriber's recipient is added (restart after adding)", name)
+	}
 	return &Publisher{
 		Name:            name,
 		handler:         handler,
@@ -199,7 +202,11 @@ func (p *Publisher) PublishPending() error {
 			return err
 		}
 		last := batch[len(batch)-1].Seq
-		p.Log(fmt.Sprintf("published seq %d-%d", batch[0].Seq, last))
+		if p.channel.RecipientCount() == 0 {
+			p.Log(fmt.Sprintf("no recipients: advanced to seq %d without a queue batch", last))
+		} else {
+			p.Log(fmt.Sprintf("published seq %d-%d", batch[0].Seq, last))
+		}
 		state.LastPublished = last
 		state.LastPublishTime = p.now().UTC().Format(time.RFC3339)
 		if err := p.outbox.SavePublishState(state); err != nil {
@@ -428,6 +435,7 @@ func (p *Publisher) Status() map[string]interface{} {
 		"fingerprint":            p.fingerprint,
 		"subscriberTimeoutHours": p.timeout.Hours(),
 		"compactIntervalHours":   p.compactInterval.Hours(),
+		"recipients":             p.channel.RecipientCount(),
 	}
 	if seq, err := p.outbox.CurrentSeq(); err == nil {
 		result["outboxSeq"] = seq

@@ -136,6 +136,8 @@ type Publisher interface {
 	// View 读取通道当前状态（manifest 与所有 subscriber 进度）。
 	View() (*View, error)
 	// Publish 发布一批 seq 连续、紧接 LastSeq 的变更，作为一个 queue batch。
+	// 白名单为空时没有人能解密，不写 queue batch，只把 manifest 的 LastSeq 推进到这批的末尾：
+	// 新订阅方总是先拿 history（订阅时的全量），不需要它加入之前的 queue。
 	Publish(changes []Change) error
 	// PublishHistory 为 subscriber 的一个订阅请求发布 history，只对这个 subscriber 加密；替换它之前的 history。
 	PublishHistory(subscriber string, request string, h *History) error
@@ -148,6 +150,8 @@ type Publisher interface {
 	Compact() (bool, error)
 	// Trusted 判断 subscriber id 是否在白名单（接收方列表）中。
 	Trusted(subscriber string) bool
+	// RecipientCount 返回白名单中的接收方数量；为 0 时 Publish 不写 queue batch。
+	RecipientCount() int
 }
 
 // Subscriber 是 mirrored vDS 侧的通道接口。

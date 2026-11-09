@@ -378,6 +378,10 @@ func (s *fileStore) readProgress(id string) (*Progress, error) {
 
 // ---------- Publisher ----------
 
+func (s *fileStore) RecipientCount() int {
+	return len(s.recipients)
+}
+
 func (s *fileStore) Trusted(subscriber string) bool {
 	_, ok := s.recipients[subscriber]
 	return ok
@@ -425,7 +429,11 @@ func (s *fileStore) Publish(changes []Change) error {
 	}
 	from := changes[0].Seq
 	to := changes[len(changes)-1].Seq
-	return s.write(fmt.Sprintf("%s: publish seq %d-%d", s.folder, from, to), func() (bool, error) {
+	message := fmt.Sprintf("%s: publish seq %d-%d", s.folder, from, to)
+	if len(s.recipients) == 0 {
+		message = fmt.Sprintf("%s: advance to seq %d (no recipients)", s.folder, to)
+	}
+	return s.write(message, func() (bool, error) {
 		m, err := s.ownManifest()
 		if err != nil {
 			return false, err
@@ -444,6 +452,11 @@ func (s *fileStore) Publish(changes []Change) error {
 			}
 			buf.Write(line)
 			buf.WriteByte('\n')
+		}
+		if len(s.recipients) == 0 {
+			// 没有接收方：不写 queue batch，只推进 LastSeq（见 Publisher.Publish 的说明）
+			m.LastSeq = to
+			return true, s.writeManifest(m)
 		}
 		data, err := s.encode(buf.Bytes(), s.allRecipients())
 		if err != nil {
