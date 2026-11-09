@@ -65,8 +65,11 @@ func gitSSHEnv() []string {
 }
 
 // SSHCommand 返回使用该身份的 ssh 命令行（经 shell 执行，路径加单引号）。
+// ConnectTimeout 限制建立连接的时间；ServerAlive* 每 15 秒探测一次服务器，连续 4 次无响应（约 1 分钟）就断开，
+// 连接停在半路时 ssh 能自己退出，而不是等 git 命令的总超时。
 func (id *SSHIdentity) SSHCommand() string {
-	return fmt.Sprintf("ssh -i %s -o IdentitiesOnly=yes -o UserKnownHostsFile=%s -o StrictHostKeyChecking=accept-new -o BatchMode=yes",
+	return fmt.Sprintf("ssh -i %s -o IdentitiesOnly=yes -o UserKnownHostsFile=%s -o StrictHostKeyChecking=accept-new -o BatchMode=yes"+
+		" -o ConnectTimeout=30 -o ServerAliveInterval=15 -o ServerAliveCountMax=4",
 		shellQuote(id.KeyFile), shellQuote(id.KnownHostsFile))
 }
 
