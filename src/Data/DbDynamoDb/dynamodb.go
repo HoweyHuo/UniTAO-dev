@@ -76,6 +76,19 @@ func ParseQueryOutput(output *dynamodb.QueryOutput) ([]map[string]interface{}, e
 }
 
 func (db *dynamoDB) Query(table string, index string, queryArgs map[string]interface{}) ([]map[string]interface{}, error) {
+	result := []map[string]interface{}{}
+	err := db.queryPages(table, index, queryArgs, func(item map[string]interface{}) error {
+		result = append(result, item)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// queryPages 执行查询并逐条回调。DynamoDB 一次 Query 最多返回 1MB，按 LastEvaluatedKey 翻页直到读完。
+func (db *dynamoDB) queryPages(table string, index string, queryArgs map[string]interface{}, fn func(item map[string]interface{}) error) error {
 	init := false
 	var cond expression.KeyConditionBuilder
 	for key, value := range queryArgs {
@@ -88,7 +101,7 @@ func (db *dynamoDB) Query(table string, index string, queryArgs map[string]inter
 	}
 	expr, err := expression.NewBuilder().WithKeyCondition(cond).Build()
 	if err != nil {
-		return nil, fmt.Errorf("failed to build index query. Error:%s", err)
+		return fmt.Errorf("failed to build index query. Error:%s", err)
 	}
 	queryInput := &dynamodb.QueryInput{
 		ExpressionAttributeNames:  expr.Names(),
@@ -100,27 +113,58 @@ func (db *dynamoDB) Query(table string, index string, queryArgs map[string]inter
 	if index != "" {
 		queryInput.IndexName = aws.String(index)
 	}
-	output, err := db.database.Query(queryInput)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query version for [table]=[%s]. Error: %s", table, err)
+	for {
+		output, err := db.database.Query(queryInput)
+		if err != nil {
+			return fmt.Errorf("failed to query version for [table]=[%s]. Error: %s", table, err)
+		}
+		items, err := ParseQueryOutput(output)
+		if err != nil {
+			return err
+		}
+		for _, item := range items {
+			if err := fn(item); err != nil {
+				return err
+			}
+		}
+		if len(output.LastEvaluatedKey) == 0 {
+			return nil
+		}
+		queryInput.ExclusiveStartKey = output.LastEvaluatedKey
 	}
-	return ParseQueryOutput(output)
 }
 
-func (db *dynamoDB) Get(queryArgs map[string]interface{}) ([]map[string]interface{}, error) {
+// getQueryArgs 把 Get 的参数转成按主键查询的条件。
+func getQueryArgs(queryArgs map[string]interface{}) (string, map[string]interface{}, error) {
 	tableName, ok := queryArgs[DbIface.Table].(string)
 	if !ok {
-		return nil, fmt.Errorf("missing parameter [%s] from queryArgs", DbIface.Table)
+		return "", nil, fmt.Errorf("missing parameter [%s] from queryArgs", DbIface.Table)
 	}
 	dataType, ok := queryArgs[Record.DataType].(string)
 	if !ok {
-		return nil, fmt.Errorf("missing parameter [%s] from queryArgs", Record.DataType)
+		return "", nil, fmt.Errorf("missing parameter [%s] from queryArgs", Record.DataType)
 	}
 	args := make(map[string]interface{})
 	args[Record.DataType] = dataType
-	dataId, ok := queryArgs[Record.DataId].(string)
-	if ok {
+	if dataId, ok := queryArgs[Record.DataId].(string); ok {
 		args[Record.DataId] = dataId
+	}
+	return tableName, args, nil
+}
+
+// Scan 逐页读取、逐条回调，见 DbIface.Scanner。
+func (db *dynamoDB) Scan(queryArgs map[string]interface{}, fn func(record map[string]interface{}) error) error {
+	tableName, args, err := getQueryArgs(queryArgs)
+	if err != nil {
+		return err
+	}
+	return db.queryPages(tableName, "", args, fn)
+}
+
+func (db *dynamoDB) Get(queryArgs map[string]interface{}) ([]map[string]interface{}, error) {
+	tableName, args, err := getQueryArgs(queryArgs)
+	if err != nil {
+		return nil, err
 	}
 	return db.Query(tableName, "", args)
 }

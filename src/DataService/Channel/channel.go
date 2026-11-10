@@ -64,11 +64,24 @@ type Change struct {
 }
 
 // History 是 publisher 打包的全量数据：seq 时刻 vDS 中所有需要同步的记录，schema 在前。
+// Records 逐条把记录交给 fn（fn 返回错误时停止并返回它），打包时边读边压缩、加密，不把全量放进内存。
 type History struct {
 	Seq     uint64
 	Source  string
 	Ts      string
-	Records []map[string]interface{}
+	Records func(fn func(record map[string]interface{}) error) error
+}
+
+// RecordList 把一组记录包装成 History.Records。
+func RecordList(records []map[string]interface{}) func(fn func(record map[string]interface{}) error) error {
+	return func(fn func(record map[string]interface{}) error) error {
+		for _, record := range records {
+			if err := fn(record); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 }
 
 // HistoryGrant 是一次授权：把 history 交给 subscriber 的某个订阅请求。

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"Data/DbIface"
 	"DataService/Common"
 
 	"github.com/salesforce/UniTAO/lib/Schema"
@@ -110,54 +111,65 @@ func (h *Handler) ApplyDelete(dataType string, dataId string) *Http.HttpError {
 	return nil
 }
 
-// SyncedRecords 返回本 vDS 中所有需要同步的记录：先 schema（含归档版本），再各类型数据。
-func (h *Handler) SyncedRecords() ([]map[string]interface{}, *Http.HttpError) {
-	schemaList, err := h.QueryDb(JsonKey.Schema, "")
-	if err != nil {
-		return nil, err
+// EachSyncedRecord 逐条回调本 vDS 中所有需要同步的记录：先 schema（含归档版本），再各类型数据。
+// schema 一次读出（数量少，且要靠它定下类型的顺序）；各类型数据经 DbIface.Scan 逐条读取，
+// 数据库支持时不把整个类型放进内存。fn 返回错误时停止并返回该错误。
+func (h *Handler) EachSyncedRecord(fn func(record map[string]interface{}) error) error {
+	schemaList, httpErr := h.QueryDb(JsonKey.Schema, "")
+	if httpErr != nil {
+		return httpErr
 	}
-	result := []map[string]interface{}{}
 	types := []string{}
 	for _, data := range schemaList {
 		id, _ := data[Record.DataId].(string)
 		if !IsSyncedRecord(JsonKey.Schema, id) {
 			continue
 		}
-		result = append(result, data)
+		if err := fn(data); err != nil {
+			return err
+		}
 		if _, ver := Util.ParseCustomPath(id, JsonKey.ArchivedSchemaIdDiv); ver == "" {
 			types = append(types, id)
 		}
 	}
 	for _, dataType := range types {
-		dataList, err := h.QueryDb(dataType, "")
-		if err != nil {
-			return nil, err
+		args := map[string]interface{}{
+			DbIface.Table:   h.Config.DataTable.Data,
+			Record.DataType: dataType,
 		}
-		result = append(result, dataList...)
+		if err := DbIface.Scan(h.DB, args, fn); err != nil {
+			return err
+		}
 	}
-	return result, nil
+	return nil
 }
 
-// ClearSynced 删除本 vDS 中所有需要同步的记录（mirrored vDS 从 snapshot 重建前调用）。
+// ClearSynced 删除本 vDS 中所有需要同步的记录（mirrored vDS 加载 history 前调用）。
 // 先删数据再删 schema；schema 删除不通知 Inventory，重建完成后由 ApplyUpsert 再通知新增的类型。
+// 只收集记录的键，不保留记录内容。
 func (h *Handler) ClearSynced() *Http.HttpError {
-	records, err := h.SyncedRecords()
-	if err != nil {
-		return err
-	}
-	for idx := len(records) - 1; idx >= 0; idx-- {
-		data := records[idx]
+	type recordKey struct{ dataType, dataId string }
+	keys := []recordKey{}
+	err := h.EachSyncedRecord(func(data map[string]interface{}) error {
 		dataType, _ := data[Record.DataType].(string)
 		dataId, _ := data[Record.DataId].(string)
+		keys = append(keys, recordKey{dataType, dataId})
+		return nil
+	})
+	if err != nil {
+		return Http.WrapError(err, "failed to list synced records", http.StatusInternalServerError)
+	}
+	for idx := len(keys) - 1; idx >= 0; idx-- {
+		key := keys[idx]
 		e := h.DB.Delete(h.Config.DataTable.Data, map[string]interface{}{
-			Record.DataType: dataType,
-			Record.DataId:   dataId,
+			Record.DataType: key.dataType,
+			Record.DataId:   key.dataId,
 		})
 		if e != nil {
-			return Http.WrapError(e, fmt.Sprintf("failed to clear record [%s/%s]", dataType, dataId), http.StatusInternalServerError)
+			return Http.WrapError(e, fmt.Sprintf("failed to clear record [%s/%s]", key.dataType, key.dataId), http.StatusInternalServerError)
 		}
-		if dataType == JsonKey.Schema {
-			h.SetLocalSchema(dataId, nil)
+		if key.dataType == JsonKey.Schema {
+			h.SetLocalSchema(key.dataId, nil)
 		}
 	}
 	return nil

@@ -16,6 +16,7 @@ import (
 type MemDb struct {
 	lock   sync.Mutex
 	tables map[string]map[string]map[string]interface{} // table -> "type\x00id" -> record
+	scans  int
 }
 
 func NewMemDb() *MemDb {
@@ -134,6 +135,55 @@ func (db *MemDb) Get(queryArgs map[string]interface{}) ([]map[string]interface{}
 		result = append(result, copied)
 	}
 	return result, nil
+}
+
+// Scan 实现 DbIface.Scanner：先在锁内取出键，再逐条复制回调（回调时不持锁，期间被删除的记录跳过）。
+func (db *MemDb) Scan(queryArgs map[string]interface{}, fn func(record map[string]interface{}) error) error {
+	tableName, ok := queryArgs[DbIface.Table].(string)
+	if !ok {
+		return fmt.Errorf("missing parameter [%s] from queryArgs", DbIface.Table)
+	}
+	dataType, ok := queryArgs[Record.DataType].(string)
+	if !ok {
+		return fmt.Errorf("missing parameter [%s] from queryArgs", Record.DataType)
+	}
+	db.lock.Lock()
+	db.scans++
+	keys := []string{}
+	for key, record := range db.tables[tableName] {
+		if record[Record.DataType] == dataType {
+			keys = append(keys, key)
+		}
+	}
+	db.lock.Unlock()
+	sort.Strings(keys)
+	for _, key := range keys {
+		db.lock.Lock()
+		record, ok := db.tables[tableName][key]
+		var copied map[string]interface{}
+		var err error
+		if ok {
+			copied, err = deepCopy(record)
+		}
+		db.lock.Unlock()
+		if err != nil {
+			return err
+		}
+		if !ok {
+			continue
+		}
+		if err := fn(copied); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Scans 返回 Scan 被调用的次数（测试用）。
+func (db *MemDb) Scans() int {
+	db.lock.Lock()
+	defer db.lock.Unlock()
+	return db.scans
 }
 
 func (db *MemDb) put(tableName string, data interface{}) error {

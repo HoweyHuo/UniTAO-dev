@@ -182,7 +182,8 @@ func (db *mongoDb) DeleteTable(name string) error {
 	return nil
 }
 
-func (db *mongoDb) Get(queryArgs map[string]interface{}) ([]map[string]interface{}, error) {
+// find 按 Get 的参数返回查询游标。
+func (db *mongoDb) find(queryArgs map[string]interface{}) (*mongo.Cursor, error) {
 	database := db.client.Database(db.config.Mongodb.Database)
 	tableName, ok := queryArgs[DbIface.Table].(string)
 	if !ok {
@@ -213,7 +214,11 @@ func (db *mongoDb) Get(queryArgs map[string]interface{}) ([]map[string]interface
 			},
 		}
 	}
-	cursor, err := table.Find(context.TODO(), filter)
+	return table.Find(context.TODO(), filter)
+}
+
+func (db *mongoDb) Get(queryArgs map[string]interface{}) ([]map[string]interface{}, error) {
+	cursor, err := db.find(queryArgs)
 	if err != nil {
 		return nil, err
 	}
@@ -223,6 +228,25 @@ func (db *mongoDb) Get(queryArgs map[string]interface{}) ([]map[string]interface
 		return nil, err
 	}
 	return result, nil
+}
+
+// Scan 用游标逐条读取，见 DbIface.Scanner。
+func (db *mongoDb) Scan(queryArgs map[string]interface{}, fn func(record map[string]interface{}) error) error {
+	cursor, err := db.find(queryArgs)
+	if err != nil {
+		return err
+	}
+	defer cursor.Close(context.TODO())
+	for cursor.Next(context.TODO()) {
+		record := map[string]interface{}{}
+		if err := cursor.Decode(&record); err != nil {
+			return err
+		}
+		if err := fn(record); err != nil {
+			return err
+		}
+	}
+	return cursor.Err()
 }
 
 func (db *mongoDb) Create(tableName string, data interface{}) error {
