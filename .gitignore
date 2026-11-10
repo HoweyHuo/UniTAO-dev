@@ -12,16 +12,10 @@ docker-compose/**/logs/*.log
 docker-compose/**/state.json
 # DataService ssh identity (private key + known_hosts) generated next to its config for the git channel
 docker-compose/**/ssh/
-# shared-mirror demos: Inventory data (sysdirfile under the mounted config dir)
-docker-compose/shared-mirror*/Site*/inv/data/
-# shared-mirror demo: generated keys, channel content and config
-docker-compose/shared-mirror/keys/
+# shared-mirror demos: everything but the templates is generated (configs with the MongoDB password, keys, data, channel)
+docker-compose/shared-mirror*/site-*/ds/config/*
+!docker-compose/shared-mirror*/site-*/ds/config/config.template.json
+docker-compose/shared-mirror*/site-*/*/data/
+docker-compose/shared-mirror*/.env
 docker-compose/shared-mirror/exchange/
-docker-compose/shared-mirror/Site*/ds/config.json
-docker-compose/shared-mirror/.env
-# shared-mirror-git demo: generated keys, bare repository, clones and config
-docker-compose/shared-mirror-git/keys/
 docker-compose/shared-mirror-git/remote/
-docker-compose/shared-mirror-git/work/
-docker-compose/shared-mirror-git/Site*/ds/config.json
-docker-compose/shared-mirror-git/.env

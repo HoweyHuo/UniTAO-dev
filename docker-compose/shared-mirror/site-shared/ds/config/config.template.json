@@ -1,0 +1,25 @@
+{
+    "database": {
+        "type": "mongodb",
+        "mongodb": { "endpoint": "<mongodb endpoint, e.g. mongodb://mongodb:27017>", "database": "sm-site-shared", "user": "<mongodb user>", "password": "<mongodb password>" }
+    },
+    "table": { "data": "site-shared" },
+    "http": { "type": "http", "dns": "site-shared-ds", "port": "80", "id": "site-shared", "headers": {} },
+    "ds": { "id": "site-shared", "urls": ["http://site-shared-ds", "http://localhost:8011"] },
+    "inventory": { "url": "http://site-shared-inv" },
+    "vds": {
+        "local": {},
+        "shared": [{
+            "name": "catalog",
+            "signingKeyFile": "/opt/UniTAO/config/catalog.pem",
+            "publishIntervalSec": 5,
+            "subscriberTimeoutHours": 24,
+            "compactIntervalHours": 24,
+            "channel": {
+                "type": "dir",
+                "path": "/opt/UniTAO/exchange",
+                "encrypt": { "recipientsFile": "/opt/UniTAO/config/recipients" }
+            }
+        }]
+    }
+}
