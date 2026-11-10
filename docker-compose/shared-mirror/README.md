@@ -36,6 +36,8 @@ if siteB stays away longer than `subscriberTimeoutHours` (24 in `SiteA/ds/config
 
 `keys/siteA/` (signing key, recipients) is mounted only into siteA and `keys/siteB/` (identity) only into siteB. to add another mirror, run `DataServiceAdmin enckey` for it, append its recipient to `keys/siteA/recipients` and restart siteA. both sides mount `./exchange` read-write: siteB writes its progress file.
 
+both Data Services store their tables in one MongoDB container (`sm-mongodb`, databases `SiteA` and `SiteB`, user `root` / `example`, demo only). its data lives on a tmpfs, so removing the container empties it; to look inside: `docker exec -it sm-mongodb mongosh -u root -p example SiteA`. the Inventory Services keep their few records in files under `Site*/inv/data`.
+
 the UniTAO containers run as your user (`UNITAO_UID` / `UNITAO_GID` in `.env`, written by `setup.sh`), so everything they write is yours and can be deleted normally. without `.env` they run as root. your UID is not in the image's `/etc/passwd`, so the image's entrypoint adds an entry for it when the container starts; tools such as ssh refuse to run for a UID without one.
 
 `keys/`, `exchange/`, `SiteB/ds/config.json`, `.env`, every `state.json`, the Inventory data and the logs are generated and ignored by git. `./clean.sh` stops the example and removes all of them; files left owned by root by an older run are removed through a container.
