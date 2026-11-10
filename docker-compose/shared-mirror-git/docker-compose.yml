@@ -1,82 +1,86 @@
-# 两个相互隔离的网络：siteA 共享 catalog，siteB 镜像它。两边只通过一个 git 仓库（git 通道）交换数据。
+# 两个相互隔离的网络：site-shared 共享 catalog，site-mirror 镜像它。两边只通过一个 git 仓库（git 通道）交换数据。
 # 这里用宿主机上的裸仓库 ./remote/exchange.git 充当远端，以 file:// 访问，不需要 SSH；
 # 实际部署把 channel.repo 换成两边都能访问的 git 服务器地址即可。
-# 启动前按 README 的 Setup 手工准备：两边的 Data Service 配置（MongoDB 地址与账号）、两边的密钥、互相交换的公钥与指纹、裸仓库、SiteB 的配置、.env（当前用户的 UID/GID）。
-# UniTAO 容器以该用户运行，写出的仓库、工作目录、state.json、日志都归当前用户（见 README 的 Clean up）。
+# 启动前按 README 的 Setup 手工准备：两边 Data Service 的配置（MongoDB 地址与账号）、两边的密钥、互相交换的公钥与指纹、裸仓库、.env（当前用户的 UID/GID）。
+# UniTAO 容器以该用户运行，写出的仓库、克隆、state.json、日志都归当前用户（见 README 的 Clean up）。
 services:
-  site-a-ds:
+  site-shared-ds:
     image: ${UNITAO_IMAGE:-ghcr.io/howeyhuo/unitao-dev:latest}
-    container_name: smg-site-a-ds
+    container_name: smg-site-shared-ds
     restart: always
     user: "${UNITAO_UID:-0}:${UNITAO_GID:-0}"
     environment:
       HOME: /tmp
     volumes:
-      - ./SiteA/ds:/opt/UniTAO/config
-      - ./keys/siteA:/opt/UniTAO/keys:ro
+      # config.json、state.json、ssh/、密钥
+      - ./site-shared/ds/config:/opt/UniTAO/config
+      # 通道的中间文件（git 通道的 workDir 克隆）
+      - ./site-shared/ds/data:/opt/UniTAO/data
       # 远端仓库：发布方要 push，可写
       - ./remote:/opt/UniTAO/remote
-      # 发布方自己的克隆（channel.workDir），挂出来方便查看提交历史
-      - ./work/siteA:/opt/UniTAO/channel
       - ./logs:/opt/UniTAO/log
     ports:
       - "8031:80"
-    networks: [siteA, mongodb]
-    command: "DataService -id SiteA -config /opt/UniTAO/config/config.json -log /opt/UniTAO/log"
+    networks: [site-shared, mongodb]
+    command: "DataService -id site-shared -config /opt/UniTAO/config/config.json -log /opt/UniTAO/log"
 
-  site-a-inv:
+  site-shared-inv:
     image: ${UNITAO_IMAGE:-ghcr.io/howeyhuo/unitao-dev:latest}
-    container_name: smg-site-a-inv
+    container_name: smg-site-shared-inv
     restart: always
     user: "${UNITAO_UID:-0}:${UNITAO_GID:-0}"
     environment:
       HOME: /tmp
     volumes:
-      - ./SiteA/inv:/opt/UniTAO/config
+      - ./site-shared/inv/config:/opt/UniTAO/config
+      # Inventory 的记录（sysdirfile）
+      - ./site-shared/inv/data:/opt/UniTAO/data
       - ./logs:/opt/UniTAO/log
     ports:
       - "8034:80"
-    networks: [siteA]
+    networks: [site-shared]
     command: "InventoryService -config /opt/UniTAO/config/config.json -log /opt/UniTAO/log"
 
-  site-b-ds:
+  site-mirror-ds:
     image: ${UNITAO_IMAGE:-ghcr.io/howeyhuo/unitao-dev:latest}
-    container_name: smg-site-b-ds
+    container_name: smg-site-mirror-ds
     restart: always
     user: "${UNITAO_UID:-0}:${UNITAO_GID:-0}"
     environment:
       HOME: /tmp
     volumes:
-      - ./SiteB/ds:/opt/UniTAO/config
-      # 镜像方只 fetch，远端仓库只读
-      - ./keys/siteB:/opt/UniTAO/keys:ro
-      # mirror 也要推送：它把自己的处理进度写进仓库
+      # config.json、state.json、ssh/、密钥
+      - ./site-mirror/ds/config:/opt/UniTAO/config
+      # 通道的中间文件（git 通道的 workDir 克隆）
+      - ./site-mirror/ds/data:/opt/UniTAO/data
+      # 远端仓库：mirror 也要 push，它把自己的处理进度写进仓库
       - ./remote:/opt/UniTAO/remote
-      - ./work/siteB:/opt/UniTAO/channel
       - ./logs:/opt/UniTAO/log
     ports:
       - "8041:80"
-    networks: [siteB, mongodb]
-    command: "DataService -id SiteB -config /opt/UniTAO/config/config.json -log /opt/UniTAO/log"
+    networks: [site-mirror, mongodb]
+    command: "DataService -id site-mirror -config /opt/UniTAO/config/config.json -log /opt/UniTAO/log"
 
-  site-b-inv:
+  site-mirror-inv:
     image: ${UNITAO_IMAGE:-ghcr.io/howeyhuo/unitao-dev:latest}
-    container_name: smg-site-b-inv
+    container_name: smg-site-mirror-inv
     restart: always
     user: "${UNITAO_UID:-0}:${UNITAO_GID:-0}"
     environment:
       HOME: /tmp
     volumes:
-      - ./SiteB/inv:/opt/UniTAO/config
+      - ./site-mirror/inv/config:/opt/UniTAO/config
+      # Inventory 的记录（sysdirfile）
+      - ./site-mirror/inv/data:/opt/UniTAO/data
       - ./logs:/opt/UniTAO/log
     ports:
       - "8044:80"
-    networks: [siteB]
+    networks: [site-mirror]
     command: "InventoryService -config /opt/UniTAO/config/config.json -log /opt/UniTAO/log"
 
 networks:
-  siteA: {}
-  siteB: {}
+  site-shared: {}
+  site-mirror: {}
   # MongoDB 不在这个 compose 里：Data Service 加入它所在的已有网络（docker network ls），按 README 的 Setup 填好 config 里的地址和账号
   mongodb:
     name: ${UNITAO_MONGODB_NETWORK:-mongo_net}

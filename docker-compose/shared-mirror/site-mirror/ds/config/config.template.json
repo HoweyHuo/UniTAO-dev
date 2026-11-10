@@ -1,0 +1,23 @@
+{
+    "database": {
+        "type": "mongodb",
+        "mongodb": { "endpoint": "<mongodb endpoint, e.g. mongodb://mongodb:27017>", "database": "sm-site-mirror", "user": "<mongodb user>", "password": "<mongodb password>" }
+    },
+    "table": { "data": "site-mirror" },
+    "http": { "type": "http", "dns": "site-mirror-ds", "port": "80", "id": "site-mirror", "headers": {} },
+    "ds": { "id": "site-mirror", "urls": ["http://site-mirror-ds", "http://localhost:8021"] },
+    "inventory": { "url": "http://site-mirror-inv" },
+    "vds": {
+        "local": {},
+        "mirrored": [{
+            "name": "catalog",
+            "trustedFingerprint": "<fingerprint of the site-shared signing key>",
+            "pullIntervalSec": 10,
+            "channel": {
+                "type": "dir",
+                "path": "/opt/UniTAO/exchange",
+                "decrypt": { "identityFile": "/opt/UniTAO/config/identity" }
+            }
+        }]
+    }
+}
