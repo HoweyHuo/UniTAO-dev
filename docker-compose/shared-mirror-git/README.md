@@ -24,6 +24,15 @@ mkdir -p keys/siteA keys/siteB remote work/siteA work/siteB SiteA/inv/data SiteB
 
 the Inventory Services store their records as files (`sysdirfile`) under `Site*/inv/data`; they do not start until that directory exists.
 
+**MongoDB**: the Data Services store their tables in MongoDB, which is not part of this compose file. each site normally has its own; for the example both may use the same one: they use different databases, `smg_SiteA` and `smg_SiteB`. the Data Services join the Docker network the MongoDB container is on, `mongo_net` by default (`UNITAO_MONGODB_NETWORK=<network>` in `.env` for another one). create both configs from their templates and fill in the endpoint as seen from that network (`mongodb://<container name>:27017`), the user and the password:
+
+```
+cp SiteA/ds/config.template.json SiteA/ds/config.json
+cp SiteB/ds/config.template.json SiteB/ds/config.json
+```
+
+the configs then hold the MongoDB password; they are ignored by git. the user needs to create collections and indexes in its database (e.g. the `readWrite` role on `smg_SiteA` / `smg_SiteB`, or root).
+
 **siteA** (publisher) creates the signing key of `shared/catalog`. `keygen` prints its fingerprint, which every mirror needs:
 
 ```
@@ -39,7 +48,7 @@ docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/keys/siteB:/keys" $IMAGE Dat
 **hand over** what each side needs from the other:
 
  - siteB's recipient into siteA's subscriber whitelist: `cat keys/siteB/recipient >> keys/siteA/recipients`. without it siteA starts with an empty whitelist and siteB stays `untrusted`.
- - siteA's fingerprint into siteB's config: `cp SiteB/ds/config.template.json SiteB/ds/config.json`, then replace `<fingerprint of siteA signing key>` in `trustedFingerprint` with the fingerprint printed by `keygen` (print it again with `docker run --rm -v "$PWD/keys/siteA:/keys:ro" $IMAGE DataServiceAdmin fingerprint -key /keys/catalog.pem`).
+ - siteA's fingerprint into siteB's config: in `SiteB/ds/config.json` replace `<fingerprint of siteA signing key>` in `trustedFingerprint` with the fingerprint printed by `keygen` (print it again with `docker run --rm -v "$PWD/keys/siteA:/keys:ro" $IMAGE DataServiceAdmin fingerprint -key /keys/catalog.pem`).
 
 **the repository** both sides reach. here it is an empty bare repository on the host (the publisher's first push creates branch `main`); in a real deployment it is a repository on a git server, see [Using a real git server](#using-a-real-git-server):
 
@@ -117,15 +126,19 @@ replace `channel.repo` on both sides, drop the `./remote` mount, and give each D
 
 the image built from `docker/unitao/dockerfile` contains `git` and `openssh-client`.
 
-both Data Services store their tables in one MongoDB container (`smg-mongodb`, databases `SiteA` and `SiteB`, user `root` / `example`, demo only). its data lives on a tmpfs, so removing the container empties it; to look inside: `docker exec -it smg-mongodb mongosh -u root -p example SiteA`. the Inventory Services keep their few records in files under `Site*/inv/data`.
-
 the UniTAO containers run as your user (`UNITAO_UID` / `UNITAO_GID` in `.env`), so everything they write is yours; without `.env` they run as root.
 
 ## Clean up
 
 ```
 docker compose down
-rm -rf keys remote work .env SiteB/ds/config.json Site*/ds/state.json Site*/ds/ssh Site*/inv/data logs/*.log
+rm -rf keys remote work .env Site*/ds/config.json Site*/ds/state.json Site*/ds/ssh Site*/inv/data logs/*.log
 ```
 
 these are all generated and ignored by git. files left owned by root (containers started without `.env`) need `sudo rm`.
+
+the tables stay in MongoDB. drop the two databases, or a next run finds the old data there (e.g. with `mongosh` in the MongoDB container):
+
+```
+docker exec <mongodb container> mongosh -u <user> -p <password> --quiet --eval 'db.getSiblingDB("smg_SiteA").dropDatabase(); db.getSiblingDB("smg_SiteB").dropDatabase()'
+```
