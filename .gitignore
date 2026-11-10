@@ -14,8 +14,6 @@ docker-compose/**/state.json
 docker-compose/**/ssh/
 # shared-mirror demos: Inventory data (sysdirfile under the mounted config dir)
 docker-compose/shared-mirror*/Site*/inv/data/
-# shared-mirror demos: passwd written by older setup.sh (the image entrypoint adds the user now); clean.sh removes it
-docker-compose/shared-mirror*/passwd
 # shared-mirror demo: generated keys, channel content and config
 docker-compose/shared-mirror/keys/
 docker-compose/shared-mirror/exchange/

@@ -2,15 +2,46 @@
 
 two isolated networks (`siteA`, `siteB`), each with its own Data Service and Inventory Service. siteA publishes `shared/catalog`; siteB keeps `mirrored/catalog`. the only path between them is the `./exchange` directory (a `dir` Communication Channel); with a `git` channel it would be a repository instead, see [`shared-mirror-git`](../shared-mirror-git).
 
-the image must contain the vDS feature; until CI publishes it, build it locally (or set `UNITAO_IMAGE` to another tag for both `setup.sh` and `docker compose`):
+the image must contain the vDS feature; until CI publishes it, build it locally (or set `UNITAO_IMAGE` to another tag for `docker compose`, and `IMAGE` below):
 
 ```
 docker build -f ./docker/unitao/dockerfile -t ghcr.io/howeyhuo/unitao-dev:latest .
 ```
 
+## Setup
+
+these are the steps an operator does in a real deployment, part on siteA and part on siteB; here both sites are directories next to each other on one host. the tools run from the image, nothing has to be installed on the host.
+
 ```
 cd docker-compose/shared-mirror
-./setup.sh                      # signing key (siteA), encryption identity (siteB) + recipients (siteA), trusted fingerprint, .env
+IMAGE=ghcr.io/howeyhuo/unitao-dev:latest
+printf 'UNITAO_UID=%s\nUNITAO_GID=%s\n' "$(id -u)" "$(id -g)" > .env   # containers run as you, see below
+mkdir -p keys/siteA keys/siteB exchange SiteA/inv/data SiteB/inv/data
+                                  # bind-mount sources and the Inventory data dirs: create them yourself, docker would create them owned by root
+```
+
+the Inventory Services store their records as files (`sysdirfile`) under `Site*/inv/data`; they do not start until that directory exists.
+
+**siteA** (publisher) creates the signing key of `shared/catalog`. `keygen` prints its fingerprint, which every mirror needs:
+
+```
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/keys/siteA:/keys" $IMAGE DataServiceAdmin keygen -out /keys/catalog.pem
+```
+
+**siteB** (subscriber) creates its encryption identity. the private key (`identity`) stays on siteB, the public key (`recipient`) goes to the publisher; `enckey` also prints siteB's subscriber id:
+
+```
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/keys/siteB:/keys" $IMAGE DataServiceAdmin enckey -identity /keys/identity -recipient /keys/recipient
+```
+
+**hand over** what each side needs from the other:
+
+ - siteB's recipient into siteA's subscriber whitelist: `cat keys/siteB/recipient >> keys/siteA/recipients`. without it siteA starts with an empty whitelist and siteB stays `untrusted`.
+ - siteA's fingerprint into siteB's config: `cp SiteB/ds/config.template.json SiteB/ds/config.json`, then replace `<fingerprint of siteA signing key>` in `trustedFingerprint` with the fingerprint printed by `keygen` (print it again with `docker run --rm -v "$PWD/keys/siteA:/keys:ro" $IMAGE DataServiceAdmin fingerprint -key /keys/catalog.pem`).
+
+## Try it
+
+```
 docker compose up -d
 
 # write into the shared vDS on siteA
@@ -38,6 +69,13 @@ if siteB stays away longer than `subscriberTimeoutHours` (24 in `SiteA/ds/config
 
 both Data Services store their tables in one MongoDB container (`sm-mongodb`, databases `SiteA` and `SiteB`, user `root` / `example`, demo only). its data lives on a tmpfs, so removing the container empties it; to look inside: `docker exec -it sm-mongodb mongosh -u root -p example SiteA`. the Inventory Services keep their few records in files under `Site*/inv/data`.
 
-the UniTAO containers run as your user (`UNITAO_UID` / `UNITAO_GID` in `.env`, written by `setup.sh`), so everything they write is yours and can be deleted normally. without `.env` they run as root. your UID is not in the image's `/etc/passwd`, so the image's entrypoint adds an entry for it when the container starts; tools such as ssh refuse to run for a UID without one.
+the UniTAO containers run as your user (`UNITAO_UID` / `UNITAO_GID` in `.env`), so everything they write is yours and can be deleted normally. without `.env` they run as root. your UID is not in the image's `/etc/passwd`, so the image's entrypoint adds an entry for it when the container starts; tools such as ssh refuse to run for a UID without one.
 
-`keys/`, `exchange/`, `SiteB/ds/config.json`, `.env`, every `state.json`, the Inventory data and the logs are generated and ignored by git. `./clean.sh` stops the example and removes all of them; files left owned by root by an older run are removed through a container.
+## Clean up
+
+```
+docker compose down
+rm -rf keys exchange .env SiteB/ds/config.json Site*/ds/state.json Site*/ds/ssh Site*/inv/data logs/*.log
+```
+
+these are all generated and ignored by git. files left owned by root (containers started without `.env`) need `sudo rm`.
