@@ -54,6 +54,29 @@ type Database interface {
 	Delete(table string, keys map[string]interface{}) error
 }
 
+// Scanner 是可选接口：按 Get 的参数逐条读取记录，不把结果整体放进内存。fn 返回错误时停止并返回该错误。
+// 没有实现它的数据库用 Scan 函数退回 Get。
+type Scanner interface {
+	Scan(queryArgs map[string]interface{}, fn func(record map[string]interface{}) error) error
+}
+
+// Scan 逐条读取记录：数据库实现了 Scanner 时流式读取，否则用 Get 读出全部再逐条回调。
+func Scan(db Database, queryArgs map[string]interface{}, fn func(record map[string]interface{}) error) error {
+	if scanner, ok := db.(Scanner); ok {
+		return scanner.Scan(queryArgs, fn)
+	}
+	records, err := db.Get(queryArgs)
+	if err != nil {
+		return err
+	}
+	for _, record := range records {
+		if err := fn(record); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // walk into data with dataPath
 // return last data layer that wrapping the attrbute
 // attribute path:

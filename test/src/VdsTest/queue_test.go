@@ -433,10 +433,15 @@ func TestSharedHistory(t *testing.T) {
 		mustNoErr(t, q.mirror(idx).SyncOnce(), "re-subscribe")
 	}
 
-	// B、C 同一轮订阅：一份 history，两条授权
+	// B、C 同一轮订阅：一份 history，两条授权；打包时流式读取数据库
+	scans := q.dsA.db.Scans()
 	resubscribe(0)
 	resubscribe(1)
 	mustNoErr(t, q.pub.RunOnce(), "history for B and C")
+	if q.dsA.db.Scans() == scans {
+		t.Fatal("expect the history packaged by scanning the database")
+	}
+	scans = q.dsA.db.Scans()
 	if dirs := channelFiles(t, historyDir); len(dirs) != 1 {
 		t.Fatalf("expect one history for both subscribers, got %v", dirs)
 	}
@@ -453,6 +458,9 @@ func TestSharedHistory(t *testing.T) {
 	mustNoErr(t, q.pub.RunOnce(), "grant D")
 	if dirs := channelFiles(t, historyDir); len(dirs) != 1 || dirs[0] != first {
 		t.Fatalf("expect D granted the existing history, got %v", dirs)
+	}
+	if q.dsA.db.Scans() != scans {
+		t.Fatal("expect a grant without reading the database")
 	}
 	histories = historyStatuses(t, q.pub)
 	if len(histories) != 1 || histories[0].Grants != 3 || histories[0].Pending != 3 {

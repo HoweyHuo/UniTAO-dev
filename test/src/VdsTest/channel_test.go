@@ -149,7 +149,7 @@ func TestQueueChannel(t *testing.T) {
 	if err := pub.Publish(changes("prod", 5, 5)); err == nil {
 		t.Fatal("expect non-continuous publish rejected")
 	}
-	history := &Channel.History{Seq: 3, Source: "prod", Records: []map[string]interface{}{dataRecord("rack", "r1", map[string]interface{}{"name": "r1"})}}
+	history := &Channel.History{Seq: 3, Source: "prod", Records: Channel.RecordList([]map[string]interface{}{dataRecord("rack", "r1", map[string]interface{}{"name": "r1"})})}
 	published, err := pub.PublishHistory(history, []Channel.HistoryGrant{{Subscriber: keyA.Id, Request: "reqA"}})
 	mustNoErr(t, err, "history for A")
 	historyId := published.Id
@@ -386,7 +386,7 @@ func TestGitQueueChannel(t *testing.T) {
 	}
 	mustNoErr(t, subA.WriteProgress(Channel.Progress{Request: "reqA", State: Channel.StateSubscribe}), "subscribe A on empty remote")
 	mustNoErr(t, pub.Publish(changes("prod", 1, 2)), "git publish 1-2")
-	_, err = pub.PublishHistory(&Channel.History{Seq: 2, Source: "prod", Records: []map[string]interface{}{}}, []Channel.HistoryGrant{{Subscriber: keyA.Id, Request: "reqA"}})
+	_, err = pub.PublishHistory(&Channel.History{Seq: 2, Source: "prod", Records: Channel.RecordList(nil)}, []Channel.HistoryGrant{{Subscriber: keyA.Id, Request: "reqA"}})
 	mustNoErr(t, err, "git history")
 	mustNoErr(t, subA.Refresh(), "git refresh A")
 	if got, err := subA.History("reqA"); err != nil || got.Parts != 1 || len(readHistory(t, got)) != 0 {
@@ -493,6 +493,8 @@ func readHistory(t *testing.T, h *Channel.HistoryReader) []map[string]interface{
 // 只授权给 A 时 B 没有 history，授权的内容密钥 B 也解不开。
 func TestHistoryParts(t *testing.T) {
 	defer Channel.SetHistoryPartBytes(1)() // 每条记录一个分片
+	spoolDir := t.TempDir()
+	t.Setenv("TMPDIR", spoolDir) // 打包时的临时目录
 	key, fingerprint := signer(t)
 	keyA, keyB := newSubKey(t), newSubKey(t)
 	root := t.TempDir()
@@ -505,7 +507,7 @@ func TestHistoryParts(t *testing.T) {
 	for _, change := range changes("prod", 1, 5) {
 		records = append(records, change.Record)
 	}
-	ref, err := pub.PublishHistory(&Channel.History{Seq: 5, Source: "prod", Records: records}, []Channel.HistoryGrant{{Subscriber: keyA.Id, Request: "reqA"}})
+	ref, err := pub.PublishHistory(&Channel.History{Seq: 5, Source: "prod", Records: Channel.RecordList(records)}, []Channel.HistoryGrant{{Subscriber: keyA.Id, Request: "reqA"}})
 	mustNoErr(t, err, "publish history")
 	partDir := filepath.Join(root, "prod", "history", ref.Id)
 	parts := channelFiles(t, partDir)
@@ -533,6 +535,25 @@ func TestHistoryParts(t *testing.T) {
 	mustNoErr(t, subB.Refresh(), "refresh B")
 	if _, err := subB.History("reqA"); !errors.Is(err, Channel.ErrNoHistory) {
 		t.Fatalf("expect B without a grant to get ErrNoHistory, got %v", err)
+	}
+
+	// 读记录出错：不发布，manifest 里没有新 history，通道上没有它的文件
+	failing := func(fn func(record map[string]interface{}) error) error {
+		if err := fn(records[0]); err != nil {
+			return err
+		}
+		return errors.New("db read failed")
+	}
+	if _, err := pub.PublishHistory(&Channel.History{Seq: 5, Source: "prod", Records: failing}, []Channel.HistoryGrant{{Subscriber: keyA.Id, Request: "reqA2"}}); err == nil || !strings.Contains(err.Error(), "db read failed") {
+		t.Fatalf("expect the read error returned, got %v", err)
+	}
+	view, err := pub.View()
+	mustNoErr(t, err, "view")
+	if len(view.Histories) != 1 || len(channelFiles(t, filepath.Join(root, "prod", "history"))) != 1 {
+		t.Fatalf("expect no history from a failed read, got %+v", view.Histories)
+	}
+	if left := channelFiles(t, spoolDir); len(left) != 0 {
+		t.Fatalf("expect spool directories removed, got %v", left)
 	}
 
 	// 篡改第 3 个分片：读到它时报错

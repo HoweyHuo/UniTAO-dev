@@ -509,11 +509,7 @@ func (p *Publisher) provideHistory(view *Channel.View, state *PublishState, subs
 			return nil, err
 		}
 	}
-	records, httpErr := p.handler.SyncedRecords()
-	if httpErr != nil {
-		return nil, httpErr
-	}
-	h := &Channel.History{Seq: state.LastPublished, Source: p.Name, Ts: now.UTC().Format(time.RFC3339), Records: records}
+	h := &Channel.History{Seq: state.LastPublished, Source: p.Name, Ts: now.UTC().Format(time.RFC3339), Records: p.handler.EachSyncedRecord}
 	ref, err := p.channel.PublishHistory(h, grants)
 	if err != nil {
 		return nil, err

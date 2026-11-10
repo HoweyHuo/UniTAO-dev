@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -517,65 +518,127 @@ func (s *fileStore) Publish(changes []Change) error {
 	})
 }
 
-// encodedPart 是加密好、待写入通道的 history 分片。
-type encodedPart struct {
-	name string
-	data []byte
+// spooledHistory 是打包好、暂存在本地临时目录里的 history 分片。临时目录不在通道的工作目录里：
+// git 写入前对齐远端时会清掉未跟踪的文件，推送被拒重做时要能再写一遍。
+type spooledHistory struct {
+	dir     string
+	parts   []spooledPart
+	records int
+}
+
+type spooledPart struct {
+	name   string // 通道上的路径
+	spool  string // 临时文件
+	sha256 string
+	size   int
+}
+
+func (h *spooledHistory) cleanup() {
+	os.RemoveAll(h.dir)
 }
 
 func partAAD(source string, id string, index int) []byte {
 	return []byte(fmt.Sprintf("%s/%s/%s/%d", partAADPrefix, source, id, index))
 }
 
-// encodeHistory 把记录写成 JSONL、gzip，按压缩后的大小切片（达到 historyPartBytes 就开始新的分片，
-// deflate 有内部缓冲，分片会略大于目标），每片用内容密钥单独加密。没有记录时也有一个（空的）分片。
-func (s *fileStore) encodeHistory(id string, key []byte, records []map[string]interface{}) ([]encodedPart, error) {
-	parts := []encodedPart{}
+// encodeHistory 边读记录边写成 JSONL、gzip，按压缩后的大小切片（达到 historyPartBytes 就开始新的分片，
+// deflate 有内部缓冲，分片会略大于目标），每片用内容密钥单独加密后写进临时目录。内存里最多只有一个分片。
+// 没有记录时也有一个（空的）分片。
+func (s *fileStore) encodeHistory(id string, key []byte, records func(fn func(record map[string]interface{}) error) error) (*spooledHistory, error) {
+	dir, err := os.MkdirTemp("", "unitao-history-")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create spool directory for history, Error:%s", err)
+	}
+	spooled := &spooledHistory{dir: dir}
+	done := false
+	defer func() {
+		if !done {
+			spooled.cleanup()
+		}
+	}()
 	var buf bytes.Buffer
 	var zw *gzip.Writer
 	pending := 0
 	flush := func() error {
+		if zw == nil {
+			zw = gzip.NewWriter(&buf)
+		}
 		if err := zw.Close(); err != nil {
 			return err
 		}
-		index := len(parts) + 1
+		index := len(spooled.parts) + 1
 		sealed, err := sealPart(key, partAAD(s.source, id, index), buf.Bytes())
 		if err != nil {
 			return err
 		}
-		parts = append(parts, encodedPart{name: fmt.Sprintf("%s/%s/%04d%s", historyDir, id, index, partSuffix), data: sealed})
 		buf.Reset()
 		zw = nil
 		pending = 0
+		spool := filepath.Join(dir, fmt.Sprintf("%04d", index))
+		if err := os.WriteFile(spool, sealed, 0o600); err != nil {
+			return fmt.Errorf("failed to spool history part, Error:%s", err)
+		}
+		spooled.parts = append(spooled.parts, spooledPart{
+			name:   fmt.Sprintf("%s/%s/%04d%s", historyDir, id, index, partSuffix),
+			spool:  spool,
+			sha256: sha256Hex(sealed),
+			size:   len(sealed),
+		})
 		return nil
 	}
-	for _, record := range records {
+	err = records(func(record map[string]interface{}) error {
 		if zw == nil {
 			zw = gzip.NewWriter(&buf)
 		}
 		line, err := json.Marshal(record)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		if _, err := zw.Write(append(line, '\n')); err != nil {
-			return nil, err
+			return err
 		}
 		pending++
+		spooled.records++
 		if buf.Len() >= historyPartBytes {
-			if err := flush(); err != nil {
-				return nil, err
-			}
+			return flush()
 		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	if pending > 0 || len(parts) == 0 {
-		if zw == nil {
-			zw = gzip.NewWriter(&buf)
-		}
+	if pending > 0 || len(spooled.parts) == 0 {
 		if err := flush(); err != nil {
 			return nil, err
 		}
 	}
-	return parts, nil
+	done = true
+	return spooled, nil
+}
+
+// copyFileAtomic 把 src 流式复制到 dst（先写临时文件再改名）。
+func copyFileAtomic(src string, dst string) error {
+	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+		return err
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	tmp := dst + ".tmp"
+	out, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	if err := out.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp, dst)
 }
 
 // makeGrants 为每个授权包装内容密钥；subscriber 必须在白名单里。
@@ -636,13 +699,14 @@ func (s *fileStore) PublishHistory(h *History, grants []HistoryGrant) (*HistoryR
 		return nil, err
 	}
 	id := NewRequestId()
-	// 压缩、加密在锁外做一次；推送被拒重做时只重写文件
-	parts, err := s.encodeHistory(id, key, h.Records)
+	// 读记录、压缩、加密在锁外做一次，分片暂存在临时目录；推送被拒重做时只重新复制文件
+	spooled, err := s.encodeHistory(id, key, h.Records)
 	if err != nil {
 		return nil, err
 	}
+	defer spooled.cleanup()
 	var result HistoryRef
-	message := fmt.Sprintf("%s: history %s seq %d (%d parts) for %d subscribers", s.folder, shortId(id), h.Seq, len(parts), len(refs))
+	message := fmt.Sprintf("%s: history %s seq %d (%d parts) for %d subscribers", s.folder, shortId(id), h.Seq, len(spooled.parts), len(refs))
 	err = s.write(message, func() (bool, error) {
 		m, err := s.ownManifest()
 		if err != nil {
@@ -651,12 +715,12 @@ func (s *fileStore) PublishHistory(h *History, grants []HistoryGrant) (*HistoryR
 		if h.Seq > m.LastSeq {
 			return false, fmt.Errorf("history seq [%d] is beyond published seq [%d]", h.Seq, m.LastSeq)
 		}
-		ref := HistoryRef{Id: id, Seq: h.Seq, Records: len(h.Records), Parts: []PartRef{}, Published: now(), Grants: refs}
-		for _, part := range parts {
-			if err := writeFileAtomic(s.path(part.name), part.data); err != nil {
+		ref := HistoryRef{Id: id, Seq: h.Seq, Records: spooled.records, Parts: []PartRef{}, Published: now(), Grants: refs}
+		for _, part := range spooled.parts {
+			if err := copyFileAtomic(part.spool, s.path(part.name)); err != nil {
 				return false, err
 			}
-			ref.Parts = append(ref.Parts, PartRef{File: part.name, Sha256: sha256Hex(part.data), Size: len(part.data)})
+			ref.Parts = append(ref.Parts, PartRef{File: part.name, Sha256: part.sha256, Size: part.size})
 		}
 		m.Histories = append(m.Histories, ref)
 		result = ref
