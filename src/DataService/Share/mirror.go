@@ -234,8 +234,8 @@ func (m *Mirror) apply(change Channel.Change) *Http.HttpError {
 	return Http.NewHttpError(fmt.Sprintf("unknown op [%s]", change.Op), 400)
 }
 
-// load 用 history 整体替换本 vDS 的同步数据。
-func (m *Mirror) load(history *Channel.History) error {
+// load 用 history 整体替换本 vDS 的同步数据。分片逐个读取，不把整份 history 放进内存。
+func (m *Mirror) load(history *Channel.HistoryReader) error {
 	if history.Source != m.Source {
 		return fmt.Errorf("history comes from source [%s], expect [%s]", history.Source, m.Source)
 	}
@@ -246,10 +246,15 @@ func (m *Mirror) load(history *Channel.History) error {
 	if httpErr := m.handler.ClearSynced(); httpErr != nil {
 		return httpErr
 	}
-	for _, record := range history.Records {
+	err := history.Each(func(record map[string]interface{}) error {
 		if httpErr := m.handler.ApplyUpsert(record); httpErr != nil {
 			return fmt.Errorf("failed to load history record: %s", httpErr)
 		}
+		return nil
+	})
+	if err != nil {
+		// 本地数据已被部分替换；Loaded 仍为 false，下一轮从头重新加载
+		return err
 	}
 	after, httpErr := m.handler.ListDataTypes()
 	if httpErr != nil {
@@ -262,7 +267,7 @@ func (m *Mirror) load(history *Channel.History) error {
 	if err := m.saveState(state); err != nil {
 		return err
 	}
-	m.Log(fmt.Sprintf("loaded history at seq %d with %d records", history.Seq, len(history.Records)))
+	m.Log(fmt.Sprintf("loaded history %s at seq %d with %d records in %d parts", history.Id, history.Seq, history.Records, history.Parts))
 	return nil
 }
 

@@ -28,11 +28,11 @@ find exchange -type f                            # once siteB caught up: only ma
 what happens on the channel (`exchange/catalog/`):
 
  1. siteB starts first and writes `subscribers/<its id>.json` with `state: subscribe` (the publisher does not need to exist yet).
- 2. siteA publishes the two writes as `queue/…-….jsonl.gz.enc`, sees the subscription and writes `history/<id>-…` with all its records, encrypted only to siteB.
+ 2. siteA publishes the two writes as `queue/…-….jsonl.gz.enc`, sees the subscription and writes `history/<id>/0001.jsonl.gz.aes` with all its records; the manifest grants it to siteB (its content key wrapped for siteB's public key).
  3. siteB loads the history (replacing its table), consumes the queue from there and reports `state: active` with its cursor.
  4. siteA deletes the history and every batch siteB has passed.
 
-if siteB stays away longer than `subscriberTimeoutHours` (720 in `SiteA/ds/config.json`), siteA drops its progress file and stops keeping batches for it; when siteB comes back it subscribes again and reloads everything.
+if siteB stays away longer than `subscriberTimeoutHours` (24 in `SiteA/ds/config.json`), siteA drops its progress file and stops keeping batches for it; when siteB comes back it subscribes again and reloads everything.
 
 `keys/siteA/` (signing key, recipients) is mounted only into siteA and `keys/siteB/` (identity) only into siteB. to add another mirror, run `DataServiceAdmin enckey` for it, append its recipient to `keys/siteA/recipients` and restart siteA. both sides mount `./exchange` read-write: siteB writes its progress file.
 

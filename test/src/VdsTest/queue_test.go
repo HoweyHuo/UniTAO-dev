@@ -401,3 +401,97 @@ func TestCreateMissingRecipientsFile(t *testing.T) {
 		t.Fatalf("expect error for missing directory")
 	}
 }
+
+func historyStatuses(t *testing.T, pub *Share.Publisher) []Share.HistoryStatus {
+	t.Helper()
+	list, _ := pub.Status()["histories"].([]Share.HistoryStatus)
+	return list
+}
+
+// TestSharedHistory：同一轮的多个订阅请求共用一份 history；复用期内后来的订阅方只拿到授权，
+// 不重新打包，加载后从 history 的 seq 继续消费 queue；过了复用期的新请求得到一份新的 history。
+// 一份 history 的所有授权方都加载完以后它被删除。
+func TestSharedHistory(t *testing.T) {
+	channelDir := filepath.Join(t.TempDir(), "channel")
+	q := newQueueSetup(t, dirChannel(channelDir), 3, 0)
+	historyDir := filepath.Join(channelDir, "prod", "history")
+	clock := time.Now()
+	q.pub.SetClock(func() time.Time { return clock })
+	q.pub.SetHistoryReuseWindow(time.Hour)
+
+	// mirror 启动时就会订阅：先让三个都进入 active、history 清理干净，之后的订阅请求由测试触发
+	q.post(t, schemaRecord("rack", "0.0.1", rackSchema), 1)
+	q.post(t, dataRecord("rack", "r1", map[string]interface{}{"name": "one"}), 2)
+	syncAll(t, q.pub, q.mirror(0), q.mirror(1), q.mirror(2))
+	mustNoErr(t, q.pub.RunOnce(), "prune after initial sync")
+	if dirs := channelFiles(t, historyDir); len(dirs) != 0 {
+		t.Fatalf("expect no history after the initial sync, got %v", dirs)
+	}
+	// 删除进度文件，mirror 下一次同步时用新请求重新订阅
+	resubscribe := func(idx int) {
+		mustNoErr(t, os.Remove(filepath.Join(channelDir, "prod", "subscribers", q.keys[idx].Id+".json")), "remove progress file")
+		mustNoErr(t, q.mirror(idx).SyncOnce(), "re-subscribe")
+	}
+
+	// B、C 同一轮订阅：一份 history，两条授权
+	resubscribe(0)
+	resubscribe(1)
+	mustNoErr(t, q.pub.RunOnce(), "history for B and C")
+	if dirs := channelFiles(t, historyDir); len(dirs) != 1 {
+		t.Fatalf("expect one history for both subscribers, got %v", dirs)
+	}
+	histories := historyStatuses(t, q.pub)
+	if len(histories) != 1 || histories[0].Seq != 2 || histories[0].Grants != 2 || histories[0].Pending != 2 || !histories[0].Reusable {
+		t.Fatalf("unexpected histories %+v", histories)
+	}
+	first := histories[0].Id
+
+	// 新变更之后 D 订阅：仍授权同一份 history（seq 2），不重新打包
+	q.post(t, dataRecord("rack", "r2", map[string]interface{}{"name": "two"}), 3)
+	mustNoErr(t, q.pub.RunOnce(), "publish 3")
+	resubscribe(2)
+	mustNoErr(t, q.pub.RunOnce(), "grant D")
+	if dirs := channelFiles(t, historyDir); len(dirs) != 1 || dirs[0] != first {
+		t.Fatalf("expect D granted the existing history, got %v", dirs)
+	}
+	histories = historyStatuses(t, q.pub)
+	if len(histories) != 1 || histories[0].Grants != 3 || histories[0].Pending != 3 {
+		t.Fatalf("expect three pending grants, got %+v", histories)
+	}
+
+	// 都加载、追上 queue：D 从 history 拿到 r1，从 queue 拿到 r2；history 被删除
+	syncAll(t, q.pub, q.mirror(0), q.mirror(1), q.mirror(2))
+	for i := 0; i < 3; i++ {
+		expectStatus(t, call(t, http.MethodGet, q.mirroredUrl(i)+"/rack/r1", nil), http.StatusOK, "r1 from history")
+		expectStatus(t, call(t, http.MethodGet, q.mirroredUrl(i)+"/rack/r2", nil), http.StatusOK, "r2 from queue")
+	}
+	mustNoErr(t, q.pub.RunOnce(), "prune after loading")
+	if dirs := channelFiles(t, historyDir); len(dirs) != 0 {
+		t.Fatalf("expect the history removed once every grantee loaded it, got %v", dirs)
+	}
+
+	// 复用期：B 重新订阅得到新 history；过了复用期 C 重新订阅，不再复用 B 那份
+	resubscribe(0)
+	mustNoErr(t, q.pub.RunOnce(), "history for B")
+	clock = clock.Add(2 * time.Hour)
+	resubscribe(1)
+	mustNoErr(t, q.pub.RunOnce(), "history for C")
+	if dirs := channelFiles(t, historyDir); len(dirs) != 2 {
+		t.Fatalf("expect a new history after the reuse window, got %v", dirs)
+	}
+	// （通道用真实时间记录 published，测试拨快的是 publisher 的时钟，所以这里不看 Reusable）
+	histories = historyStatuses(t, q.pub)
+	if len(histories) != 2 || histories[0].Grants != 1 || histories[1].Grants != 1 {
+		t.Fatalf("expect B and C on separate histories, got %+v", histories)
+	}
+	syncAll(t, q.pub, q.mirror(0), q.mirror(1))
+	mustNoErr(t, q.pub.RunOnce(), "prune after loading")
+	if dirs := channelFiles(t, historyDir); len(dirs) != 0 {
+		t.Fatalf("expect both histories removed, got %v", dirs)
+	}
+	for i := 0; i < 2; i++ {
+		if q.mirror(i).Status()["subscription"] != Share.PhaseActive {
+			t.Fatalf("expect mirror %d active, got %v", i, q.mirror(i).Status())
+		}
+	}
+}

@@ -92,11 +92,13 @@ type SharedVdsConfig struct {
 	Name               string `json:"name"`
 	SigningKeyFile     string `json:"signingKeyFile"`
 	PublishIntervalSec int    `json:"publishIntervalSec"`
-	// SubscriberTimeoutHours：subscriber 的第一个未处理 batch 发布超过这么久，判定它死亡（默认 720）
+	// SubscriberTimeoutHours：subscriber 的第一个未处理 batch 发布超过这么久，判定它死亡（默认 24）
 	SubscriberTimeoutHours int `json:"subscriberTimeoutHours"`
 	// CompactIntervalHours：压缩通道历史的最小间隔（默认 24，只对 git 通道有效）
-	CompactIntervalHours int            `json:"compactIntervalHours"`
-	Channel              Channel.Config `json:"channel"`
+	CompactIntervalHours int `json:"compactIntervalHours"`
+	// HistoryReuseHours：history 发布后这么久之内，新订阅方直接拿到它的授权，不重新打包（默认 24）
+	HistoryReuseHours int            `json:"historyReuseHours"`
+	Channel           Channel.Config `json:"channel"`
 }
 
 // MirroredVdsConfig 是一个 mirrored vDS（subscriber）：只读，所有变化来自 Channel。

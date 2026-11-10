@@ -1,12 +1,14 @@
 // Package Channel 定义 shared vDS 与 mirrored vDS 之间的通信通道（Communication Channel）。
 //
 // 通道是一个单 publisher、多 subscriber 的队列（见 plan/feature-channel-queue/plan.md）：
-//   - publisher（shared vDS）把变更按 seq 连续打包成 queue batch；新 subscriber 订阅时为它单独打包一份
-//     当前数据（history batch）；所有存活 subscriber 都处理过的 batch 被删除。
+//   - publisher（shared vDS）把变更按 seq 连续打包成 queue batch；新 subscriber 订阅时给它一份当前数据
+//     （history，按大小切成多个分片）。同一份 history 可以授权给多个 subscriber：复用期内新来的订阅方
+//     直接拿到已有 history 的授权，不再重新打包。所有存活 subscriber 都处理过的 batch / history 被删除。
 //   - subscriber（mirrored vDS）在 subscribers/<id>.json 汇报自己的进度。
 //
 // 通道内容由 publisher 的 ed25519 私钥签名，subscriber 只接受公钥指纹等于可信指纹的来源。
-// 所有 batch 都按 subscriber 的 X25519 公钥加密；subscriber 的 id 就是它公钥的 sha256，
+// queue batch 对白名单里所有 subscriber 的 X25519 公钥加密；history 用自己的内容密钥加密，
+// 内容密钥在 manifest 里为每个被授权的 subscriber 各包装一份。subscriber 的 id 就是它公钥的 sha256，
 // publisher 的接收方列表（recipientsFile）同时是 subscriber 白名单。
 //
 // 具体实现：
@@ -46,6 +48,8 @@ var (
 	ErrNotPublished = errors.New("source has not published anything on channel yet")
 	// ErrNoHistory 表示 publisher 还没有为这个订阅请求打包 history。
 	ErrNoHistory = errors.New("no history published for this subscription request yet")
+	// ErrHistoryKeyUnknown 表示本进程没有这份 history 的内容密钥（publisher 重启过），不能再给它增加授权。
+	ErrHistoryKeyUnknown = errors.New("content key of this history is not known to this process")
 )
 
 // Change 是一条变更：完整的 after 记录（upsert）或删除。
@@ -59,12 +63,34 @@ type Change struct {
 	Ts     string                 `json:"ts"`
 }
 
-// History 是 publisher 为一个订阅请求打包的全量数据：seq 时刻 vDS 中所有需要同步的记录，schema 在前。
+// History 是 publisher 打包的全量数据：seq 时刻 vDS 中所有需要同步的记录，schema 在前。
 type History struct {
 	Seq     uint64
 	Source  string
 	Ts      string
 	Records []map[string]interface{}
+}
+
+// HistoryGrant 是一次授权：把 history 交给 subscriber 的某个订阅请求。
+type HistoryGrant struct {
+	Subscriber string
+	Request    string
+}
+
+// HistoryReader 是 subscriber 拿到的、授权给自己的 history：元数据在 manifest 里，记录按分片逐个读取。
+type HistoryReader struct {
+	Id        string
+	Seq       uint64
+	Source    string
+	Published string
+	Records   int // manifest 记录的总记录数
+	Parts     int
+	each      func(fn func(record map[string]interface{}) error) error
+}
+
+// Each 按顺序逐条读取 history 的记录，一次只解密、解压一个分片。
+func (h *HistoryReader) Each(fn func(record map[string]interface{}) error) error {
+	return h.each(fn)
 }
 
 // Progress 是 subscriber 写在 subscribers/<id>.json 里的进度。
@@ -84,14 +110,14 @@ type View struct {
 	OldFormat   bool
 	LastSeq     uint64
 	Queue       []FileRef // 按 From 升序
-	Histories   []FileRef
+	Histories   []HistoryRef
 	Subscribers []Progress // subscribers/ 下所有文件，含白名单之外的
 }
 
 // Prune 描述一次清理。
 type Prune struct {
 	QueueUpTo   uint64   // 删除 To <= QueueUpTo 的 queue batch
-	Histories   []string // 要删除的 history 文件（FileRef.File）
+	Histories   []string // 要删除的 history（HistoryRef.Id），连同它的全部分片
 	Subscribers []string // 要删除进度文件的 subscriber id
 }
 
@@ -139,8 +165,14 @@ type Publisher interface {
 	// 白名单为空时没有人能解密，不写 queue batch，只把 manifest 的 LastSeq 推进到这批的末尾：
 	// 新订阅方总是先拿 history（订阅时的全量），不需要它加入之前的 queue。
 	Publish(changes []Change) error
-	// PublishHistory 为 subscriber 的一个订阅请求发布 history，只对这个 subscriber 加密；替换它之前的 history。
-	PublishHistory(subscriber string, request string, h *History) error
+	// PublishHistory 打包一份新的 history：按大小切片，用新的内容密钥加密，并授权给 grants；返回它在 manifest 里的条目。
+	// 内容密钥只留在本进程内存里，供之后 GrantHistory 使用。
+	PublishHistory(h *History, grants []HistoryGrant) (*HistoryRef, error)
+	// GrantHistory 把已有的 history 授权给更多订阅请求（只改 manifest，不重写分片），返回更新后的条目。
+	// 同一 subscriber 的旧授权被替换。本进程没有它的内容密钥时返回 ErrHistoryKeyUnknown。
+	GrantHistory(id string, grants []HistoryGrant) (*HistoryRef, error)
+	// CanGrant 判断本进程是否还有这份 history 的内容密钥。
+	CanGrant(id string) bool
 	// Prune 删除 queue batch、history 与死亡 subscriber 的进度文件。
 	Prune(p Prune) error
 	// Reset 让通道从 lastSeq 重新开始：清空 queue、history 和旧格式文件（subscriber 进度保留）。
@@ -169,8 +201,8 @@ type Subscriber interface {
 	Progress() *Progress
 	// WriteProgress 写自己的进度文件（Id 与 Updated 由通道填写）。
 	WriteProgress(p Progress) error
-	// History 返回 publisher 为这个订阅请求打包的 history；还没有时返回 ErrNoHistory。
-	History(request string) (*History, error)
+	// History 返回授权给这个订阅请求的 history；还没有时返回 ErrNoHistory。
+	History(request string) (*HistoryReader, error)
 	// Fetch 返回 seq > cursor 的变更（最多约 limit 条，按 batch 粒度）；没有新数据返回空切片。
 	// 无法从 cursor+1 连续提供时返回 ErrGap。
 	Fetch(cursor uint64, limit int) ([]Change, error)

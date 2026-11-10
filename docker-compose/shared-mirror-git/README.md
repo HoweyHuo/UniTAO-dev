@@ -36,9 +36,9 @@ both sides use `"folder": "infra/catalog"`, so the vDS lives under that folder o
 
 ```
 infra/catalog/
-  manifest.json, manifest.sig             # signed by siteA: lastSeq, queue and history files with their sha256
+  manifest.json, manifest.sig             # signed by siteA: lastSeq, queue batches and history parts with their sha256, history grants
   queue/<from>-<to>.jsonl.gz.enc          # incremental batches, encrypted to all recipients
-  history/<id>-<seq>-<request>.jsonl.gz.enc   # full data for one subscriber, encrypted only to it
+  history/<id>/<n>.jsonl.gz.aes           # parts of a full history; its content key is wrapped in the manifest for each grantee
   subscribers/<id>.json                   # written by siteB: request, state, cursor
 ```
 

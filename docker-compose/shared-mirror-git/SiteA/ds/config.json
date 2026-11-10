@@ -13,7 +13,7 @@
             "name": "catalog",
             "signingKeyFile": "/opt/UniTAO/keys/catalog.pem",
             "publishIntervalSec": 5,
-            "subscriberTimeoutHours": 720,
+            "subscriberTimeoutHours": 24,
             "compactIntervalHours": 24,
             "channel": {
                 "type": "git",
