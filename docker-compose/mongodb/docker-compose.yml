@@ -1,0 +1,29 @@
+# UniTAO 的 Data Service 用的 MongoDB 实例，单独一个 compose：它建立网络（默认 mongo_net），
+# shared-mirror、shared-mirror-git 等示例的 Data Service 以外部网络的方式加入，用 mongodb://mongodb:27017 访问。
+# 启动前按 README 的 Setup 手工准备 .env（root 密码、当前用户的 UID/GID）和 data 目录。
+services:
+  mongodb:
+    image: mongo:latest
+    container_name: mongodb
+    restart: always
+    # 以当前用户运行，data/ 里的数据库文件归当前用户（不设时以镜像的 mongodb 用户运行，文件归 UID 999）
+    user: "${UNITAO_UID:-999}:${UNITAO_GID:-999}"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      # 只在 data/ 为空、第一次启动时用来建 root 账号；之后改它不会改已有账号的密码
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGODB_ROOT_PASSWORD:?set MONGODB_ROOT_PASSWORD in .env}
+    volumes:
+      - ./data:/data/db
+    # 只给本机的工具用（mongosh、Compass）；UniTAO 经 Docker 网络访问，不需要这个端口
+    ports:
+      - "127.0.0.1:${MONGODB_PORT:-27017}:27017"
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    networks: [mongodb]
+
+networks:
+  mongodb:
+    name: ${UNITAO_MONGODB_NETWORK:-mongo_net}

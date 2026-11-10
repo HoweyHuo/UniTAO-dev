@@ -24,7 +24,7 @@ mkdir -p remote site-shared/ds/data site-mirror/ds/data site-shared/inv/data sit
 
 each service has a `config` directory (mounted at `/opt/UniTAO/config`) and a `data` directory (`/opt/UniTAO/data`). a Data Service keeps its `config.json`, `state.json`, `ssh/` and keys in `config`, and the channel's working files in `data` (the clone, `channel.workDir`); an Inventory Service keeps its records there (`sysdirfile`) and does not start until the directory exists.
 
-**MongoDB**: the Data Services store their tables in MongoDB, which is not part of this compose file. each site normally has its own; for the example both may use the same one: they use different databases, `smg-site-shared` and `smg-site-mirror`. the Data Services join the Docker network the MongoDB container is on, `mongo_net` by default (`UNITAO_MONGODB_NETWORK=<network>` in `.env` for another one). create both configs from their templates and fill in the endpoint as seen from that network (`mongodb://<container name>:27017`), the user and the password:
+**MongoDB**: the Data Services store their tables in MongoDB, which is not part of this compose file: start one from [`../mongodb`](../mongodb), or use one you already run. each site normally has its own; for the example both may use the same one: they use different databases, `smg-site-shared` and `smg-site-mirror`. the Data Services join the Docker network the MongoDB container is on, `mongo_net` by default (`UNITAO_MONGODB_NETWORK=<network>` in `.env` for another one). create both configs from their templates and fill in the endpoint as seen from that network (`mongodb://<container name>:27017`), the user and the password:
 
 ```
 cp site-shared/ds/config/config.template.json site-shared/ds/config/config.json
