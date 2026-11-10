@@ -336,6 +336,37 @@ func TestQueueChannel(t *testing.T) {
 	if subA.LastSeq() != 10 {
 		t.Fatalf("expect prod untouched by lab, got lastSeq %d", subA.LastSeq())
 	}
+
+	// 旧格式（version 2）的 manifest：是别的公钥签的就是冲突，不能当旧格式 Reset 掉；是自己的公钥才可以
+	oldManifest := func(folder string, signer ed25519.PrivateKey) string {
+		dir := filepath.Join(root, "apps", folder)
+		mustNoErr(t, os.MkdirAll(dir, 0o755), "mkdir "+folder)
+		pub := base64.StdEncoding.EncodeToString(signer.Public().(ed25519.PublicKey))
+		file := filepath.Join(dir, "manifest.json")
+		mustNoErr(t, os.WriteFile(file, []byte(`{"version":2,"source":"`+folder+`","publicKey":"`+pub+`","lastSeq":7}`), 0o644), "old manifest "+folder)
+		return file
+	}
+	foreignFile := oldManifest("foreign", otherKey)
+	foreign, err := Channel.NewPublisher(pubConfig(Channel.Config{Type: Channel.TypeDir, Path: root, Folder: "apps/foreign"}, recipientsFile(t, keyA)), "foreign", key, nil)
+	mustNoErr(t, err, "new publisher on a foreign old-format folder")
+	if _, err := foreign.View(); err == nil || !strings.Contains(err.Error(), "another key") {
+		t.Fatalf("expect an old-format manifest of another key reported as a conflict, got %v", err)
+	}
+	if err := foreign.Reset(0); err == nil || !strings.Contains(err.Error(), "another key") {
+		t.Fatalf("expect reset of another key's old-format manifest refused, got %v", err)
+	}
+	if raw, _ := os.ReadFile(foreignFile); !strings.Contains(string(raw), `"version":2`) {
+		t.Fatalf("expect the foreign manifest untouched, got %s", raw)
+	}
+	oldManifest("mine", key)
+	mine, err := Channel.NewPublisher(pubConfig(Channel.Config{Type: Channel.TypeDir, Path: root, Folder: "apps/mine"}, recipientsFile(t, keyA)), "mine", key, nil)
+	mustNoErr(t, err, "new publisher on its own old-format folder")
+	mineView, err := mine.View()
+	mustNoErr(t, err, "view own old-format folder")
+	if !mineView.OldFormat {
+		t.Fatalf("expect own old-format manifest detected, got %+v", mineView)
+	}
+	mustNoErr(t, mine.Reset(7), "reset own old-format manifest")
 }
 
 func gitCmd(t *testing.T, dir string, args ...string) string {
