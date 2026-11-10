@@ -10,17 +10,24 @@ needs Docker Engine with the compose plugin, usable without sudo; on a fresh Ubu
 
 ```
 cd docker-compose/mongodb
-printf 'UNITAO_UID=%s\nUNITAO_GID=%s\n' "$(id -u)" "$(id -g)" > .env   # MongoDB runs as you, its files in data/ are yours
-echo 'MONGODB_ROOT_PASSWORD=<choose a password>' >> .env
-mkdir -p data                     # bind-mount source: create it yourself, docker would create it owned by root
-docker compose up -d --wait
+./setup.sh
 ```
 
- - the root account (`root` / `MONGODB_ROOT_PASSWORD`) is created only on the first start, while `data/` is empty. changing the password in `.env` later changes nothing; change it in MongoDB (`db.changeUserPassword`).
+it writes `.env` (an existing one is kept), creates `data/`, starts MongoDB, waits until it is healthy and prints how the Data Services connect. it asks for the root password; press enter (or run it non-interactively) to generate one. if a container named `mongodb` already runs on the host, it stops: use that MongoDB instead.
+
+`docker compose` reads `.env` from this directory by itself; variables set in the shell take precedence. `docker compose config` shows the values in effect (including the password).
+
+| variable | default | |
+|---|---|---|
+| `MONGODB_ROOT_PASSWORD` | required | password of `root` |
+| `UNITAO_UID` / `UNITAO_GID` | `999` | MongoDB runs as this user; `setup.sh` sets yours, so the files in `data/` are yours |
+| `MONGODB_PORT` | `27017` | port on `127.0.0.1` for tools on the host (`mongosh`, Compass); `setup.sh` takes the next free one if 27017 is taken. UniTAO goes through the Docker network |
+| `UNITAO_MONGODB_NETWORK` | `mongo_net` | network the Data Services join; set the same in their `.env`. a network of that name must not exist yet: compose creates it and refuses one it did not create |
+
+ - the root account is created only on the first start, while `data/` is empty. changing `MONGODB_ROOT_PASSWORD` later changes nothing; change it in MongoDB (`db.changeUserPassword`).
  - the databases live in `data/` and survive `docker compose down` and recreating the container.
- - port 27017 is published on `127.0.0.1` only, for tools on the host (`mongosh`, Compass); UniTAO goes through the Docker network. `MONGODB_PORT=<port>` in `.env` if 27017 is taken.
- - `UNITAO_MONGODB_NETWORK=<network>` in `.env` names the network differently (set the same in the Data Services' `.env`). a network of that name must not exist yet: compose creates it and refuses one it did not create.
- - `.env` holds the password and is ignored by git, like `data/`.
+ - `.env` holds the password (mode 600) and is ignored by git, like `data/`.
+ - the compose project is named `unitao-mongodb`, not after the directory, so another compose directory called `mongodb` is not mistaken for this project.
 
 ## A user per Data Service
 
