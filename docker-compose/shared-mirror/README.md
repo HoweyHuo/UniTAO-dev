@@ -2,6 +2,8 @@
 
 two isolated networks (`site-shared`, `site-mirror`), each with its own Data Service and Inventory Service. site-shared publishes `shared/catalog`; site-mirror keeps `mirrored/catalog`. the only path between them is the `./exchange` directory (a `dir` Communication Channel); with a `git` channel it would be a repository instead, see [`shared-mirror-git`](../shared-mirror-git).
 
+needs Docker Engine with the compose plugin, usable without sudo; on a fresh Ubuntu host `sudo ../docker-deploy.sh` installs it and adds you to group `docker`. where docker.com is unreachable (e.g. in China) it installs from a domestic mirror and sets registry mirrors for Docker Hub by itself.
+
 the image must contain the vDS feature; until CI publishes it, build it locally (or set `UNITAO_IMAGE` to another tag for `docker compose`, and `IMAGE` below):
 
 ```
@@ -22,7 +24,7 @@ mkdir -p exchange site-shared/ds/data site-mirror/ds/data site-shared/inv/data s
 
 each service has a `config` directory (mounted at `/opt/UniTAO/config`) and a `data` directory (`/opt/UniTAO/data`). a Data Service keeps its `config.json`, `state.json`, `ssh/` and keys in `config`, and the channel's working files in `data` (none for a `dir` channel); an Inventory Service keeps its records there (`sysdirfile`) and does not start until the directory exists.
 
-**MongoDB**: the Data Services store their tables in MongoDB, which is not part of this compose file. each site normally has its own; for the example both may use the same one: they use different databases, `sm-site-shared` and `sm-site-mirror`. the Data Services join the Docker network the MongoDB container is on, `mongo_net` by default (`UNITAO_MONGODB_NETWORK=<network>` in `.env` for another one). create both configs from their templates and fill in the endpoint as seen from that network (`mongodb://<container name>:27017`), the user and the password:
+**MongoDB**: the Data Services store their tables in MongoDB, which is not part of this compose file: start one from [`../mongodb`](../mongodb), or use one you already run. each site normally has its own; for the example both may use the same one: they use different databases, `sm-site-shared` and `sm-site-mirror`. the Data Services join the Docker network the MongoDB container is on, `mongo_net` by default (`UNITAO_MONGODB_NETWORK=<network>` in `.env` for another one). create both configs from their templates and fill in the endpoint as seen from that network (`mongodb://<container name>:27017`), the user and the password:
 
 ```
 cp site-shared/ds/config/config.template.json site-shared/ds/config/config.json

@@ -19,3 +19,6 @@ docker-compose/shared-mirror*/site-*/*/data/
 docker-compose/shared-mirror*/.env
 docker-compose/shared-mirror/exchange/
 docker-compose/shared-mirror-git/remote/
+# mongodb template: database files and .env (root password)
+docker-compose/mongodb/data/
+docker-compose/mongodb/.env
