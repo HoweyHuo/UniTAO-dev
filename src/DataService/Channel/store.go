@@ -65,6 +65,24 @@ var oldFormatDirs = []string{"snapshots", "segments"}
 // errOldFormat 表示通道上是旧格式的 manifest。
 var errOldFormat = errors.New("channel holds an old-format manifest")
 
+// oldFormatError 是 errOldFormat 的具体错误，带着旧 manifest 声明的签名公钥指纹（读不出公钥时为空）。
+// 各版本的 manifest 都有 publicKey 字段：publisher 据此判断旧格式是不是自己发布的，不是就拒绝 Reset。
+type oldFormatError struct {
+	fingerprint string
+}
+
+func (e *oldFormatError) Error() string { return errOldFormat.Error() }
+func (e *oldFormatError) Unwrap() error { return errOldFormat }
+
+// publicKeyFingerprint 返回 base64 编码的 ed25519 公钥的指纹，不是合法公钥时返回空。
+func publicKeyFingerprint(encoded string) string {
+	raw, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil || len(raw) != ed25519.PublicKeySize {
+		return ""
+	}
+	return Fingerprint(ed25519.PublicKey(raw))
+}
+
 // FileRef 是 manifest 里的一个 queue batch。
 type FileRef struct {
 	From      uint64 `json:"from"`
@@ -248,12 +266,19 @@ func (s *fileStore) readManifest(trusted string) (*Manifest, error) {
 		}
 		return nil, err
 	}
+	header := struct {
+		Version   int    `json:"version"`
+		PublicKey string `json:"publicKey"`
+	}{}
+	if err := json.Unmarshal(data, &header); err != nil {
+		return nil, fmt.Errorf("invalid manifest in [%s], Error:%s", s.folder, err)
+	}
+	if header.Version != manifestVersion {
+		return nil, &oldFormatError{fingerprint: publicKeyFingerprint(header.PublicKey)}
+	}
 	m := Manifest{}
 	if err := json.Unmarshal(data, &m); err != nil {
 		return nil, fmt.Errorf("invalid manifest in [%s], Error:%s", s.folder, err)
-	}
-	if m.Version != manifestVersion {
-		return nil, errOldFormat
 	}
 	if m.Source != s.source {
 		return nil, fmt.Errorf("manifest in [%s] belongs to source [%s], expect [%s]", s.folder, m.Source, s.source)
@@ -309,21 +334,30 @@ func (s *fileStore) newManifest(lastSeq uint64) *Manifest {
 	}
 }
 
-// loadOwnManifest 读取自己发布过的 manifest；不存在时新建。已存在但公钥不同说明同名来源冲突。
-// 旧格式返回 errOldFormat。
+// loadOwnManifest 读取自己发布过的 manifest；不存在时新建。已存在但公钥不同说明同名来源冲突，拒绝接管。
+// 旧格式且是自己的公钥（或读不出公钥）时返回 errOldFormat，可以 Reset；旧格式但是别的公钥同样是冲突，
+// 不能当作旧格式 Reset 掉别人的通道。
 func (s *fileStore) loadOwnManifest() (*Manifest, bool, error) {
-	pub := s.signer.Public().(ed25519.PublicKey)
+	own := Fingerprint(s.signer.Public().(ed25519.PublicKey))
 	m, err := s.readManifest("")
 	if err != nil {
-		if errors.Is(err, ErrNotPublished) {
+		var old *oldFormatError
+		switch {
+		case errors.Is(err, ErrNotPublished):
 			return s.newManifest(0), false, nil
+		case errors.As(err, &old) && old.fingerprint != "" && old.fingerprint != own:
+			return nil, false, s.ownerConflict(old.fingerprint)
 		}
 		return nil, false, err
 	}
-	if m.Fingerprint != Fingerprint(pub) {
-		return nil, false, fmt.Errorf("channel folder [%s] already holds source [%s] signed by another key [%s], refuse to overwrite", s.folder, s.source, m.Fingerprint)
+	if m.Fingerprint != own {
+		return nil, false, s.ownerConflict(m.Fingerprint)
 	}
 	return m, true, nil
+}
+
+func (s *fileStore) ownerConflict(fingerprint string) error {
+	return fmt.Errorf("channel folder [%s] already holds source [%s] signed by another key [%s], refuse to overwrite", s.folder, s.source, fingerprint)
 }
 
 func (s *fileStore) encode(plain []byte, recipients []*ecdh.PublicKey) ([]byte, error) {
