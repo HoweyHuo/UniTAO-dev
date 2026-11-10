@@ -45,8 +45,9 @@ done
 port_free() { ! ss -ltnH "sport = :$1" 2>/dev/null | grep -q .; }
 free_port() { local port=$1; while ! port_free "$port"; do port=$((port + 1)); done; echo "$port"; }
 secret() { openssl rand -base64 24 | tr -d '/+='; }
-has() { grep -q "^$1=" .env; }
-add() { echo "$1=$2" >> .env; echo "== .env: set $1"; }
+# 空值（KEY=）也算缺：compose 不再要求这些变量，空着的密码要在这里补上
+has() { grep -q "^$1=." .env; }
+add() { sed -i "/^$1=$/d" .env; echo "$1=$2" >> .env; echo "== .env: set $1"; }
 
 # root 密码要拼进 mongo-express 的连接 URL，镜像不做编码，所以只允许 URL 安全的字符
 root_password() {

@@ -13,8 +13,9 @@ services:
     user: "${UNITAO_UID:-999}:${UNITAO_GID:-999}"
     environment:
       MONGO_INITDB_ROOT_USERNAME: root
-      # 只在 data/ 为空、第一次启动时用来建 root 账号；之后改它不会改已有账号的密码
-      MONGO_INITDB_ROOT_PASSWORD: ${MONGODB_ROOT_PASSWORD:?set MONGODB_ROOT_PASSWORD in .env}
+      # 只在 data/ 为空、第一次启动时用来建 root 账号；之后改它不会改已有账号的密码。
+      # 密码都不用 ${VAR:?}：那样连 down / ps / logs 也要先有 .env。空着时镜像的入口脚本报错退出，不会无密码启动
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGODB_ROOT_PASSWORD:-}
     volumes:
       - ./data:/data/db
     # 只给本机的工具用（mongosh、Compass）；UniTAO 经 Docker 网络访问，不需要这个端口
@@ -33,14 +34,27 @@ services:
     container_name: mongo-express
     restart: always
     environment:
-      ME_CONFIG_MONGODB_URL: mongodb://root:${MONGODB_ROOT_PASSWORD}@mongodb:27017/
+      ME_CONFIG_MONGODB_URL: mongodb://root:${MONGODB_ROOT_PASSWORD:-}@mongodb:27017/
       ME_CONFIG_MONGODB_ENABLE_ADMIN: "true"
       # 网页登录（basic auth）
       ME_CONFIG_BASICAUTH: "true"
       ME_CONFIG_BASICAUTH_USERNAME: ${MONGO_EXPRESS_USER:-admin}
-      ME_CONFIG_BASICAUTH_PASSWORD: ${MONGO_EXPRESS_PASSWORD:?set MONGO_EXPRESS_PASSWORD in .env}
-      ME_CONFIG_SITE_SESSIONSECRET: ${MONGO_EXPRESS_SECRET:?set MONGO_EXPRESS_SECRET in .env}
-      ME_CONFIG_SITE_COOKIESECRET: ${MONGO_EXPRESS_SECRET:?set MONGO_EXPRESS_SECRET in .env}
+      ME_CONFIG_BASICAUTH_PASSWORD: ${MONGO_EXPRESS_PASSWORD:-}
+      ME_CONFIG_SITE_SESSIONSECRET: ${MONGO_EXPRESS_SECRET:-}
+      ME_CONFIG_SITE_COOKIESECRET: ${MONGO_EXPRESS_SECRET:-}
+    # 网页登录密码为空时 mongo-express 会用默认的 admin / pass，所以先检查，空着就报错退出（原入口是 /docker-entrypoint.sh mongo-express）
+    entrypoint:
+      - /sbin/tini
+      - --
+      - sh
+      - -c
+      - |
+        if [ -z "$$ME_CONFIG_BASICAUTH_PASSWORD" ] || [ -z "$$ME_CONFIG_SITE_SESSIONSECRET" ] ||
+           [ "$${ME_CONFIG_MONGODB_URL#mongodb://root:@}" != "$$ME_CONFIG_MONGODB_URL" ]; then
+          echo "mongo-express: a password in .env is empty (MONGODB_ROOT_PASSWORD, MONGO_EXPRESS_PASSWORD, MONGO_EXPRESS_SECRET), run ./setup.sh" >&2
+          exit 1
+        fi
+        exec /docker-entrypoint.sh mongo-express
     # 内网的其它机器也能打开（凭网页登录）；只想本机用就改成 "127.0.0.1:${MONGO_EXPRESS_PORT:-8081}:8081"
     ports:
       - "${MONGO_EXPRESS_PORT:-8081}:8081"
