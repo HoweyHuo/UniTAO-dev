@@ -13,7 +13,7 @@ import (
 
 const (
 	DefaultPublishIntervalSec     = 60
-	DefaultSubscriberTimeoutHours = 720
+	DefaultSubscriberTimeoutHours = 24
 	DefaultCompactIntervalHours   = 24
 	MaxBatchChanges               = 1000
 

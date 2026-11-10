@@ -125,7 +125,7 @@ DN2e4U7yVl5OaTpc4+83AeFdDtHFNXZBmLa241bd9zA=
 | `folder` | 在仓库里的目录，可多级，缺省等于 `name` |
 | `workDir` | 本地克隆的位置。同一 DS 内 repo + branch 相同的 vDS 可以共用一个 workDir |
 | `publishIntervalSec` | 发布周期，默认 60 |
-| `subscriberTimeoutHours` | 订阅方超过多久不处理就判定死亡，默认 720 |
+| `subscriberTimeoutHours` | 订阅方超过多久不处理就判定死亡，默认 24 |
 | `compactIntervalHours` | 压缩 git 历史的间隔，默认 24 |
 
 compose 里把签名密钥卷只读挂进去：

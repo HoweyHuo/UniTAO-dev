@@ -92,7 +92,7 @@ type SharedVdsConfig struct {
 	Name               string `json:"name"`
 	SigningKeyFile     string `json:"signingKeyFile"`
 	PublishIntervalSec int    `json:"publishIntervalSec"`
-	// SubscriberTimeoutHours：subscriber 的第一个未处理 batch 发布超过这么久，判定它死亡（默认 720）
+	// SubscriberTimeoutHours：subscriber 的第一个未处理 batch 发布超过这么久，判定它死亡（默认 24）
 	SubscriberTimeoutHours int `json:"subscriberTimeoutHours"`
 	// CompactIntervalHours：压缩通道历史的最小间隔（默认 24，只对 git 通道有效）
 	CompactIntervalHours int            `json:"compactIntervalHours"`
