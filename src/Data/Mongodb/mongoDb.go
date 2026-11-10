@@ -50,7 +50,29 @@ const (
 
 	IdKey   = "_id_"
 	IdxName = "name"
+
+	// ObjectIdField 是 MongoDB 给每个文档加的内部主键。它不属于 Record：读取时不返回，写入时忽略。
+	ObjectIdField = "_id"
 )
+
+// withoutObjectId 返回去掉顶层 _id 的数据（浅拷贝，不改调用方的 map）。客户端可能把以前读到的 _id 原样写回，
+// 保留它会让 ReplaceOne 因为改动不可变的 _id 而失败，或在新建时把字符串当作主键。
+func withoutObjectId(data interface{}) interface{} {
+	record, ok := data.(map[string]interface{})
+	if !ok {
+		return data
+	}
+	if _, ok := record[ObjectIdField]; !ok {
+		return data
+	}
+	copied := make(map[string]interface{}, len(record))
+	for key, value := range record {
+		if key != ObjectIdField {
+			copied[key] = value
+		}
+	}
+	return copied
+}
 
 type mongoDb struct {
 	logger *log.Logger
@@ -214,7 +236,8 @@ func (db *mongoDb) find(queryArgs map[string]interface{}) (*mongo.Cursor, error)
 			},
 		}
 	}
-	return table.Find(context.TODO(), filter)
+	// 不返回 MongoDB 的内部主键 _id
+	return table.Find(context.TODO(), filter, options.Find().SetProjection(bson.M{ObjectIdField: 0}))
 }
 
 func (db *mongoDb) Get(queryArgs map[string]interface{}) ([]map[string]interface{}, error) {
@@ -255,7 +278,7 @@ func (db *mongoDb) Create(tableName string, data interface{}) error {
 	if table == nil {
 		return fmt.Errorf("table [%s] does not exists", tableName)
 	}
-	_, err := table.InsertOne(context.TODO(), data)
+	_, err := table.InsertOne(context.TODO(), withoutObjectId(data))
 	if err != nil {
 		return err
 	}
@@ -296,11 +319,12 @@ func (db *mongoDb) Update(table string, keys map[string]interface{}, data interf
 	if err != nil {
 		return nil, err
 	}
-	err = db.Create(table, patchData[0])
+	// 按主键替换原文档（以前用 InsertOne 写回，会撞上原文档的 _id）
+	err = db.Replace(table, map[string]interface{}{Record.DataType: dataType, Record.DataId: dataId}, patchData[0])
 	if err != nil {
 		return nil, err
 	}
-	return nil, nil
+	return patchData[0], nil
 }
 
 func (db *mongoDb) Replace(tableName string, keys map[string]interface{}, data interface{}) error {
@@ -311,7 +335,7 @@ func (db *mongoDb) Replace(tableName string, keys map[string]interface{}, data i
 		return fmt.Errorf("table [%s] does not exists", tableName)
 	}
 	opts := options.Replace().SetUpsert(true)
-	_, err := table.ReplaceOne(context.TODO(), keys, data, opts)
+	_, err := table.ReplaceOne(context.TODO(), keys, withoutObjectId(data), opts)
 	if err != nil {
 		return fmt.Errorf("faled to perform replace. Error: %s", err)
 	}
