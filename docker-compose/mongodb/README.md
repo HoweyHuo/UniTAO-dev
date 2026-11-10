@@ -17,6 +17,8 @@ it writes `.env` (an existing one keeps its values; missing ones are added, e.g.
 
 `docker compose` reads `.env` from this directory by itself; variables set in the shell take precedence. `docker compose config` shows the values in effect (including the password).
 
+`docker compose down`, `ps` and `logs` work without `.env` too. `up` without the passwords does not start an open instance: MongoDB exits with `missing … MONGO_INITDB_ROOT_PASSWORD`, and mongo-express (which would otherwise fall back to the login `admin` / `pass`) exits with `a password in .env is empty`. run `./setup.sh` to fill them in; it also fills in values left empty (`KEY=`).
+
 | variable | default | |
 |---|---|---|
 | `MONGODB_ROOT_PASSWORD` | required | password of `root`. only letters, digits and `._~-`: mongo-express puts it into a connection URL as is |
