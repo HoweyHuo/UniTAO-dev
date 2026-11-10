@@ -1,7 +1,7 @@
 {
     "database": {
-        "type": "dynamodb",
-        "dynamodb": { "region": "us-west-2", "endpoint": "http://dynamodb:8000" }
+        "type": "mongodb",
+        "mongodb": { "endpoint": "mongodb://mongodb:27017", "database": "SiteA", "user": "root", "password": "example" }
     },
     "table": { "data": "SiteA" },
     "http": { "type": "http", "dns": "site-a-ds", "port": "80", "id": "SiteA", "headers": {} },

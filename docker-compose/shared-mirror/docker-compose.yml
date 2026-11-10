@@ -2,11 +2,22 @@
 # 先运行 ./setup.sh 生成签名密钥、SiteB 的配置、.env（当前用户的 UID/GID）。
 # UniTAO 容器以该用户运行，写出的 exchange、state.json、日志都归当前用户，可以直接删除；./clean.sh 清理全部生成文件。
 services:
-  dynamodb:
-    image: amazon/dynamodb-local:latest
-    container_name: sm-dynamodb
+  # 两个 site 共用一个 MongoDB，各用自己的 database（SiteA / SiteB）。数据放在 tmpfs 里，容器删除即清空。
+  # 账号只用于这个演示；MongoDB 后端总是带账号认证连接，所以要设 root 账号。
+  mongodb:
+    image: mongo:latest
+    container_name: sm-mongodb
     restart: always
-    command: "-jar DynamoDBLocal.jar -inMemory -sharedDb"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: example
+    tmpfs:
+      - /data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
     networks: [siteA, siteB]
 
   site-a-ds:
@@ -23,7 +34,9 @@ services:
       - ./logs:/opt/UniTAO/log
     ports:
       - "8011:80"
-    depends_on: [dynamodb]
+    depends_on:
+      mongodb:
+        condition: service_healthy
     networks: [siteA]
     command: "DataService -id SiteA -config /opt/UniTAO/config/config.json -log /opt/UniTAO/log"
 
@@ -57,7 +70,9 @@ services:
       - ./logs:/opt/UniTAO/log
     ports:
       - "8021:80"
-    depends_on: [dynamodb]
+    depends_on:
+      mongodb:
+        condition: service_healthy
     networks: [siteB]
     command: "DataService -id SiteB -config /opt/UniTAO/config/config.json -log /opt/UniTAO/log"
 

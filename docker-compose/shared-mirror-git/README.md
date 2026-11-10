@@ -80,4 +80,6 @@ replace `channel.repo` on both sides, drop the `./remote` mount, and give each D
 
 the image built from `docker/unitao/dockerfile` contains `git` and `openssh-client`.
 
+both Data Services store their tables in one MongoDB container (`smg-mongodb`, databases `SiteA` and `SiteB`, user `root` / `example`, demo only). its data lives on a tmpfs, so removing the container empties it; to look inside: `docker exec -it smg-mongodb mongosh -u root -p example SiteA`. the Inventory Services keep their few records in files under `Site*/inv/data`.
+
 `keys/`, `remote/`, `work/`, `SiteB/ds/config.json`, `.env`, every `state.json`, the Inventory data and the logs are generated and ignored by git. `./clean.sh` stops the example and removes all of them.
