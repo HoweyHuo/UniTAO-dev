@@ -1,11 +1,11 @@
 {
     "database": {
         "type": "mongodb",
-        "mongodb": { "endpoint": "mongodb://mongodb:27017", "database": "SiteA", "user": "root", "password": "example" }
+        "mongodb": { "endpoint": "<mongodb endpoint, e.g. mongodb://mongodb:27017>", "database": "smg_SiteA", "user": "<mongodb user>", "password": "<mongodb password>" }
     },
     "table": { "data": "SiteA" },
     "http": { "type": "http", "dns": "site-a-ds", "port": "80", "id": "SiteA", "headers": {} },
-    "ds": { "id": "SiteA", "urls": ["http://site-a-ds", "http://localhost:8011"] },
+    "ds": { "id": "SiteA", "urls": ["http://site-a-ds", "http://localhost:8031"] },
     "inventory": { "url": "http://site-a-inv" },
     "vds": {
         "local": {},
@@ -16,8 +16,11 @@
             "subscriberTimeoutHours": 24,
             "compactIntervalHours": 24,
             "channel": {
-                "type": "dir",
-                "path": "/opt/UniTAO/exchange",
+                "type": "git",
+                "repo": "file:///opt/UniTAO/remote/exchange.git",
+                "branch": "main",
+                "folder": "infra/catalog",
+                "workDir": "/opt/UniTAO/channel",
                 "encrypt": { "recipientsFile": "/opt/UniTAO/keys/recipients" }
             }
         }]

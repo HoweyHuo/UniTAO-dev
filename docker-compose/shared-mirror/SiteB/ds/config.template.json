@@ -1,7 +1,7 @@
 {
     "database": {
         "type": "mongodb",
-        "mongodb": { "endpoint": "mongodb://mongodb:27017", "database": "SiteB", "user": "root", "password": "example" }
+        "mongodb": { "endpoint": "<mongodb endpoint, e.g. mongodb://mongodb:27017>", "database": "sm_SiteB", "user": "<mongodb user>", "password": "<mongodb password>" }
     },
     "table": { "data": "SiteB" },
     "http": { "type": "http", "dns": "site-b-ds", "port": "80", "id": "SiteB", "headers": {} },
