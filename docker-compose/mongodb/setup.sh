@@ -22,9 +22,9 @@
 
 # This copyright notice and license applies to all files in this directory or sub-directories, except when stated otherwise explicitly.
 
-
-# 准备并启动这个 MongoDB 实例：写 .env（UID/GID、root 密码、端口）、建 data/、docker compose up，等它就绪。
-# 可以重复运行：已有的 .env 不改；data/ 已有数据库时 root 账号保持不变。
+# 准备并启动这个 MongoDB 实例和它的 mongo-express：补全 .env、建 data/、docker compose up，等它就绪。
+# 可以重复运行：.env 里已有的值不改，只补缺的（旧版本写的 .env 会补上 mongo-express 的设置）；
+# data/ 已有数据库时 root 账号保持不变。
 #
 # 用法: ./setup.sh
 #   交互运行时询问 root 密码（直接回车则随机生成）；非交互时随机生成。密码只存在 .env 里。
@@ -32,44 +32,48 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-CONTAINER=mongodb
-
-# 本机已有名叫 mongodb 的容器（另一个 MongoDB）时不动它
-if docker container inspect "$CONTAINER" >/dev/null 2>&1; then
-    project=$(docker container inspect "$CONTAINER" --format '{{index .Config.Labels "com.docker.compose.project"}}')
-    if [ "$project" != unitao-mongodb ]; then
-        dir=$(docker container inspect "$CONTAINER" --format '{{index .Config.Labels "com.docker.compose.project.working_dir"}}')
-        echo "a container named [$CONTAINER] already runs here${dir:+ (from $dir)}: use that MongoDB instead of starting this one" >&2
-        exit 1
-    fi
-fi
+# 本机已有同名容器（另一个 MongoDB / mongo-express）时不动它
+for container in mongodb mongo-express; do
+    docker container inspect "$container" >/dev/null 2>&1 || continue
+    project=$(docker container inspect "$container" --format '{{index .Config.Labels "com.docker.compose.project"}}')
+    [ "$project" = unitao-mongodb ] && continue
+    dir=$(docker container inspect "$container" --format '{{index .Config.Labels "com.docker.compose.project.working_dir"}}')
+    echo "a container named [$container] already runs here${dir:+ (from $dir)}: use that MongoDB instead of starting this one" >&2
+    exit 1
+done
 
 port_free() { ! ss -ltnH "sport = :$1" 2>/dev/null | grep -q .; }
+free_port() { local port=$1; while ! port_free "$port"; do port=$((port + 1)); done; echo "$port"; }
+secret() { openssl rand -base64 24 | tr -d '/+='; }
+has() { grep -q "^$1=" .env; }
+add() { echo "$1=$2" >> .env; echo "== .env: set $1"; }
+
+# root 密码要拼进 mongo-express 的连接 URL，镜像不做编码，所以只允许 URL 安全的字符
+root_password() {
+    local password=
+    if [ -t 0 ]; then
+        while :; do
+            read -rsp "root password for MongoDB (empty: generate one): " password; echo >&2
+            [[ "$password" =~ ^[A-Za-z0-9._~-]*$ ]] && break
+            echo "use only letters, digits and . _ ~ - (it goes into a connection URL)" >&2
+        done
+    fi
+    if [ -n "$password" ]; then echo "$password"; else secret; fi
+}
 
 if [ -f .env ]; then
-    echo "== using the existing .env"
+    echo "== using the existing .env, adding what is missing"
 else
-    password=
-    if [ -t 0 ]; then
-        read -rsp "root password for MongoDB (empty: generate one): " password; echo
-    fi
-    if [ -z "$password" ]; then
-        password=$(openssl rand -base64 24 | tr -d '/+=')
-        echo "== generated a root password"
-    fi
-    port=27017
-    while ! port_free "$port"; do port=$((port + 1)); done
-    [ "$port" = 27017 ] || echo "== port 27017 is taken, using $port"
-    umask 077
-    {
-        echo "UNITAO_UID=$(id -u)"
-        echo "UNITAO_GID=$(id -g)"
-        echo "MONGODB_ROOT_PASSWORD=$password"
-        echo "MONGODB_PORT=$port"
-    } > .env
-    umask 022
-    echo "== wrote .env"
+    (umask 077; : > .env)
 fi
+has UNITAO_UID || add UNITAO_UID "$(id -u)"
+has UNITAO_GID || add UNITAO_GID "$(id -g)"
+has MONGODB_ROOT_PASSWORD || add MONGODB_ROOT_PASSWORD "$(root_password)"
+has MONGODB_PORT || add MONGODB_PORT "$(free_port 27017)"
+has MONGO_EXPRESS_USER || add MONGO_EXPRESS_USER admin
+has MONGO_EXPRESS_PASSWORD || add MONGO_EXPRESS_PASSWORD "$(secret)"
+has MONGO_EXPRESS_SECRET || add MONGO_EXPRESS_SECRET "$(secret)"
+has MONGO_EXPRESS_PORT || add MONGO_EXPRESS_PORT "$(free_port 8081)"
 
 # bind-mount 源目录自己建，否则 docker 会建成 root 的
 mkdir -p data
@@ -78,8 +82,8 @@ docker compose up -d --wait
 # shellcheck disable=SC1091
 . ./.env
 cat <<INFO
-== MongoDB is running
-   Data Services: join network ${UNITAO_MONGODB_NETWORK:-mongo_net}, endpoint mongodb://mongodb:27017
-   user root, password MONGODB_ROOT_PASSWORD in $(pwd)/.env
-   from this host: mongodb://127.0.0.1:${MONGODB_PORT:-27017}
+== MongoDB is running (passwords are in $(pwd)/.env)
+   Data Services: join network ${UNITAO_MONGODB_NETWORK:-mongo_net}, endpoint mongodb://mongodb:27017, user root, password MONGODB_ROOT_PASSWORD
+   from this host: mongodb://127.0.0.1:$MONGODB_PORT
+   mongo-express:  http://$(hostname -f 2>/dev/null || hostname):$MONGO_EXPRESS_PORT, user $MONGO_EXPRESS_USER, password MONGO_EXPRESS_PASSWORD
 INFO

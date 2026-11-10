@@ -1,6 +1,6 @@
 # mongodb
 
-a MongoDB instance for UniTAO's Data Services, as its own compose project. it creates the Docker network `mongo_net`; the Data Services of [`shared-mirror`](../shared-mirror) and [`shared-mirror-git`](../shared-mirror-git) join it as an external network and reach MongoDB as `mongodb://mongodb:27017`. one instance can serve several Data Services, each with its own database.
+a MongoDB instance for UniTAO's Data Services, with [mongo-express](https://github.com/mongo-express/mongo-express) as its web UI, as its own compose project. it creates the Docker network `mongo_net`; the Data Services of [`shared-mirror`](../shared-mirror) and [`shared-mirror-git`](../shared-mirror-git) join it as an external network and reach MongoDB as `mongodb://mongodb:27017`. one instance can serve several Data Services, each with its own database.
 
 skip this if you already run a MongoDB: put its container on a network and point the Data Services at it (`UNITAO_MONGODB_NETWORK`, endpoint, user and password in their configs).
 
@@ -13,21 +13,29 @@ cd docker-compose/mongodb
 ./setup.sh
 ```
 
-it writes `.env` (an existing one is kept), creates `data/`, starts MongoDB, waits until it is healthy and prints how the Data Services connect. it asks for the root password; press enter (or run it non-interactively) to generate one. if a container named `mongodb` already runs on the host, it stops: use that MongoDB instead.
+it writes `.env` (an existing one keeps its values; missing ones are added, e.g. the mongo-express settings in a `.env` from before mongo-express), creates `data/`, starts MongoDB and mongo-express, waits until both are healthy and prints how to connect. it asks for the root password; press enter (or run it non-interactively) to generate one. the other passwords are generated. if a container named `mongodb` or `mongo-express` already runs on the host, it stops: use that MongoDB instead.
 
 `docker compose` reads `.env` from this directory by itself; variables set in the shell take precedence. `docker compose config` shows the values in effect (including the password).
 
 | variable | default | |
 |---|---|---|
-| `MONGODB_ROOT_PASSWORD` | required | password of `root` |
+| `MONGODB_ROOT_PASSWORD` | required | password of `root`. only letters, digits and `._~-`: mongo-express puts it into a connection URL as is |
 | `UNITAO_UID` / `UNITAO_GID` | `999` | MongoDB runs as this user; `setup.sh` sets yours, so the files in `data/` are yours |
 | `MONGODB_PORT` | `27017` | port on `127.0.0.1` for tools on the host (`mongosh`, Compass); `setup.sh` takes the next free one if 27017 is taken. UniTAO goes through the Docker network |
 | `UNITAO_MONGODB_NETWORK` | `mongo_net` | network the Data Services join; set the same in their `.env`. a network of that name must not exist yet: compose creates it and refuses one it did not create |
+| `MONGO_EXPRESS_USER` | `admin` | login of the mongo-express web UI |
+| `MONGO_EXPRESS_PASSWORD` | required | its password |
+| `MONGO_EXPRESS_SECRET` | required | session and cookie secret of mongo-express |
+| `MONGO_EXPRESS_PORT` | `8081` | port of the web UI; `setup.sh` takes the next free one if 8081 is taken |
 
  - the root account is created only on the first start, while `data/` is empty. changing `MONGODB_ROOT_PASSWORD` later changes nothing; change it in MongoDB (`db.changeUserPassword`).
  - the databases live in `data/` and survive `docker compose down` and recreating the container.
  - `.env` holds the password (mode 600) and is ignored by git, like `data/`.
  - the compose project is named `unitao-mongodb`, not after the directory, so another compose directory called `mongodb` is not mistaken for this project.
+
+## mongo-express
+
+open `http://<host>:<MONGO_EXPRESS_PORT>` and log in with `MONGO_EXPRESS_USER` / `MONGO_EXPRESS_PASSWORD`. it connects to MongoDB as root, so it can read and change every database, including the Data Services' tables. the port is published on all interfaces so that other machines in the internal network can open it (the Inventory system runs in a protected internal network, see the main README); for this host only, change its `ports` entry to `"127.0.0.1:${MONGO_EXPRESS_PORT:-8081}:8081"`.
 
 ## A user per Data Service
 
