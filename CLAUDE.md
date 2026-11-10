@@ -308,7 +308,13 @@ go test ./test/src/DataServiceTest/...
 # 运行单个测试函数
 go test ./test/src/SchemaTest/... -run TestSchemaOps
 go test ./test/src/DataServiceTest/... -run TestDataHandler
+
+# 需要真实 DynamoDB 的测试（如 TestDynamoDbPaging：一个类型超过 1MB 时 Get / Scan 要翻页读完）
+# 起一个内存模式的 DynamoDB Local 临时容器（默认 127.0.0.1:18000），跑完删除；需要 Docker
+./scripts/test-dynamodb.sh
 ```
+
+需要真实 DynamoDB 的测试读 `UNITAO_TEST_DYNAMODB_ENDPOINT`，没设置时 skip，所以 `go test ./test/src/...` 和 `build.sh --all` 照常不依赖外部服务。指向已有的 DynamoDB Local 也可以：测试每次建一张新名字的表，结束时删掉。
 
 ### Docker
 ```bash
