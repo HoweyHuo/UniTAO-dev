@@ -4,6 +4,8 @@ a MongoDB instance for UniTAO's Data Services, as its own compose project. it cr
 
 skip this if you already run a MongoDB: put its container on a network and point the Data Services at it (`UNITAO_MONGODB_NETWORK`, endpoint, user and password in their configs).
 
+needs Docker Engine with the compose plugin, usable without sudo; on a fresh Ubuntu host `sudo ../docker-deploy.sh` installs it and adds you to group `docker`. where docker.com is unreachable (e.g. in China) it installs from a domestic mirror and sets registry mirrors for Docker Hub by itself.
+
 ## Setup
 
 ```

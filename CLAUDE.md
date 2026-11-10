@@ -204,7 +204,7 @@ test/                          # 集成测试与单元测试
 dbSchemas/                     # 数据库表 Schema 定义（DynamoDB、MongoDB）
 demo/                          # 分步演示脚本（PowerShell + Python）
 docker/                        # Docker 构建脚本：唯一的镜像 docker/unitao（发布为 unitao-dev）+ UIServer
-docker-compose/                # Docker Compose 环境配置
+docker-compose/                # Docker Compose 环境配置（模板）；docker-deploy.sh 在新的 Ubuntu 主机上安装 Docker Engine 并把用户加进 docker 组
 ui/WebServer/                  # Node.js 静态文件服务器（用于仪表盘）
 schemaVisualizer/              # Express.js Schema 可视化前端服务
 javascript/Schema/             # Schema 库的 JavaScript 移植版
