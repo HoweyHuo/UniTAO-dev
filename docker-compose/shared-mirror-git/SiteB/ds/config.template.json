@@ -11,7 +11,7 @@
         "local": {},
         "mirrored": [{
             "name": "catalog",
-            "trustedFingerprint": "__TRUSTED_FINGERPRINT__",
+            "trustedFingerprint": "<fingerprint of siteA signing key>",
             "pullIntervalSec": 10,
             "channel": {
                 "type": "git",
