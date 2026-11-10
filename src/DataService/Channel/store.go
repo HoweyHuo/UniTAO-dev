@@ -23,23 +23,40 @@ import (
 
 // 通道目录布局（dir 与 git 通道相同），<folder> 为 vDS 在通道上的目录：
 //
-//	<folder>/manifest.json                      publisher 写：公钥、lastSeq、queue 与 history 列表及各文件 sha256
+//	<folder>/manifest.json                      publisher 写：公钥、lastSeq、queue 与 history 列表、各文件 sha256、history 授权
 //	<folder>/manifest.sig                       manifest.json 的 ed25519 签名（base64）
 //	<folder>/queue/<from>-<to>.jsonl.gz.enc     增量 batch，对所有 subscriber 加密
-//	<folder>/history/<id>-<seq>-<req>.jsonl.gz.enc   给一个 subscriber 的全量 batch，只对它加密
+//	<folder>/history/<hid>/<n>.jsonl.gz.aes     全量 history 的第 n 个分片，用这份 history 的内容密钥加密
 //	<folder>/subscribers/<id>.json              subscriber 自己写的进度（不在 manifest 中）
 //
-// manifest 签名覆盖 queue 与 history 文件的 sha256，因此只需校验 manifest 签名与文件摘要。
+// manifest 签名覆盖 queue 与 history 分片的 sha256 以及 history 的授权，因此只需校验 manifest 签名与文件摘要。
+// history 的内容密钥在 manifest 的 grants 里为每个被授权的 subscriber 各包装一份：给新订阅方复用已有的
+// history 只需要在 manifest 里加一条授权，不重写分片。
 const (
 	manifestFile    = "manifest.json"
 	manifestSigFile = "manifest.sig"
 	queueDir        = "queue"
 	historyDir      = "history"
 	subscriberDir   = "subscribers"
-	manifestVersion = 2
+	manifestVersion = 3
 	fileSuffix      = ".jsonl.gz.enc"
+	partSuffix      = ".jsonl.gz.aes"
 	writeRetry      = 5
+	partAADPrefix   = "UniTAO-history-v1"
+
+	// DefaultHistoryPartBytes 是 history 分片的目标大小（gzip 之后）。远低于 GitHub 等托管方的单文件上限（100MB）。
+	DefaultHistoryPartBytes = 32 << 20
 )
+
+// historyPartBytes 是当前的分片目标大小，测试可以用 SetHistoryPartBytes 调小。
+var historyPartBytes = DefaultHistoryPartBytes
+
+// SetHistoryPartBytes 替换 history 分片的目标大小（测试用），返回恢复原值的函数。
+func SetHistoryPartBytes(n int) func() {
+	old := historyPartBytes
+	historyPartBytes = n
+	return func() { historyPartBytes = old }
+}
 
 // 旧格式（version 1）留下的目录，Reset 时删除
 var oldFormatDirs = []string{"snapshots", "segments"}
@@ -47,35 +64,60 @@ var oldFormatDirs = []string{"snapshots", "segments"}
 // errOldFormat 表示通道上是旧格式的 manifest。
 var errOldFormat = errors.New("channel holds an old-format manifest")
 
+// FileRef 是 manifest 里的一个 queue batch。
 type FileRef struct {
-	From       uint64 `json:"from,omitempty"`
-	To         uint64 `json:"to,omitempty"`
-	Seq        uint64 `json:"seq,omitempty"`
-	Subscriber string `json:"subscriber,omitempty"`
-	Request    string `json:"request,omitempty"`
-	File       string `json:"file"`
-	Sha256     string `json:"sha256"`
-	Published  string `json:"published"`
+	From      uint64 `json:"from"`
+	To        uint64 `json:"to"`
+	File      string `json:"file"`
+	Sha256    string `json:"sha256"`
+	Published string `json:"published"`
+}
+
+// HistoryRef 是 manifest 里的一份 history：seq 时刻的全量，切成若干分片，授权给若干订阅请求。
+type HistoryRef struct {
+	Id        string     `json:"id"`
+	Seq       uint64     `json:"seq"`
+	Records   int        `json:"records"`
+	Parts     []PartRef  `json:"parts"`
+	Published string     `json:"published"`
+	Grants    []GrantRef `json:"grants"`
+}
+
+// PartRef 是 history 的一个分片。
+type PartRef struct {
+	File   string `json:"file"`
+	Sha256 string `json:"sha256"`
+	Size   int    `json:"size"`
+}
+
+// GrantRef 是一条授权：history 的内容密钥为 subscriber 包装的一份（同 Encrypt 的接收方格式）。
+type GrantRef struct {
+	Subscriber   string `json:"subscriber"`
+	Request      string `json:"request"`
+	EphemeralKey string `json:"epk"`
+	WrappedKey   string `json:"key"`
+	Granted      string `json:"granted"`
+}
+
+// Grant 返回给 subscriber 这个订阅请求的授权，没有时返回 nil。
+func (h *HistoryRef) Grant(subscriber string, request string) *GrantRef {
+	for idx := range h.Grants {
+		if h.Grants[idx].Subscriber == subscriber && h.Grants[idx].Request == request {
+			return &h.Grants[idx]
+		}
+	}
+	return nil
 }
 
 type Manifest struct {
-	Version     int       `json:"version"`
-	Source      string    `json:"source"`
-	PublicKey   string    `json:"publicKey"`
-	Fingerprint string    `json:"fingerprint"`
-	LastSeq     uint64    `json:"lastSeq"`
-	Queue       []FileRef `json:"queue"`
-	Histories   []FileRef `json:"histories"`
-	Updated     string    `json:"updated"`
-}
-
-type historyHeader struct {
-	Seq        uint64 `json:"seq"`
-	Source     string `json:"source"`
-	Subscriber string `json:"subscriber"`
-	Request    string `json:"request"`
-	Ts         string `json:"ts"`
-	Count      int    `json:"count"`
+	Version     int          `json:"version"`
+	Source      string       `json:"source"`
+	PublicKey   string       `json:"publicKey"`
+	Fingerprint string       `json:"fingerprint"`
+	LastSeq     uint64       `json:"lastSeq"`
+	Queue       []FileRef    `json:"queue"`
+	Histories   []HistoryRef `json:"histories"`
+	Updated     string       `json:"updated"`
 }
 
 // backend 隔离存储方式：dir 直接读写目录；git 在读之前拉取、写之后提交推送。
@@ -118,6 +160,9 @@ type fileStore struct {
 	// publisher
 	signer     ed25519.PrivateKey
 	recipients map[string]*ecdh.PublicKey // subscriber id -> 公钥
+	// 本进程打包的 history 的内容密钥（history id -> 密钥），只在内存里；重启后旧 history 不能再增加授权
+	keyLock     sync.Mutex
+	historyKeys map[string][]byte
 	// subscriber
 	identity *ecdh.PrivateKey
 	selfId   string
@@ -259,7 +304,7 @@ func (s *fileStore) newManifest(lastSeq uint64) *Manifest {
 		Fingerprint: Fingerprint(pub),
 		LastSeq:     lastSeq,
 		Queue:       []FileRef{},
-		Histories:   []FileRef{},
+		Histories:   []HistoryRef{},
 	}
 }
 
@@ -393,7 +438,7 @@ func (s *fileStore) View() (*View, error) {
 	if err := s.be.Pull(); err != nil {
 		return nil, err
 	}
-	view := &View{Queue: []FileRef{}, Histories: []FileRef{}}
+	view := &View{Queue: []FileRef{}, Histories: []HistoryRef{}}
 	m, published, err := s.loadOwnManifest()
 	switch {
 	case errors.Is(err, errOldFormat):
@@ -472,12 +517,133 @@ func (s *fileStore) Publish(changes []Change) error {
 	})
 }
 
-func (s *fileStore) PublishHistory(subscriber string, request string, h *History) error {
-	recipient, ok := s.recipients[subscriber]
-	if !ok {
-		return fmt.Errorf("subscriber [%s] is not in the recipients list", subscriber)
+// encodedPart 是加密好、待写入通道的 history 分片。
+type encodedPart struct {
+	name string
+	data []byte
+}
+
+func partAAD(source string, id string, index int) []byte {
+	return []byte(fmt.Sprintf("%s/%s/%s/%d", partAADPrefix, source, id, index))
+}
+
+// encodeHistory 把记录写成 JSONL、gzip，按压缩后的大小切片（达到 historyPartBytes 就开始新的分片，
+// deflate 有内部缓冲，分片会略大于目标），每片用内容密钥单独加密。没有记录时也有一个（空的）分片。
+func (s *fileStore) encodeHistory(id string, key []byte, records []map[string]interface{}) ([]encodedPart, error) {
+	parts := []encodedPart{}
+	var buf bytes.Buffer
+	var zw *gzip.Writer
+	pending := 0
+	flush := func() error {
+		if err := zw.Close(); err != nil {
+			return err
+		}
+		index := len(parts) + 1
+		sealed, err := sealPart(key, partAAD(s.source, id, index), buf.Bytes())
+		if err != nil {
+			return err
+		}
+		parts = append(parts, encodedPart{name: fmt.Sprintf("%s/%s/%04d%s", historyDir, id, index, partSuffix), data: sealed})
+		buf.Reset()
+		zw = nil
+		pending = 0
+		return nil
 	}
-	return s.write(fmt.Sprintf("%s: history seq %d for subscriber %s", s.folder, h.Seq, shortId(subscriber)), func() (bool, error) {
+	for _, record := range records {
+		if zw == nil {
+			zw = gzip.NewWriter(&buf)
+		}
+		line, err := json.Marshal(record)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := zw.Write(append(line, '\n')); err != nil {
+			return nil, err
+		}
+		pending++
+		if buf.Len() >= historyPartBytes {
+			if err := flush(); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if pending > 0 || len(parts) == 0 {
+		if zw == nil {
+			zw = gzip.NewWriter(&buf)
+		}
+		if err := flush(); err != nil {
+			return nil, err
+		}
+	}
+	return parts, nil
+}
+
+// makeGrants 为每个授权包装内容密钥；subscriber 必须在白名单里。
+func (s *fileStore) makeGrants(key []byte, grants []HistoryGrant) ([]GrantRef, error) {
+	result := []GrantRef{}
+	for _, grant := range grants {
+		recipient, ok := s.recipients[grant.Subscriber]
+		if !ok {
+			return nil, fmt.Errorf("subscriber [%s] is not in the recipients list", grant.Subscriber)
+		}
+		if grant.Request == "" {
+			return nil, fmt.Errorf("grant for subscriber [%s] has no request id", grant.Subscriber)
+		}
+		wrapped, err := wrapFileKey(key, recipient)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, GrantRef{
+			Subscriber:   grant.Subscriber,
+			Request:      grant.Request,
+			EphemeralKey: wrapped.EphemeralKey,
+			WrappedKey:   wrapped.WrappedKey,
+			Granted:      now(),
+		})
+	}
+	return result, nil
+}
+
+func (s *fileStore) historyKey(id string) []byte {
+	s.keyLock.Lock()
+	defer s.keyLock.Unlock()
+	return s.historyKeys[id]
+}
+
+func (s *fileStore) setHistoryKey(id string, key []byte) {
+	s.keyLock.Lock()
+	defer s.keyLock.Unlock()
+	if key == nil {
+		delete(s.historyKeys, id)
+		return
+	}
+	if s.historyKeys == nil {
+		s.historyKeys = map[string][]byte{}
+	}
+	s.historyKeys[id] = key
+}
+
+func (s *fileStore) PublishHistory(h *History, grants []HistoryGrant) (*HistoryRef, error) {
+	if len(grants) == 0 {
+		return nil, errors.New("a history needs at least one grant")
+	}
+	key, err := newFileKey()
+	if err != nil {
+		return nil, err
+	}
+	refs, err := s.makeGrants(key, grants)
+	if err != nil {
+		return nil, err
+	}
+	id := NewRequestId()
+	// 压缩、加密在锁外做一次；推送被拒重做时只重写文件
+	parts, err := s.encodeHistory(id, key, h.Records)
+	if err != nil {
+		return nil, err
+	}
+	var result HistoryRef
+	message := fmt.Sprintf("%s: history %s seq %d (%d parts) for %d subscribers", s.folder, shortId(id), h.Seq, len(parts), len(refs))
+	err = s.write(message, func() (bool, error) {
 		m, err := s.ownManifest()
 		if err != nil {
 			return false, err
@@ -485,41 +651,67 @@ func (s *fileStore) PublishHistory(subscriber string, request string, h *History
 		if h.Seq > m.LastSeq {
 			return false, fmt.Errorf("history seq [%d] is beyond published seq [%d]", h.Seq, m.LastSeq)
 		}
-		var buf bytes.Buffer
-		header, _ := json.Marshal(historyHeader{Seq: h.Seq, Source: s.source, Subscriber: subscriber, Request: request, Ts: h.Ts, Count: len(h.Records)})
-		buf.Write(header)
-		buf.WriteByte('\n')
-		for _, record := range h.Records {
-			line, err := json.Marshal(record)
-			if err != nil {
+		ref := HistoryRef{Id: id, Seq: h.Seq, Records: len(h.Records), Parts: []PartRef{}, Published: now(), Grants: refs}
+		for _, part := range parts {
+			if err := writeFileAtomic(s.path(part.name), part.data); err != nil {
 				return false, err
 			}
-			buf.Write(line)
-			buf.WriteByte('\n')
+			ref.Parts = append(ref.Parts, PartRef{File: part.name, Sha256: sha256Hex(part.data), Size: len(part.data)})
 		}
-		data, err := s.encode(buf.Bytes(), []*ecdh.PublicKey{recipient})
+		m.Histories = append(m.Histories, ref)
+		result = ref
+		return true, s.writeManifest(m)
+	})
+	if err != nil {
+		return nil, err
+	}
+	s.setHistoryKey(id, key)
+	return &result, nil
+}
+
+func (s *fileStore) CanGrant(id string) bool {
+	return s.historyKey(id) != nil
+}
+
+func (s *fileStore) GrantHistory(id string, grants []HistoryGrant) (*HistoryRef, error) {
+	key := s.historyKey(id)
+	if key == nil {
+		return nil, ErrHistoryKeyUnknown
+	}
+	refs, err := s.makeGrants(key, grants)
+	if err != nil {
+		return nil, err
+	}
+	var result HistoryRef
+	err = s.write(fmt.Sprintf("%s: grant history %s to %d subscribers", s.folder, shortId(id), len(refs)), func() (bool, error) {
+		m, err := s.ownManifest()
 		if err != nil {
 			return false, err
 		}
-		name := fmt.Sprintf("%s/%s-%020d-%s%s", historyDir, subscriber, h.Seq, shortId(request), fileSuffix)
-		if err := writeFileAtomic(s.path(name), data); err != nil {
-			return false, err
-		}
-		kept := []FileRef{}
-		for _, ref := range m.Histories {
-			if ref.Subscriber == subscriber {
-				if ref.File != name {
-					if err := removeFile(s.path(ref.File)); err != nil {
-						return false, err
-					}
-				}
+		for idx := range m.Histories {
+			if m.Histories[idx].Id != id {
 				continue
 			}
-			kept = append(kept, ref)
+			granted := map[string]bool{}
+			for _, ref := range refs {
+				granted[ref.Subscriber] = true
+			}
+			kept := []GrantRef{}
+			for _, ref := range m.Histories[idx].Grants {
+				if !granted[ref.Subscriber] {
+					kept = append(kept, ref)
+				}
+			}
+			m.Histories[idx].Grants = append(kept, refs...)
+			result = m.Histories[idx]
+			return true, s.writeManifest(m)
 		}
-		m.Histories = append(kept, FileRef{Seq: h.Seq, Subscriber: subscriber, Request: request, File: name, Sha256: sha256Hex(data), Published: now()})
-		return true, s.writeManifest(m)
+		return false, fmt.Errorf("history [%s] is no longer on the channel", id)
 	})
+	if err != nil {
+		return nil, err
+	}
+	return &result, nil
 }
 
 func (s *fileStore) Prune(p Prune) error {
@@ -530,7 +722,7 @@ func (s *fileStore) Prune(p Prune) error {
 	if len(p.Subscribers) > 0 {
 		parts = append(parts, fmt.Sprintf("%d dead subscribers", len(p.Subscribers)))
 	}
-	return s.write(fmt.Sprintf("%s: prune %s", s.folder, strings.Join(parts, ", ")), func() (bool, error) {
+	err := s.write(fmt.Sprintf("%s: prune %s", s.folder, strings.Join(parts, ", ")), func() (bool, error) {
 		m, err := s.ownManifest()
 		if err != nil {
 			return false, err
@@ -548,15 +740,18 @@ func (s *fileStore) Prune(p Prune) error {
 			keptQueue = append(keptQueue, ref)
 		}
 		drop := map[string]bool{}
-		for _, file := range p.Histories {
-			drop[file] = true
+		for _, id := range p.Histories {
+			drop[id] = true
 		}
-		keptHistories := []FileRef{}
+		keptHistories := []HistoryRef{}
 		for _, ref := range m.Histories {
-			if drop[ref.File] {
-				if err := removeFile(s.path(ref.File)); err != nil {
-					return false, err
+			if drop[ref.Id] {
+				for _, part := range ref.Parts {
+					if err := removeFile(s.path(part.File)); err != nil {
+						return false, err
+					}
 				}
+				os.Remove(s.path(historyDir + "/" + ref.Id)) // 空目录（git 不跟踪目录，dir 通道要删掉）
 				changed = true
 				continue
 			}
@@ -578,9 +773,18 @@ func (s *fileStore) Prune(p Prune) error {
 		m.Histories = keptHistories
 		return true, s.writeManifest(m)
 	})
+	if err == nil {
+		for _, id := range p.Histories {
+			s.setHistoryKey(id, nil)
+		}
+	}
+	return err
 }
 
 func (s *fileStore) Reset(lastSeq uint64) error {
+	s.keyLock.Lock()
+	s.historyKeys = nil
+	s.keyLock.Unlock()
 	return s.write(fmt.Sprintf("%s: reset at seq %d", s.folder, lastSeq), func() (bool, error) {
 		if m, published, err := s.loadOwnManifest(); err == nil && published && m.LastSeq == lastSeq && len(m.Queue) == 0 && len(m.Histories) == 0 {
 			return false, nil
@@ -688,62 +892,90 @@ func (s *fileStore) verifiedManifest() (*Manifest, error) {
 	return s.manifest, nil
 }
 
-func (s *fileStore) History(request string) (*History, error) {
+func (s *fileStore) History(request string) (*HistoryReader, error) {
 	m, err := s.verifiedManifest()
 	if err != nil {
 		return nil, err
 	}
-	var ref *FileRef
+	var ref *HistoryRef
+	var grant *GrantRef
 	for idx := range m.Histories {
-		if m.Histories[idx].Subscriber == s.selfId && m.Histories[idx].Request == request {
-			ref = &m.Histories[idx]
+		if g := m.Histories[idx].Grant(s.selfId, request); g != nil && (ref == nil || m.Histories[idx].Seq > ref.Seq) {
+			ref, grant = &m.Histories[idx], g
 		}
 	}
 	if ref == nil {
 		return nil, ErrNoHistory
 	}
-	s.be.Lock()
-	plain, err := s.decode(*ref)
-	s.be.Unlock()
+	if s.identity == nil {
+		return nil, errors.New("channel content is encrypted but no decrypt identity is configured")
+	}
+	key, err := unwrapFileKey(encryptedRecipient{EphemeralKey: grant.EphemeralKey, WrappedKey: grant.WrappedKey}, s.identity)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("grant of history [%s] cannot be opened with this identity, Error:%s", ref.Id, err)
 	}
-	scanner := bufio.NewScanner(bytes.NewReader(plain))
-	scanner.Buffer(make([]byte, 1024*1024), 64*1024*1024)
-	h := &History{Records: []map[string]interface{}{}}
-	first := true
-	for scanner.Scan() {
-		line := bytes.TrimSpace(scanner.Bytes())
-		if len(line) == 0 {
-			continue
+	history := *ref
+	return &HistoryReader{
+		Id:        history.Id,
+		Seq:       history.Seq,
+		Source:    m.Source,
+		Published: history.Published,
+		Records:   history.Records,
+		Parts:     len(history.Parts),
+		each: func(fn func(record map[string]interface{}) error) error {
+			return s.readHistory(&history, key, fn)
+		},
+	}, nil
+}
+
+// readHistory 逐个分片校验摘要、解密、解压并逐行回调；最后核对记录数与 manifest 一致。
+func (s *fileStore) readHistory(ref *HistoryRef, key []byte, fn func(record map[string]interface{}) error) error {
+	count := 0
+	for idx, part := range ref.Parts {
+		s.be.Lock()
+		data, err := os.ReadFile(s.path(part.File))
+		s.be.Unlock()
+		if err != nil {
+			return fmt.Errorf("failed to read history part [%s], Error:%s", part.File, err)
 		}
-		if first {
-			header := historyHeader{}
-			if err := json.Unmarshal(line, &header); err != nil {
-				return nil, fmt.Errorf("invalid history header, Error:%s", err)
+		if sha256Hex(data) != part.Sha256 {
+			return fmt.Errorf("history part [%s] digest does not match manifest", part.File)
+		}
+		plain, err := openPart(key, partAAD(s.source, ref.Id, idx+1), data)
+		if err != nil {
+			return fmt.Errorf("failed to decrypt history part [%s], Error:%s", part.File, err)
+		}
+		zr, err := gzip.NewReader(bytes.NewReader(plain))
+		if err != nil {
+			return fmt.Errorf("invalid history part [%s], Error:%s", part.File, err)
+		}
+		scanner := bufio.NewScanner(zr)
+		scanner.Buffer(make([]byte, 1024*1024), 64*1024*1024)
+		for scanner.Scan() {
+			line := bytes.TrimSpace(scanner.Bytes())
+			if len(line) == 0 {
+				continue
 			}
-			if header.Seq != ref.Seq || header.Source != s.source || header.Subscriber != s.selfId || header.Request != request {
-				return nil, fmt.Errorf("history header does not match manifest entry [%s]", ref.File)
+			record := map[string]interface{}{}
+			if err := json.Unmarshal(line, &record); err != nil {
+				zr.Close()
+				return fmt.Errorf("invalid history record in [%s], Error:%s", part.File, err)
 			}
-			h.Seq = header.Seq
-			h.Source = header.Source
-			h.Ts = header.Ts
-			first = false
-			continue
+			if err := fn(record); err != nil {
+				zr.Close()
+				return err
+			}
+			count++
 		}
-		record := map[string]interface{}{}
-		if err := json.Unmarshal(line, &record); err != nil {
-			return nil, fmt.Errorf("invalid history record, Error:%s", err)
+		zr.Close()
+		if err := scanner.Err(); err != nil {
+			return fmt.Errorf("failed to read history part [%s], Error:%s", part.File, err)
 		}
-		h.Records = append(h.Records, record)
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, err
+	if count != ref.Records {
+		return fmt.Errorf("history [%s] has %d records, manifest says %d", ref.Id, count, ref.Records)
 	}
-	if first {
-		return nil, errors.New("history file is empty")
-	}
-	return h, nil
+	return nil
 }
 
 func (s *fileStore) Fetch(cursor uint64, limit int) ([]Change, error) {

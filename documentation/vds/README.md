@@ -127,6 +127,7 @@ DN2e4U7yVl5OaTpc4+83AeFdDtHFNXZBmLa241bd9zA=
 | `publishIntervalSec` | 发布周期，默认 60 |
 | `subscriberTimeoutHours` | 订阅方超过多久不处理就判定死亡，默认 24 |
 | `compactIntervalHours` | 压缩 git 历史的间隔，默认 24 |
+| `historyReuseHours` | history 发布后多久之内，新订阅方直接拿到它的授权、不重新打包，默认 24 |
 
 compose 里把签名密钥卷只读挂进去：
 
@@ -233,7 +234,7 @@ curl -s localhost:<port>/mirrored/UniTao-Modeling/config   # 看 subscriberId、
 |---|---|---|
 | `none` | — | 还没订阅 |
 | `waiting` | `subscribe` | 订阅方推了 `subscribers/<id>.json`（state=subscribe），等发布方打包 history |
-| `waiting` | `subscribe` | 发布方推了 `history/<id>-<seq>-<request>.jsonl.gz.enc` |
+| `waiting` | `subscribe` | 发布方推了 `history/<hid>/<n>.jsonl.gz.aes` 并在 manifest 里授权给它；复用期内已有 history 时只在 manifest 里加一条授权 |
 | `active` | `active` | 订阅方用 history 整体替换本地表，之后从 queue 增量消费，cursor 跟上 `lastPublishedSeq` |
 
 之后数据可读，写入返回 405：

@@ -110,7 +110,7 @@ func channelFiles(t *testing.T, dir string) []string {
 	return names
 }
 
-// TestQueueChannel 覆盖队列通道（dir）：订阅登记、history 只给请求者、queue 消费、清理、Reset、
+// TestQueueChannel 覆盖队列通道（dir）：订阅登记、history 只给被授权者、queue 消费、清理、Reset、
 // 旧格式、folder 隔离与签名 / 摘要校验。
 func TestQueueChannel(t *testing.T) {
 	key, fingerprint := signer(t)
@@ -150,8 +150,13 @@ func TestQueueChannel(t *testing.T) {
 		t.Fatal("expect non-continuous publish rejected")
 	}
 	history := &Channel.History{Seq: 3, Source: "prod", Records: []map[string]interface{}{dataRecord("rack", "r1", map[string]interface{}{"name": "r1"})}}
-	mustNoErr(t, pub.PublishHistory(keyA.Id, "reqA", history), "history for A")
-	if err := pub.PublishHistory(outsider.Id, "x", history); err == nil {
+	published, err := pub.PublishHistory(history, []Channel.HistoryGrant{{Subscriber: keyA.Id, Request: "reqA"}})
+	mustNoErr(t, err, "history for A")
+	historyId := published.Id
+	if published.Seq != 3 || published.Records != 1 || len(published.Parts) != 1 || len(published.Grants) != 1 {
+		t.Fatalf("unexpected history entry %+v", published)
+	}
+	if _, err := pub.PublishHistory(history, []Channel.HistoryGrant{{Subscriber: outsider.Id, Request: "x"}}); err == nil {
 		t.Fatal("expect history for a subscriber outside the whitelist rejected")
 	}
 	if _, err := os.Stat(filepath.Join(root, "apps", "prod", "manifest.json")); err != nil {
@@ -167,28 +172,59 @@ func TestQueueChannel(t *testing.T) {
 	}
 	got, err := subA.History("reqA")
 	mustNoErr(t, err, "history A")
-	if got.Seq != 3 || len(got.Records) != 1 {
+	if got.Id != historyId || got.Seq != 3 || got.Records != 1 || len(readHistory(t, got)) != 1 {
 		t.Fatalf("unexpected history %+v", got)
 	}
 	if _, err := subA.History("other"); !errors.Is(err, Channel.ErrNoHistory) {
 		t.Fatalf("expect ErrNoHistory for another request, got %v", err)
 	}
-	// history 只对 A 加密：B 看不到，也解不开
+	// 没有授权给 B：B 看不到
 	mustNoErr(t, subB.Refresh(), "refresh B")
-	if _, err := subB.History("reqA"); !errors.Is(err, Channel.ErrNoHistory) {
+	if _, err := subB.History("reqB"); !errors.Is(err, Channel.ErrNoHistory) {
 		t.Fatalf("expect B has no history, got %v", err)
 	}
-	historyFiles := channelFiles(t, filepath.Join(root, "apps", "prod", "history"))
-	if len(historyFiles) != 1 {
-		t.Fatalf("expect one history file, got %v", historyFiles)
+	historyDir := filepath.Join(root, "apps", "prod", "history", historyId)
+	partsBefore := channelFiles(t, historyDir)
+	if len(partsBefore) != 1 {
+		t.Fatalf("expect one history part, got %v", partsBefore)
 	}
-	raw, err := os.ReadFile(filepath.Join(root, "apps", "prod", "history", historyFiles[0]))
-	mustNoErr(t, err, "read history file")
-	if _, err := Channel.Decrypt(raw, keyB.private(t)); err == nil {
-		t.Fatal("expect B unable to decrypt A's history")
+	partBefore, _ := os.ReadFile(filepath.Join(historyDir, partsBefore[0]))
+
+	// 把同一份 history 授权给 B：只改 manifest，分片不变；B 能读到同样的记录
+	if !pub.CanGrant(historyId) {
+		t.Fatal("expect the publisher to keep the content key of its history")
 	}
-	if _, err := Channel.Decrypt(raw, keyA.private(t)); err != nil {
-		t.Fatalf("expect A able to decrypt its history: %s", err)
+	granted, err := pub.GrantHistory(historyId, []Channel.HistoryGrant{{Subscriber: keyB.Id, Request: "reqB"}})
+	mustNoErr(t, err, "grant B")
+	if len(granted.Grants) != 2 {
+		t.Fatalf("expect two grants after granting B, got %+v", granted.Grants)
+	}
+	if _, err := pub.GrantHistory(historyId, []Channel.HistoryGrant{{Subscriber: outsider.Id, Request: "x"}}); err == nil {
+		t.Fatal("expect a grant for a subscriber outside the whitelist rejected")
+	}
+	mustNoErr(t, subB.Refresh(), "refresh B")
+	gotB, err := subB.History("reqB")
+	mustNoErr(t, err, "history B")
+	if gotB.Id != historyId || len(readHistory(t, gotB)) != 1 {
+		t.Fatalf("unexpected history for B %+v", gotB)
+	}
+	partAfter, _ := os.ReadFile(filepath.Join(historyDir, partsBefore[0]))
+	if files := channelFiles(t, historyDir); len(files) != 1 || string(partAfter) != string(partBefore) {
+		t.Fatalf("expect the parts untouched by a grant, got %v", files)
+	}
+	// A 的授权仍在
+	mustNoErr(t, subA.Refresh(), "refresh A")
+	if _, err := subA.History("reqA"); err != nil {
+		t.Fatalf("expect A's grant kept after granting B: %s", err)
+	}
+	// 另一个进程（重启后的 publisher）没有内容密钥，不能再授权
+	restarted, err := Channel.NewPublisher(pubConfig(base, recipientsFile(t, keyA, keyB)), "prod", key, nil)
+	mustNoErr(t, err, "restarted publisher")
+	if restarted.CanGrant(historyId) {
+		t.Fatal("expect a restarted publisher without the content key")
+	}
+	if _, err := restarted.GrantHistory(historyId, []Channel.HistoryGrant{{Subscriber: keyB.Id, Request: "reqB2"}}); !errors.Is(err, Channel.ErrHistoryKeyUnknown) {
+		t.Fatalf("expect ErrHistoryKeyUnknown, got %v", err)
 	}
 
 	// 消费 queue
@@ -216,8 +252,17 @@ func TestQueueChannel(t *testing.T) {
 		t.Fatalf("unexpected view: %+v", view)
 	}
 
-	// 清理：batch 1-3、A 的 history；删除 A 的进度文件
-	mustNoErr(t, pub.Prune(Channel.Prune{QueueUpTo: 3, Histories: []string{view.Histories[0].File}}), "prune")
+	// 清理：batch 1-3、history；删除 A 的进度文件
+	if len(view.Histories) != 1 || view.Histories[0].Id != historyId || len(view.Histories[0].Grants) != 2 {
+		t.Fatalf("expect one history with two grants, got %+v", view.Histories)
+	}
+	mustNoErr(t, pub.Prune(Channel.Prune{QueueUpTo: 3, Histories: []string{historyId}}), "prune")
+	if _, err := os.Stat(historyDir); !os.IsNotExist(err) {
+		t.Fatalf("expect the history directory removed, got %v", err)
+	}
+	if pub.CanGrant(historyId) {
+		t.Fatal("expect the content key forgotten after pruning")
+	}
 	mustNoErr(t, subA.Refresh(), "refresh A")
 	if _, err := subA.Fetch(0, 100); !errors.Is(err, Channel.ErrGap) {
 		t.Fatalf("expect ErrGap after pruning, got %v", err)
@@ -341,10 +386,11 @@ func TestGitQueueChannel(t *testing.T) {
 	}
 	mustNoErr(t, subA.WriteProgress(Channel.Progress{Request: "reqA", State: Channel.StateSubscribe}), "subscribe A on empty remote")
 	mustNoErr(t, pub.Publish(changes("prod", 1, 2)), "git publish 1-2")
-	mustNoErr(t, pub.PublishHistory(keyA.Id, "reqA", &Channel.History{Seq: 2, Source: "prod", Records: []map[string]interface{}{}}), "git history")
+	_, err = pub.PublishHistory(&Channel.History{Seq: 2, Source: "prod", Records: []map[string]interface{}{}}, []Channel.HistoryGrant{{Subscriber: keyA.Id, Request: "reqA"}})
+	mustNoErr(t, err, "git history")
 	mustNoErr(t, subA.Refresh(), "git refresh A")
-	if _, err := subA.History("reqA"); err != nil {
-		t.Fatalf("git history A: %s", err)
+	if got, err := subA.History("reqA"); err != nil || got.Parts != 1 || len(readHistory(t, got)) != 0 {
+		t.Fatalf("git history A: %+v %v", got, err)
 	}
 
 	// 并发：publisher 发布的同时两个 subscriber 写进度，推送冲突靠重做解决，谁的修改都不丢
@@ -430,5 +476,71 @@ func TestGitQueueChannel(t *testing.T) {
 		if !strings.Contains(files, expect) {
 			t.Fatalf("expect %s in remote, got:\n%s", expect, files)
 		}
+	}
+}
+
+func readHistory(t *testing.T, h *Channel.HistoryReader) []map[string]interface{} {
+	t.Helper()
+	records := []map[string]interface{}{}
+	mustNoErr(t, h.Each(func(record map[string]interface{}) error {
+		records = append(records, record)
+		return nil
+	}), "read history "+h.Id)
+	return records
+}
+
+// TestHistoryParts：history 按压缩后的大小切片，按顺序读回；分片被篡改时摘要校验失败；
+// 只授权给 A 时 B 没有 history，授权的内容密钥 B 也解不开。
+func TestHistoryParts(t *testing.T) {
+	defer Channel.SetHistoryPartBytes(1)() // 每条记录一个分片
+	key, fingerprint := signer(t)
+	keyA, keyB := newSubKey(t), newSubKey(t)
+	root := t.TempDir()
+	base := Channel.Config{Type: Channel.TypeDir, Path: root}
+	pub, err := Channel.NewPublisher(pubConfig(base, recipientsFile(t, keyA, keyB)), "prod", key, nil)
+	mustNoErr(t, err, "new publisher")
+	mustNoErr(t, pub.Reset(0), "init manifest")
+	mustNoErr(t, pub.Publish(changes("prod", 1, 5)), "publish 1-5")
+	records := []map[string]interface{}{}
+	for _, change := range changes("prod", 1, 5) {
+		records = append(records, change.Record)
+	}
+	ref, err := pub.PublishHistory(&Channel.History{Seq: 5, Source: "prod", Records: records}, []Channel.HistoryGrant{{Subscriber: keyA.Id, Request: "reqA"}})
+	mustNoErr(t, err, "publish history")
+	partDir := filepath.Join(root, "prod", "history", ref.Id)
+	parts := channelFiles(t, partDir)
+	if len(parts) != 5 {
+		t.Fatalf("expect 5 parts, got %v", parts)
+	}
+
+	subA, err := Channel.NewSubscriber(subConfig(base, keyA), "prod", fingerprint, nil)
+	mustNoErr(t, err, "new subscriber A")
+	mustNoErr(t, subA.Refresh(), "refresh A")
+	h, err := subA.History("reqA")
+	mustNoErr(t, err, "history A")
+	got := readHistory(t, h)
+	if h.Parts != 5 || h.Records != 5 || len(got) != 5 {
+		t.Fatalf("unexpected history %+v with %d records", h, len(got))
+	}
+	for idx, record := range got {
+		if record["__id"] != fmt.Sprintf("r%d", idx+1) {
+			t.Fatalf("expect records in order, got %v at %d", record["__id"], idx)
+		}
+	}
+
+	subB, err := Channel.NewSubscriber(subConfig(base, keyB), "prod", fingerprint, nil)
+	mustNoErr(t, err, "new subscriber B")
+	mustNoErr(t, subB.Refresh(), "refresh B")
+	if _, err := subB.History("reqA"); !errors.Is(err, Channel.ErrNoHistory) {
+		t.Fatalf("expect B without a grant to get ErrNoHistory, got %v", err)
+	}
+
+	// 篡改第 3 个分片：读到它时报错
+	third := filepath.Join(partDir, parts[2])
+	original, _ := os.ReadFile(third)
+	mustNoErr(t, os.WriteFile(third, append([]byte("x"), original...), 0o644), "tamper part")
+	err = h.Each(func(record map[string]interface{}) error { return nil })
+	if err == nil || !strings.Contains(err.Error(), "digest") {
+		t.Fatalf("expect digest mismatch on the tampered part, got %v", err)
 	}
 }

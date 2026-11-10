@@ -28,7 +28,7 @@ find exchange -type f                            # once siteB caught up: only ma
 what happens on the channel (`exchange/catalog/`):
 
  1. siteB starts first and writes `subscribers/<its id>.json` with `state: subscribe` (the publisher does not need to exist yet).
- 2. siteA publishes the two writes as `queue/…-….jsonl.gz.enc`, sees the subscription and writes `history/<id>-…` with all its records, encrypted only to siteB.
+ 2. siteA publishes the two writes as `queue/…-….jsonl.gz.enc`, sees the subscription and writes `history/<id>/0001.jsonl.gz.aes` with all its records; the manifest grants it to siteB (its content key wrapped for siteB's public key).
  3. siteB loads the history (replacing its table), consumes the queue from there and reports `state: active` with its cursor.
  4. siteA deletes the history and every batch siteB has passed.
 

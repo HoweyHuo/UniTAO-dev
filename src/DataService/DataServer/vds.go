@@ -273,6 +273,7 @@ func (srv *Server) setupShared(vds *Vds, journalLogger *log.Logger) error {
 		PublishIntervalSec:     cfg.PublishIntervalSec,
 		SubscriberTimeoutHours: cfg.SubscriberTimeoutHours,
 		CompactIntervalHours:   cfg.CompactIntervalHours,
+		HistoryReuseHours:      cfg.HistoryReuseHours,
 	}, srv.log)
 	vds.InstanceId = vds.Publisher.Fingerprint()
 	return srv.setupJournal(vds, journalLogger, Share.NewChannelPublish(cfg.Name, outbox, journalLogger))

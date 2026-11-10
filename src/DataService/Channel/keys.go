@@ -235,37 +235,79 @@ func gcmOpen(key []byte, nonce []byte, sealed []byte) ([]byte, error) {
 	return aead.Open(nil, nonce, sealed, nil)
 }
 
+// newFileKey 生成一把随机的 AES-256 内容密钥。
+func newFileKey() ([]byte, error) {
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		return nil, err
+	}
+	return key, nil
+}
+
+// wrapFileKey 用 X25519 ECDH（临时密钥）+ HKDF-SHA256 派生的密钥为 recipient 包装内容密钥。
+func wrapFileKey(fileKey []byte, recipient *ecdh.PublicKey) (encryptedRecipient, error) {
+	eph, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		return encryptedRecipient{}, err
+	}
+	shared, err := eph.ECDH(recipient)
+	if err != nil {
+		return encryptedRecipient{}, err
+	}
+	key, err := wrapKey(shared, eph.PublicKey().Bytes(), recipient.Bytes())
+	if err != nil {
+		return encryptedRecipient{}, err
+	}
+	// 每个包装密钥只用一次（临时密钥随机），固定 nonce 是安全的
+	wrapped, err := gcmSeal(key, make([]byte, 12), fileKey)
+	if err != nil {
+		return encryptedRecipient{}, err
+	}
+	return encryptedRecipient{
+		EphemeralKey: base64.StdEncoding.EncodeToString(eph.PublicKey().Bytes()),
+		WrappedKey:   base64.StdEncoding.EncodeToString(wrapped),
+	}, nil
+}
+
+// unwrapFileKey 用 identity 解开 wrapFileKey 包装的内容密钥；不是给这个 identity 的返回错误。
+func unwrapFileKey(recipient encryptedRecipient, identity *ecdh.PrivateKey) ([]byte, error) {
+	ephRaw, err := base64.StdEncoding.DecodeString(recipient.EphemeralKey)
+	if err != nil {
+		return nil, err
+	}
+	ephPub, err := ecdh.X25519().NewPublicKey(ephRaw)
+	if err != nil {
+		return nil, err
+	}
+	shared, err := identity.ECDH(ephPub)
+	if err != nil {
+		return nil, err
+	}
+	key, err := wrapKey(shared, ephRaw, identity.PublicKey().Bytes())
+	if err != nil {
+		return nil, err
+	}
+	wrapped, err := base64.StdEncoding.DecodeString(recipient.WrappedKey)
+	if err != nil {
+		return nil, err
+	}
+	return gcmOpen(key, make([]byte, 12), wrapped)
+}
+
 // Encrypt 用随机文件密钥（AES-256-GCM）加密数据，文件密钥对每个接收方用
 // X25519 ECDH + HKDF-SHA256 派生的密钥包装。
 func Encrypt(plain []byte, recipients []*ecdh.PublicKey) ([]byte, error) {
-	fileKey := make([]byte, 32)
-	if _, err := rand.Read(fileKey); err != nil {
+	fileKey, err := newFileKey()
+	if err != nil {
 		return nil, err
 	}
 	out := encryptedFile{Version: encryptVersion}
-	zeroNonce := make([]byte, 12)
 	for _, recipient := range recipients {
-		eph, err := ecdh.X25519().GenerateKey(rand.Reader)
+		wrapped, err := wrapFileKey(fileKey, recipient)
 		if err != nil {
 			return nil, err
 		}
-		shared, err := eph.ECDH(recipient)
-		if err != nil {
-			return nil, err
-		}
-		key, err := wrapKey(shared, eph.PublicKey().Bytes(), recipient.Bytes())
-		if err != nil {
-			return nil, err
-		}
-		// 每个包装密钥只用一次（临时密钥随机），固定 nonce 是安全的
-		wrapped, err := gcmSeal(key, zeroNonce, fileKey)
-		if err != nil {
-			return nil, err
-		}
-		out.Recipients = append(out.Recipients, encryptedRecipient{
-			EphemeralKey: base64.StdEncoding.EncodeToString(eph.PublicKey().Bytes()),
-			WrappedKey:   base64.StdEncoding.EncodeToString(wrapped),
-		})
+		out.Recipients = append(out.Recipients, wrapped)
 	}
 	nonce := make([]byte, 12)
 	if _, err := rand.Read(nonce); err != nil {
@@ -292,31 +334,9 @@ func Decrypt(data []byte, identity *ecdh.PrivateKey) ([]byte, error) {
 	if file.Version != encryptVersion {
 		return nil, fmt.Errorf("unsupported encrypted file version [%d]", file.Version)
 	}
-	zeroNonce := make([]byte, 12)
 	var fileKey []byte
 	for _, recipient := range file.Recipients {
-		ephRaw, err := base64.StdEncoding.DecodeString(recipient.EphemeralKey)
-		if err != nil {
-			continue
-		}
-		ephPub, err := ecdh.X25519().NewPublicKey(ephRaw)
-		if err != nil {
-			continue
-		}
-		shared, err := identity.ECDH(ephPub)
-		if err != nil {
-			continue
-		}
-		key, err := wrapKey(shared, ephRaw, identity.PublicKey().Bytes())
-		if err != nil {
-			continue
-		}
-		wrapped, err := base64.StdEncoding.DecodeString(recipient.WrappedKey)
-		if err != nil {
-			continue
-		}
-		opened, err := gcmOpen(key, zeroNonce, wrapped)
-		if err == nil {
+		if opened, err := unwrapFileKey(recipient, identity); err == nil {
 			fileKey = opened
 			break
 		}
@@ -333,4 +353,38 @@ func Decrypt(data []byte, identity *ecdh.PrivateKey) ([]byte, error) {
 		return nil, fmt.Errorf("invalid data in encrypted file, Error:%s", err)
 	}
 	return gcmOpen(fileKey, nonce, sealed)
+}
+
+// sealPart 用内容密钥加密一个 history 分片：随机 nonce（12 字节）+ AES-256-GCM 密文，二进制，不再套 base64。
+// aad 绑定分片身份（来源、history id、序号），分片之间不能互换。
+func sealPart(fileKey []byte, aad []byte, plain []byte) ([]byte, error) {
+	nonce := make([]byte, 12)
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, err
+	}
+	block, err := aes.NewCipher(fileKey)
+	if err != nil {
+		return nil, err
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	return aead.Seal(nonce, nonce, plain, aad), nil
+}
+
+// openPart 解开 sealPart 产生的分片。
+func openPart(fileKey []byte, aad []byte, data []byte) ([]byte, error) {
+	if len(data) < 12 {
+		return nil, errors.New("history part is too short")
+	}
+	block, err := aes.NewCipher(fileKey)
+	if err != nil {
+		return nil, err
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	return aead.Open(nil, data[:12], data[12:], aad)
 }
