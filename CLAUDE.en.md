@@ -37,12 +37,12 @@ The following are needed before you start:
 - **DynamoDB Local** (optional) — the default database for running a Data Service locally; MongoDB or file mode (`SysDirFile`, good for testing) also work
 - **Node.js** (optional) — to run `ui/WebServer/` or `schemaVisualizer/`
 
-Deploy with Docker (MongoDB + Inventory + Data Service, each in its own directory and compose project; see `docker-compose/README.md`):
+Deploy with Docker (MongoDB in its own directory; one UniTAO system per directory, its Inventory and Data Services in subdirectories, each a compose project; the Inventory first; see `docker-compose/README.md`):
 ```bash
 docker-compose/script/mongo_deploy.sh ~/infra/mongodb
-docker-compose/script/unitao_deploy.sh inventory ~/infra/unitao-inv
-docker-compose/script/unitao_deploy.sh dataservice ~/infra/unitao-ds
-docker-compose/script/unitao_vds.sh ~/infra/unitao-ds          # optional: shared / mirrored vDS
+docker-compose/script/unitao_deploy.sh inventory ~/infra/unitao      # first the Inventory -> ~/infra/unitao/inv
+docker-compose/script/unitao_deploy.sh dataservice ~/infra/unitao    # then a Data Service -> ~/infra/unitao/ds
+docker-compose/script/unitao_vds.sh ~/infra/unitao/ds          # optional: shared / mirrored vDS
 ```
 
 **A Data Service never writes `config.json`; its runtime state lives in `state.json` next to it.** Three values are produced by the DS itself and must survive restarts. `Config.LoadState` / `State.Save` (`src/DataService/Config/state.go`) read and write them in `state.json` in the config directory:
@@ -132,7 +132,7 @@ go test ./test/src/DataServiceTest/... -run TestDataHandler
 docker build -f ./docker/unitao/dockerfile -t unitao:latest .
 
 # Deploy (see docker-compose/README.md)
-docker-compose/script/unitao_deploy.sh dataservice ~/infra/unitao-ds
+docker-compose/script/unitao_deploy.sh dataservice ~/infra/unitao
 
 # Build image via CI (GitHub Actions pushes to ghcr.io)
 ```

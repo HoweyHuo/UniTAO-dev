@@ -52,11 +52,11 @@ to build all images, run one of the following command based on your target envir
 these are local builds. the images published by CI to **ghcr.io** — their tags (`latest`, `<version>`, `sha-<short>`), how the tags move, and the digests behind them — are documented in [`docker/README.md`](./docker/README.md).
 
 #### **Environment**
-deploy MongoDB, an Inventory Service and a Data Service, each into its own directory, with the scripts in [`docker-compose/script`](./docker-compose/script) (they ask for the settings and start the instance):
+deploy MongoDB, then an Inventory Service and a Data Service into subdirectories of one UniTAO directory (the Inventory first), with the scripts in [`docker-compose/script`](./docker-compose/script) (they ask for the settings and start the instance):
 ```
 docker-compose/script/mongo_deploy.sh ~/infra/mongodb
-docker-compose/script/unitao_deploy.sh inventory ~/infra/unitao-inv
-docker-compose/script/unitao_deploy.sh dataservice ~/infra/unitao-ds
+docker-compose/script/unitao_deploy.sh inventory ~/infra/unitao      # first the Inventory -> ~/infra/unitao/inv
+docker-compose/script/unitao_deploy.sh dataservice ~/infra/unitao    # then a Data Service -> ~/infra/unitao/ds
 ```
 shared / mirrored vDS between networks are added afterwards with `docker-compose/script/unitao_vds.sh`. see [`docker-compose/README.md`](./docker-compose/README.md).
 

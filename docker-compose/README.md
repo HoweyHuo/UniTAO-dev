@@ -18,39 +18,59 @@ the scripts run on the host and use the UniTAO image for the tools (`DataService
 
 ## Deploy
 
+one UniTAO system lives in one directory: its Inventory Service and its Data Services are subdirectories, each a compose project. MongoDB is separate (one per host, shared by the systems). for a new system, in this order:
+
 ```
-sudo docker-compose/script/docker-deploy.sh                         # once per host: Docker Engine, your user in group docker
-docker-compose/script/mongo_deploy.sh ~/infra/mongodb               # MongoDB, creates the network mongo_net
-docker-compose/script/unitao_deploy.sh inventory ~/infra/unitao-inv
-docker-compose/script/unitao_deploy.sh dataservice ~/infra/unitao-ds
+S=docker-compose/script
+sudo $S/docker-deploy.sh                       # 1. once per host: Docker Engine, your user in group docker
+$S/mongo_deploy.sh ~/infra/mongodb             # 2. MongoDB, creates the network mongo_net (skip if you run one)
+$S/unitao_deploy.sh inventory   ~/infra/unitao-howey   # 3. the Inventory Service -> ~/infra/unitao-howey/inv
+$S/unitao_deploy.sh dataservice ~/infra/unitao-howey   # 4. a Data Service -> ~/infra/unitao-howey/ds (again: ds-2, ...)
+$S/unitao_vds.sh ~/infra/unitao-howey/ds               # 5. optional: shared / mirrored vDS
 ```
 
-`docker-deploy.sh` picks the official Docker repository or a domestic mirror (e.g. in China) by itself. `mongo_deploy.sh` asks for the MongoDB root password (enter generates one) and prints how to connect; skip it if you already run a MongoDB. see [`template/mongodb/README.md`](template/mongodb/README.md).
+```
+~/infra/unitao-howey/        the UniTAO directory: one system
+  inv/                       Inventory Service unitao-howey-inv
+  ds/                        Data Service unitao-howey-ds
+  ds-2/                      Data Service unitao-howey-ds-2
+```
 
-`unitao_deploy.sh [dataservice|inventory] [<directory>]` asks for everything it needs; each question has a default (enter accepts it), only the MongoDB password must be typed:
+the Inventory comes first: a Data Service deployed after it gets its URL as the default, registers right away and can be queried through it. a Data Service deployed before it still works: it retries its registration every 10 seconds until the Inventory is up (deploy it later with the name the Data Service was given, in the same network), but writes that reference other types (`contentMediaType: "inventory/…"`) fail until then.
+
+just running `$S/unitao_deploy.sh` walks you through it. it asks for the UniTAO directory first and looks for instances in its subdirectories (a `docker-compose.yml` with an `inventory` or `dataservice` service):
+
+ - none: a new system. it offers to deploy the Inventory Service first (recommended), and after it, a Data Service.
+ - no Inventory among them: it offers to deploy the Inventory first.
+ - otherwise it asks what to deploy; the Data Service gets that Inventory's URL and network as defaults. a second Inventory in one system is refused unless you confirm.
+
+`docker-deploy.sh` picks the official Docker repository or a domestic mirror (e.g. in China) by itself. `mongo_deploy.sh` asks for the MongoDB root password (enter generates one) and prints how to connect. see [`template/mongodb/README.md`](template/mongodb/README.md).
+
+`unitao_deploy.sh [dataservice|inventory] [<UniTAO directory>]` asks for everything it needs; each question has a default (enter accepts it), only the MongoDB password must be typed. `<base>` is the name of the UniTAO directory (`unitao-howey`):
 
 | question | default | |
 |---|---|---|
-| instance name | `unitao-ds` / `unitao-inv` | container name, compose project name and Data Service id |
-| target directory | `./<name>` | must be new or empty |
-| port on this host | first free from 8001 / 8000 | |
+| UniTAO directory | `~/infra/unitao` | the system; not an instance directory |
+| deploy the Inventory first? | yes | only when the directory has no Inventory yet |
+| instance name | `<base>-inv` / `<base>-ds`, `<base>-ds-2`, … | container name, compose project name and Data Service id |
+| instance directory | `inv` / `ds`, `ds-2`, … in the UniTAO directory | must be new or empty |
+| port on this host | first free from 8000 / 8001 | skips ports of running containers and of the instances in the directory |
 | image | `ghcr.io/howeyhuo/unitao-dev:latest` | |
-| Docker network | `unitao_net` | shared by the Data Services and the Inventory Service of one site, created if missing; they reach each other by container name |
-| Inventory Service URL | `http://<running Inventory in that network>` | Data Service only. on another host: `http://<host>:<port>` |
-| URL from other hosts | `http://<hostname>:<port>` | Data Service only. registered in Inventory next to `http://<name>` |
+| Docker network | the network of the instances in the directory, else `<base>_net` | shared by the Data Services and the Inventory Service of one system, created if missing; they reach each other by container name |
+| Inventory Service URL | `http://<Inventory in the directory>`, else `http://<running Inventory in that network>`, else `http://<base>-inv` | Data Service only. on another host: `http://<host>:<port>` |
+| URL from other hosts | `http://<hostname>:<port>` | Data Service only. registered in Inventory next to `http://<name>`; `localhost` works only on this host |
 | MongoDB network, endpoint, database, table name, user, password | `mongo_net`, `mongodb://mongodb:27017`, `<name>`, `<name>`, `root` | Data Service only |
 | sync interval | `300` | Inventory only: seconds between schema syncs |
 
 it then writes `.env` and `config/config.json` (both mode 600, the config holds the MongoDB password), creates `data/` and `logs/` (and `channel/` for a Data Service), and starts the instance. a Data Service starts with the default `local` vDS only; nothing about channels is asked here, that is `unitao_vds.sh`'s job.
 
-the Inventory Service does not have to exist yet: a Data Service that cannot reach it retries its registration every 10 seconds. accept the default `http://unitao-inv` and deploy the Inventory later with that name in the same network. deploy as many instances as you like by running the script again, each into its own directory.
-
 ```
-~/infra/unitao-ds/
+~/infra/unitao-howey/ds/
   docker-compose.yml   from template/dataservice
   .env                 the answers: COMPOSE_PROJECT_NAME, UNITAO_NAME, UNITAO_PORT, UNITAO_UID/GID, UNITAO_IMAGE, networks, UNITAO_CHANNEL_DIR
   config/              config.json, state.json, and config/vds/ (keys of shared / mirrored vDS, see below)
   data/                clones of git channels
+  channel/             the channel directory, until unitao_vds.sh is given another one
   logs/
 ```
 
@@ -91,27 +111,27 @@ a channel on this host (`file:///opt/UniTAO/channel/<repo>.git` or `--dir /opt/U
 
 ### Example: two sites on one host
 
-site-shared publishes `shared/catalog`, site-mirror mirrors it. each site has its own Inventory, Data Service and Docker network, so they cannot reach each other; the only path between them is a bare git repository in a directory both Data Services mount as their channel directory. both use the same MongoDB (different databases); in a real deployment each site has its own, and the repository is on a git server.
+site-shared publishes `shared/catalog`, site-mirror mirrors it. each site is a UniTAO directory with its own Inventory, Data Service and Docker network (`site-shared_net`, `site-mirror_net`), so they cannot reach each other; the only path between them is a bare git repository in a directory both Data Services mount as their channel directory. both use the same MongoDB (different databases); in a real deployment each site has its own, and the repository is on a git server.
 
 ```
 S=docker-compose/script
 mkdir -p ~/demo
 $S/mongo_deploy.sh ~/infra/mongodb                  # if not running yet
 
-# site-shared: network unitao_shared, ports 8034 / 8031
-$S/unitao_deploy.sh inventory   ~/demo/site-shared-inv      # name site-shared-inv, sync interval 30
-$S/unitao_deploy.sh dataservice ~/demo/site-shared-ds       # name site-shared-ds, Inventory http://site-shared-inv
-# site-mirror: network unitao_mirror, ports 8044 / 8041
-$S/unitao_deploy.sh inventory   ~/demo/site-mirror-inv
-$S/unitao_deploy.sh dataservice ~/demo/site-mirror-ds
+# site-shared: ~/demo/site-shared/{inv,ds}, ports 8034 / 8031 (answer them), sync interval 30
+$S/unitao_deploy.sh inventory   ~/demo/site-shared
+$S/unitao_deploy.sh dataservice ~/demo/site-shared
+# site-mirror: ~/demo/site-mirror/{inv,ds}, ports 8044 / 8041
+$S/unitao_deploy.sh inventory   ~/demo/site-mirror
+$S/unitao_deploy.sh dataservice ~/demo/site-mirror
 
 REPO=file:///opt/UniTAO/channel/exchange.git
 # both Data Services mount ~/demo/channel at /opt/UniTAO/channel, where the repository is
-$S/unitao_vds.sh ~/demo/site-shared-ds add shared catalog --repo $REPO --channel-dir ~/demo/channel --folder infra/catalog --publish-interval 5
-$S/unitao_vds.sh ~/demo/site-mirror-ds add mirrored catalog --repo $REPO --channel-dir ~/demo/channel --folder infra/catalog --pull-interval 10 \
-    --fingerprint "$(cat ~/demo/site-shared-ds/config/vds/shared/catalog/fingerprint)"
-cat ~/demo/site-mirror-ds/config/vds/mirrored/catalog/recipient >> ~/demo/site-shared-ds/config/vds/shared/catalog/recipients
-(cd ~/demo/site-shared-ds && docker compose restart)
+$S/unitao_vds.sh ~/demo/site-shared/ds add shared catalog --repo $REPO --channel-dir ~/demo/channel --folder infra/catalog --publish-interval 5
+$S/unitao_vds.sh ~/demo/site-mirror/ds add mirrored catalog --repo $REPO --channel-dir ~/demo/channel --folder infra/catalog --pull-interval 10 \
+    --fingerprint "$(cat ~/demo/site-shared/ds/config/vds/shared/catalog/fingerprint)"
+cat ~/demo/site-mirror/ds/config/vds/mirrored/catalog/recipient >> ~/demo/site-shared/ds/config/vds/shared/catalog/recipients
+(cd ~/demo/site-shared/ds && docker compose restart)
 ```
 
 try it:
