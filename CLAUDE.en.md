@@ -203,7 +203,7 @@ test/                          # Integration & unit tests
 dbSchemas/                     # DB table schema definitions (DynamoDB, MongoDB)
 demo/                          # Step-by-step demo scripts (PowerShell + Python)
 docker/                        # Docker build scripts: the single image docker/unitao (published as unitao-dev) + UIServer
-docker-compose/                # deployment: script/ copies the templates in template/ (mongodb, dataservice, inventory) into a directory, configures and starts them; see docker-compose/README.md
+docker-compose/                # deployment: script/ copies the templates in template/ (mongodb, dataservice, inventory) into a directory, configures and starts them; see docker-compose/README.md (Chinese version README.zh.md, keep both in sync)
 ui/WebServer/                  # Node.js static file server (for dashboard)
 schemaVisualizer/              # Express.js schema visualizer frontend server
 javascript/Schema/             # JavaScript port of schema library (jsonSchema.js, schema.js, record.js)

@@ -204,7 +204,7 @@ test/                          # 集成测试与单元测试
 dbSchemas/                     # 数据库表 Schema 定义（DynamoDB、MongoDB）
 demo/                          # 分步演示脚本（PowerShell + Python）
 docker/                        # Docker 构建脚本：唯一的镜像 docker/unitao（发布为 unitao-dev）+ UIServer
-docker-compose/                # 部署：script/ 下的脚本把 template/ 下的模板（mongodb、dataservice、inventory）复制到指定目录、生成配置并启动；见 docker-compose/README.md
+docker-compose/                # 部署：script/ 下的脚本把 template/ 下的模板（mongodb、dataservice、inventory）复制到指定目录、生成配置并启动；见 docker-compose/README.md（中文版 README.zh.md，改动时两份同步）
   script/                      # docker-deploy.sh（Ubuntu 上装 Docker Engine）、mongo_deploy.sh、unitao_deploy.sh（交互部署一个 DS 或 Inventory 实例到 UniTAO 目录的子目录，新系统建议先装 Inventory；DS 只带 local vDS）、unitao_vds.sh（交互增删 shared / mirrored vDS，维护 config/vds/<kind>/<name>/ 下的密钥）
   template/                    # mongodb/、dataservice/、inventory/：每个是一个 compose 项目的模板，不在原地运行
 ui/WebServer/                  # Node.js 静态文件服务器（用于仪表盘）

@@ -237,13 +237,9 @@ if [[ $start == [yY]* ]]; then
 else
     echo "-> start it with: cd $target && docker compose up -d"
 fi
-[ "$kind" = dataservice ] && echo "-> shared / mirrored vDS: $SCRIPTS/unitao_vds.sh $target"
-[ "$kind" = dataservice ] && echo "-> another Data Service: $SCRIPTS/unitao_deploy.sh dataservice $root"
-echo "-> remove it: cd $target && docker compose down, then delete the directory${mongo_net:+ (and the database ${values["<mongodb database>"]} in MongoDB)}"
 if [ "$kind" = inventory ] && [ "$n_ds" = 0 ]; then
     if [ "$interactive" = 1 ] && [[ $(ask "deploy a Data Service into $root now? (y/n)" y) == [yY]* ]]; then
         echo
         exec "$SCRIPTS/$(basename "$0")" dataservice "$root"
     fi
-    echo "-> next, a Data Service: $SCRIPTS/unitao_deploy.sh dataservice $root"
 fi

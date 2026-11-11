@@ -1,5 +1,7 @@
 # docker-compose
 
+English | [中文](README.zh.md)
+
 deploying UniTAO with Docker Compose. the templates are not run where they are: a script copies a template into a directory of your choice (e.g. `~/infra/<name>`), fills in its configuration and starts it there. each deployed directory is one compose project; manage it with `docker compose` in that directory.
 
 ```
@@ -76,7 +78,7 @@ it then writes `.env` and `config/config.json` (both mode 600, the config holds 
 
 the containers run as your user (`UNITAO_UID` / `UNITAO_GID`), so everything they write is yours; the image's entrypoint adds your UID to its `/etc/passwd` (ssh needs one). a Data Service keeps the ssh key it generates for git servers in the named volume `ssh` (`ssh.dir` = `/opt/UniTAO/ssh`), not in the directory.
 
-to change an answer later, edit `.env` or `config/config.json` and run `docker compose up -d` (a new container name or port recreates the container). to remove an instance: `docker compose down -v` in its directory, then delete the directory; the tables of a Data Service stay in MongoDB until you drop its database.
+to change an answer later, edit `.env` or `config/config.json` and run `docker compose up -d` (a new container name or port recreates the container). to remove an instance: `docker compose down -v` in its directory (`-v` also removes the ssh key volume), then delete the directory; the tables of a Data Service stay in MongoDB until you drop its database.
 
 ## Shared and mirrored vDS
 
