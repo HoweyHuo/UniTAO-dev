@@ -12,13 +12,16 @@ docker-compose/**/logs/*.log
 docker-compose/**/state.json
 # DataService ssh identity (private key + known_hosts) generated next to its config for the git channel
 docker-compose/**/ssh/
-# shared-mirror demos: everything but the templates is generated (configs with the MongoDB password, keys, data, channel)
-docker-compose/shared-mirror*/site-*/ds/config/*
-!docker-compose/shared-mirror*/site-*/ds/config/config.template.json
-docker-compose/shared-mirror*/site-*/*/data/
-docker-compose/shared-mirror*/.env
-docker-compose/shared-mirror/exchange/
-docker-compose/shared-mirror-git/remote/
+# shared-mirror demo: everything but the templates is generated (configs with the MongoDB password, keys, data, channel)
+docker-compose/shared-mirror/site-*/ds/config/*
+!docker-compose/shared-mirror/site-*/ds/config/config.template.json
+docker-compose/shared-mirror/site-*/*/data/
+docker-compose/shared-mirror/site-*/.env
+docker-compose/shared-mirror/remote/
+# setup_env.sh / clean_env.sh copied into a site directory, and the file list setup_env.sh records there
+docker-compose/*/*/setup_env.sh
+docker-compose/*/*/clean_env.sh
+docker-compose/*/*/.setup_env.keep
 # mongodb template: database files and .env (root password)
 docker-compose/mongodb/data/
 docker-compose/mongodb/.env

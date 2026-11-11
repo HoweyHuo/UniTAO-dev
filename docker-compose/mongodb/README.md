@@ -1,6 +1,6 @@
 # mongodb
 
-a MongoDB instance for UniTAO's Data Services, with [mongo-express](https://github.com/mongo-express/mongo-express) as its web UI, as its own compose project. it creates the Docker network `mongo_net`; the Data Services of [`shared-mirror`](../shared-mirror) and [`shared-mirror-git`](../shared-mirror-git) join it as an external network and reach MongoDB as `mongodb://mongodb:27017`. one instance can serve several Data Services, each with its own database.
+a MongoDB instance for UniTAO's Data Services, with [mongo-express](https://github.com/mongo-express/mongo-express) as its web UI, as its own compose project. it creates the Docker network `mongo_net`; the Data Services of [`shared-mirror`](../shared-mirror) join it as an external network and reach MongoDB as `mongodb://mongodb:27017`. one instance can serve several Data Services, each with its own database.
 
 skip this if you already run a MongoDB: put its container on a network and point the Data Services at it (`UNITAO_MONGODB_NETWORK`, endpoint, user and password in their configs).
 

@@ -5,7 +5,7 @@
     },
     "table": { "data": "site-shared" },
     "http": { "type": "http", "dns": "site-shared-ds", "port": "80", "id": "site-shared", "headers": {} },
-    "ds": { "id": "site-shared", "urls": ["http://site-shared-ds", "http://localhost:8011"] },
+    "ds": { "id": "site-shared", "urls": ["http://site-shared-ds", "http://localhost:8031"] },
     "inventory": { "url": "http://site-shared-inv" },
     "vds": {
         "local": {},
@@ -16,8 +16,11 @@
             "subscriberTimeoutHours": 24,
             "compactIntervalHours": 24,
             "channel": {
-                "type": "dir",
-                "path": "/opt/UniTAO/exchange",
+                "type": "git",
+                "repo": "file:///opt/UniTAO/remote/exchange.git",
+                "branch": "main",
+                "folder": "infra/catalog",
+                "workDir": "/opt/UniTAO/data/channel",
                 "encrypt": { "recipientsFile": "/opt/UniTAO/config/recipients" }
             }
         }]
