@@ -28,14 +28,17 @@
 # 用法: unitao_vds.sh [--service <服务>] [--no-restart] [<目标目录>] [<命令> ...]
 #   不给命令时进入交互菜单。目标目录默认当前目录。
 #   list
-#   add shared [<name>] [--repo <url> | --dir <path>] [--branch <b>] [--folder <f>] [--workdir <path>]
+#   add shared [<name>] [--repo <url> | --dir <path>] [--channel-dir <宿主机目录>] [--branch <b>] [--folder <f>] [--workdir <path>]
 #       [--publish-interval <秒>] [--subscriber-timeout <小时>] [--compact-interval <小时>] [--history-reuse <小时>]
-#   add mirrored [<name>] [--fingerprint <SHA256:...>] [--repo <url> | --dir <path>] [--alias <a>]
+#   add mirrored [<name>] [--fingerprint <SHA256:...>] [--repo <url> | --dir <path>] [--channel-dir <宿主机目录>] [--alias <a>]
 #       [--branch <b>] [--folder <f>] [--workdir <path>] [--pull-interval <秒>]
 #   show shared|mirrored <name>      打印要交给其它 site 的东西
 #   remove shared|mirrored <name>    mirrored 有 alias 时用 alias
 #   缺少的值（名字、通道、指纹）交互询问；非交互时必须在命令行给出。
 #
+#   --channel-dir 通道在本机上时（file:///opt/UniTAO/channel/... 或 --dir /opt/UniTAO/channel...）挂到 /opt/UniTAO/channel 的
+#                 宿主机目录，两个 site 在同一台主机上就给同一个目录；默认是实例目录里的 channel/。写进 .env 的 UNITAO_CHANNEL_DIR，
+#                 已有别的 vDS 用本机通道时不能再改
 #   --service     compose 里不止一个 Data Service 时指定是哪个
 #   --no-restart  add / remove 后不重启 Data Service（配置在启动时生效，默认在它运行时重启它）
 #
@@ -64,8 +67,10 @@ ask() {
     done
     printf '%s' "$val"
 }
+# 交互输入的 ~ 不会被 shell 展开，这里展开后转成绝对路径
+abs_path() { local p=$1; case $p in "~") p=$HOME ;; "~/"*) p=$HOME/${p#"~/"} ;; esac; realpath -m "$p"; }
 
-service= restart=1
+service= restart=1 recreate=0
 while [ $# -gt 0 ]; do
     case $1 in
         --service) service=${2:?--service needs a value}; shift 2 ;;
@@ -85,6 +90,7 @@ if [ -f .env ]; then set -a; . ./.env; set +a; fi
 RUN_AS="${UNITAO_UID:-$(id -u)}:${UNITAO_GID:-$(id -g)}"
 
 # ---- compose 的设置：B 服务 源 目标（bind mount）、C 服务 路径（-config）、D 服务（Data Service）、I 服务 镜像 ----
+load_facts() {
 mapfile -t facts < <(docker compose config | awk '
     /^[^ ]/ { sec = $1; next }
     sec != "services:" { next }
@@ -98,6 +104,8 @@ mapfile -t facts < <(docker compose config | awk '
     b && /^        target:/ { tgt = $0; sub(/^ *target: */, "", tgt); print "B\t" svc "\t" src "\t" tgt; b = 0; next }
     /^      - -config$/ { c = 1; next }
     c { p = $0; sub(/^ *- */, "", p); print "C\t" svc "\t" p; c = 0; next }')
+}
+load_facts
 fact() { local f; for f in "${facts[@]}"; do [[ $f == "$1"$'\t'* ]] && echo "${f#*$'\t'}"; done; true; }
 
 mapfile -t dss < <(fact D)
@@ -228,10 +236,16 @@ exists() { cfgpy get "$1" "$2" >/dev/null 2>&1; }
 
 restart_ds() {
     if [ "$restart" = 0 ]; then
-        echo "-> restart the Data Service to apply: docker compose restart $svc (in $target)"
+        if [ "$recreate" = 1 ]; then echo "-> recreate the Data Service to apply (the channel mount changed): docker compose up -d $svc (in $target)"
+        else echo "-> restart the Data Service to apply: docker compose restart $svc (in $target)"; fi
     elif [ -n "$(docker compose ps -q --status running "$svc" 2>/dev/null)" ]; then
-        docker compose restart "$svc" >/dev/null
-        echo "== restarted $svc"
+        if [ "$recreate" = 1 ]; then
+            docker compose up -d "$svc" >/dev/null
+            echo "== recreated $svc (the channel mount changed)"
+        else
+            docker compose restart "$svc" >/dev/null
+            echo "== restarted $svc"
+        fi
     else
         echo "-> $svc is not running; the change applies when it starts (docker compose up -d in $target)"
     fi
@@ -267,6 +281,35 @@ do_show() {
     fi
 }
 
+# 通道是否在本机的通道目录里：file:///opt/UniTAO/channel/... 的仓库，或 /opt/UniTAO/channel 下的 dir 通道
+local_channel() { [[ $1 == file://$CHANNEL/* || $1 == "$CHANNEL" || $1 == "$CHANNEL"/* ]]; }
+
+# 定下挂到 /opt/UniTAO/channel 的宿主机目录（.env 的 UNITAO_CHANNEL_DIR）。已有别的 vDS 用本机通道时沿用，不能改
+choose_channel_dir() {
+    local want=$1 cur new
+    cur=$(host_of "$CHANNEL") || die "$CHANNEL is not mounted into $svc: add the mount to docker-compose.yml"
+    if cfgpy list | cut -f3 | grep -qE "^(file://)?$CHANNEL(/| |\$)"; then
+        [ -z "$want" ] || [ "$(abs_path "$want")" = "$cur" ] || die "other vDS here use the channel directory $cur, it cannot change to $want"
+        echo "-> channel directory on this host: $cur (used by the other vDS here too)"
+        return 0
+    fi
+    new=$want
+    [ -n "$new" ] || new=$(ask "host directory mounted at $CHANNEL (on one host, give both sites the same directory)" "$cur")
+    new=$(abs_path "$new")
+    mkdir -p "$new"
+    [ "$new" != "$cur" ] || return 0
+    python3 - "$new" <<'PY'
+import sys
+lines = open(".env").read().splitlines() if __import__("os").path.exists(".env") else []
+lines = [l for l in lines if not l.startswith("UNITAO_CHANNEL_DIR=")] + ["UNITAO_CHANNEL_DIR=" + sys.argv[1]]
+open(".env", "w").write("\n".join(lines) + "\n")
+PY
+    export UNITAO_CHANNEL_DIR=$new   # 开头 source 过 .env，环境变量优先于 .env，要一起改
+    load_facts
+    recreate=1
+    echo "== channel directory on this host: $new (UNITAO_CHANNEL_DIR in .env)"
+}
+
 # file:///opt/UniTAO/channel/... 的仓库不存在时建一个空的裸仓库（发布方第一次 push 建分支）
 init_local_repo() {
     local repo=$1 branch=${2:-main} path host
@@ -280,7 +323,7 @@ init_local_repo() {
 
 do_add() {
     local kind=$1; shift
-    local name= repo= dir= branch= folder= workdir= fingerprint= alias= pairs=() opt val asked=0
+    local name= repo= dir= chdir= branch= folder= workdir= fingerprint= alias= pairs=() opt val asked=0
     check_kind "$kind"
     if [ $# -gt 0 ] && [[ $1 != --* ]]; then name=$1; shift; fi
     while [ $# -gt 0 ]; do
@@ -288,6 +331,7 @@ do_add() {
         case $kind:$opt in
             *:--repo) repo=$val ;;
             *:--dir) dir=$val ;;
+            *:--channel-dir) chdir=$val ;;
             *:--branch) branch=$val ;;
             *:--folder) folder=$val ;;
             *:--workdir) workdir=$val ;;
@@ -324,6 +368,11 @@ do_add() {
         fingerprint=$(ask "fingerprint of shared/$name (its fingerprint file on the publishing site, SHA256:...)" "")
     fi
     [ "$kind" = shared ] || [[ $fingerprint =~ ^SHA256:[0-9a-f]{64}$ ]] || die "fingerprint must be SHA256: and 64 hex digits, got [$fingerprint]"
+    if local_channel "${repo:-$dir}"; then
+        choose_channel_dir "$chdir"
+    else
+        [ -z "$chdir" ] || die "--channel-dir is for a channel on this host (file://$CHANNEL/... or --dir $CHANNEL...)"
+    fi
 
     local keydir="$KEYROOT/$kind/$lname" keyhost
     if [ "$kind" = shared ]; then

@@ -62,6 +62,8 @@ ask() {
 port_free() { ! ss -ltnH "sport = :$1" 2>/dev/null | grep -q . && ! docker ps --format '{{.Ports}}' | grep -q ":$1->"; }
 free_port() { local port=$1; while ! port_free "$port"; do port=$((port + 1)); done; echo "$port"; }
 valid_name() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; }
+# abs_path <路径>：交互输入的 ~ 不会被 shell 展开，这里展开后转成绝对路径
+abs_path() { local p=$1; case $p in "~") p=$HOME ;; "~/"*) p=$HOME/${p#"~/"} ;; esac; realpath -m "$p"; }
 
 if [ -z "$kind" ]; then
     [ "$interactive" = 1 ] || die "usage: $(basename "$0") dataservice|inventory <target directory>"
@@ -80,7 +82,7 @@ while :; do
     break
 done
 target=${target:-$(ask "target directory" "$PWD/$name")}
-target=$(realpath -m "$target")
+target=$(abs_path "$target")
 if [ -e "$target" ] && [ -n "$(ls -A "$target" 2>/dev/null)" ]; then
     die "$target is not empty: deploy into a new directory (an existing instance is managed with docker compose there)"
 fi
@@ -107,8 +109,7 @@ if [ "$kind" = dataservice ]; then
     values["<table name>"]=$(ask "base name of the tables" "$name")
     values["<mongodb user>"]=$(ask "MongoDB user" "root")
     values["<mongodb password>"]=$(ask "MongoDB password" "" secret)
-    channel=$(ask "host directory mounted at /opt/UniTAO/channel (dir channels, file:// git repositories)" "$target/channel")
-    envs+=( "UNITAO_MONGODB_NETWORK=$mongo_net" "UNITAO_CHANNEL_DIR=$channel" )
+    envs+=( "UNITAO_MONGODB_NETWORK=$mongo_net" )
 else
     values["<sync interval>"]=$(ask "seconds between schema syncs with the Data Services" "300")
     [[ ${values["<sync interval>"]} =~ ^[0-9]+$ ]] || die "sync interval must be a number"
@@ -156,7 +157,8 @@ with open("config/config.json", "w") as f:
 chmod 600 config/config.json
 rm -f .env.template config/config.template.json
 mkdir -p data logs
-[ "$kind" = dataservice ] && mkdir -p "$channel"
+# 通道目录先用目标目录里的 channel/（.env 的默认值）；要和别的 site 共用本机目录时，unitao_vds.sh 加 vDS 时再改
+[ "$kind" = dataservice ] && mkdir -p channel
 echo "== deployed $kind [$name] into $target"
 
 for net in "$network" ${mongo_net:+"$mongo_net"}; do

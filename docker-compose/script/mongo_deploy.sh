@@ -37,6 +37,7 @@ if [ -z "$target" ]; then
     if [ -t 0 ]; then read -rp "target directory [$PWD/mongodb]: " target; fi
     target=${target:-$PWD/mongodb}
 fi
+case $target in "~") target=$HOME ;; "~/"*) target=$HOME/${target#"~/"} ;; esac   # 交互输入的 ~ 不会被 shell 展开
 target=$(realpath -m "$target")
 if [ -e "$target" ] && [ -n "$(ls -A "$target" 2>/dev/null)" ] && [ ! -f "$target/docker-compose.yml" ]; then
     echo "$target is not empty and has no docker-compose.yml: deploy into a new directory" >&2

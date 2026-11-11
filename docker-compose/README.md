@@ -39,10 +39,11 @@ docker-compose/script/unitao_deploy.sh dataservice ~/infra/unitao-ds
 | Inventory Service URL | `http://<running Inventory in that network>` | Data Service only. on another host: `http://<host>:<port>` |
 | URL from other hosts | `http://<hostname>:<port>` | Data Service only. registered in Inventory next to `http://<name>` |
 | MongoDB network, endpoint, database, table name, user, password | `mongo_net`, `mongodb://mongodb:27017`, `<name>`, `<name>`, `root` | Data Service only |
-| channel directory | `<directory>/channel` | Data Service only. mounted at `/opt/UniTAO/channel` for `dir` channels and `file://` git repositories on this host |
 | sync interval | `300` | Inventory only: seconds between schema syncs |
 
-it then writes `.env` and `config/config.json` (both mode 600, the config holds the MongoDB password), creates `data/` and `logs/`, and starts the instance. a Data Service starts with the default `local` vDS only.
+it then writes `.env` and `config/config.json` (both mode 600, the config holds the MongoDB password), creates `data/` and `logs/` (and `channel/` for a Data Service), and starts the instance. a Data Service starts with the default `local` vDS only; nothing about channels is asked here, that is `unitao_vds.sh`'s job.
+
+the Inventory Service does not have to exist yet: a Data Service that cannot reach it retries its registration every 10 seconds. accept the default `http://unitao-inv` and deploy the Inventory later with that name in the same network. deploy as many instances as you like by running the script again, each into its own directory.
 
 ```
 ~/infra/unitao-ds/
@@ -79,6 +80,8 @@ values not given on the command line (name, channel, fingerprint) are asked for;
 
 a git channel is cloned into `data/vds/<kind>/<name>/channel`. a `file:///opt/UniTAO/channel/<repo>.git` repository that does not exist yet is created as an empty bare repository in the channel directory.
 
+a channel on this host (`file:///opt/UniTAO/channel/<repo>.git` or `--dir /opt/UniTAO/channel…`) lives in the host directory mounted at `/opt/UniTAO/channel`, by default `channel/` in the instance directory. the first such vDS asks for that directory (`--channel-dir <host path>`); when two sites on one host exchange data this way, give both the same directory. it is written to `UNITAO_CHANNEL_DIR` in `.env` and the container is recreated; once a vDS uses it, it stays. a git server needs none of this.
+
 `remove` deletes the entry, its files and its clone (except what another vDS still uses); when the Data Service starts again it drops the table of that vDS and unregisters it from Inventory. what the vDS left on the channel is not touched.
 
 **the hand-over** between the two sides stays with you:
@@ -95,16 +98,17 @@ S=docker-compose/script
 mkdir -p ~/demo
 $S/mongo_deploy.sh ~/infra/mongodb                  # if not running yet
 
-# site-shared: network unitao_shared, ports 8034 / 8031, channel directory ~/demo/channel
+# site-shared: network unitao_shared, ports 8034 / 8031
 $S/unitao_deploy.sh inventory   ~/demo/site-shared-inv      # name site-shared-inv, sync interval 30
 $S/unitao_deploy.sh dataservice ~/demo/site-shared-ds       # name site-shared-ds, Inventory http://site-shared-inv
-# site-mirror: network unitao_mirror, ports 8044 / 8041, the same channel directory ~/demo/channel
+# site-mirror: network unitao_mirror, ports 8044 / 8041
 $S/unitao_deploy.sh inventory   ~/demo/site-mirror-inv
 $S/unitao_deploy.sh dataservice ~/demo/site-mirror-ds
 
 REPO=file:///opt/UniTAO/channel/exchange.git
-$S/unitao_vds.sh ~/demo/site-shared-ds add shared catalog --repo $REPO --folder infra/catalog --publish-interval 5
-$S/unitao_vds.sh ~/demo/site-mirror-ds add mirrored catalog --repo $REPO --folder infra/catalog --pull-interval 10 \
+# both Data Services mount ~/demo/channel at /opt/UniTAO/channel, where the repository is
+$S/unitao_vds.sh ~/demo/site-shared-ds add shared catalog --repo $REPO --channel-dir ~/demo/channel --folder infra/catalog --publish-interval 5
+$S/unitao_vds.sh ~/demo/site-mirror-ds add mirrored catalog --repo $REPO --channel-dir ~/demo/channel --folder infra/catalog --pull-interval 10 \
     --fingerprint "$(cat ~/demo/site-shared-ds/config/vds/shared/catalog/fingerprint)"
 cat ~/demo/site-mirror-ds/config/vds/mirrored/catalog/recipient >> ~/demo/site-shared-ds/config/vds/shared/catalog/recipients
 (cd ~/demo/site-shared-ds && docker compose restart)
