@@ -7,21 +7,11 @@ node_modules/
 
 # docker compose runtime logs (keep README.md placeholder tracked)
 docker-compose/**/logs/*.log
-
-# DataService runtime state written next to its config (see src/DataService/Config/state.go)
+# the templates are deployed into other directories by docker-compose/script/*_deploy.sh;
+# if a deployment ends up inside the repository, keep what it writes out of git (passwords, keys, state, data)
+docker-compose/**/.env
 docker-compose/**/state.json
-# DataService ssh identity (private key + known_hosts) generated next to its config for the git channel
-docker-compose/**/ssh/
-# shared-mirror demo: everything but the templates is generated (configs with the MongoDB password, keys, data, channel)
-docker-compose/shared-mirror/site-*/ds/config/*
-!docker-compose/shared-mirror/site-*/ds/config/config.template.json
-docker-compose/shared-mirror/site-*/*/data/
-docker-compose/shared-mirror/site-*/.env
-docker-compose/shared-mirror/remote/
-# setup_env.sh / clean_env.sh copied into a site directory, and the file list setup_env.sh records there
-docker-compose/*/*/setup_env.sh
-docker-compose/*/*/clean_env.sh
-docker-compose/*/*/.setup_env.keep
-# mongodb template: database files and .env (root password)
-docker-compose/mongodb/data/
-docker-compose/mongodb/.env
+docker-compose/**/data/
+docker-compose/template/*/config/config.json
+docker-compose/template/*/config/vds/
+docker-compose/template/*/channel/

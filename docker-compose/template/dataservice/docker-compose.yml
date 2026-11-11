@@ -1,0 +1,36 @@
+# UniTAO Data Service 实例。用 script/unitao_deploy.sh 部署：复制本目录到目标目录，生成 .env 和 config/config.json。
+# 变量都在 .env（见 .env.template）；COMPOSE_PROJECT_NAME 是 compose 项目名。
+# Data Service 加入两个已有的网络：unitao（与 Inventory Service 互访，用容器名）和 MongoDB 所在的网络。
+services:
+  dataservice:
+    image: ${UNITAO_IMAGE:-ghcr.io/howeyhuo/unitao-dev:latest}
+    container_name: ${UNITAO_NAME:?set UNITAO_NAME in .env}
+    restart: always
+    user: "${UNITAO_UID:-0}:${UNITAO_GID:-0}"
+    environment:
+      HOME: /tmp
+    volumes:
+      # config.json、state.json、vDS 的密钥（config/vds/，由 unitao_vds.sh 维护）
+      - ./config:/opt/UniTAO/config
+      # git 通道的克隆
+      - ./data:/opt/UniTAO/data
+      # 本机上的通道：dir 通道的目录或 file:// 的 git 仓库；用 git 服务器时空着即可
+      - ${UNITAO_CHANNEL_DIR:-./channel}:/opt/UniTAO/channel
+      - ./logs:/opt/UniTAO/log
+      # Data Service 为 git 通道（SSH）生成的私钥：放在命名卷里，不出现在宿主机目录；docker compose down -v 才会删掉
+      - ssh:/opt/UniTAO/ssh
+    ports:
+      - "${UNITAO_PORT:-8001}:80"
+    networks: [unitao, mongodb]
+    command: "DataService -id ${UNITAO_NAME} -config /opt/UniTAO/config/config.json -log /opt/UniTAO/log"
+
+volumes:
+  ssh: {}
+
+networks:
+  unitao:
+    name: ${UNITAO_NETWORK:-unitao_net}
+    external: true
+  mongodb:
+    name: ${UNITAO_MONGODB_NETWORK:-mongo_net}
+    external: true

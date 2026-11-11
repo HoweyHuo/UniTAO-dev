@@ -204,7 +204,9 @@ test/                          # 集成测试与单元测试
 dbSchemas/                     # 数据库表 Schema 定义（DynamoDB、MongoDB）
 demo/                          # 分步演示脚本（PowerShell + Python）
 docker/                        # Docker 构建脚本：唯一的镜像 docker/unitao（发布为 unitao-dev）+ UIServer
-docker-compose/                # Docker Compose 环境配置（模板）；docker-deploy.sh 在新的 Ubuntu 主机上安装 Docker Engine 并把用户加进 docker 组；setup_env.sh / clean_env.sh 拷进 site 目录运行，按模板和 docker-compose.yml 准备（生成配置、建目录、建密钥）与清理该 site
+docker-compose/                # 部署：script/ 下的脚本把 template/ 下的模板（mongodb、dataservice、inventory）复制到指定目录、生成配置并启动；见 docker-compose/README.md（中文版 README.zh.md，改动时两份同步）
+  script/                      # docker-deploy.sh（Ubuntu 上装 Docker Engine）、mongo_deploy.sh、unitao_deploy.sh（交互部署一个 DS 或 Inventory 实例到 UniTAO 目录的子目录，新系统建议先装 Inventory；DS 只带 local vDS）、unitao_vds.sh（交互增删 shared / mirrored vDS，维护 config/vds/<kind>/<name>/ 下的密钥）
+  template/                    # mongodb/、dataservice/、inventory/：每个是一个 compose 项目的模板，不在原地运行
 ui/WebServer/                  # Node.js 静态文件服务器（用于仪表盘）
 schemaVisualizer/              # Express.js Schema 可视化前端服务
 javascript/Schema/             # Schema 库的 JavaScript 移植版
@@ -224,13 +226,16 @@ javascript/Schema/             # Schema 库的 JavaScript 移植版
 开始之前需要准备好以下依赖：
 
 - **Go 1.18+**（部分模块需要 1.24）— 构建所有 Go 二进制
-- **Docker** — 运行演示环境（docker-compose）或构建镜像
+- **Docker** — 部署（docker-compose/）或构建镜像
 - **DynamoDB Local**（可选）— 本地运行 Data Service 的默认数据库；也可以使用 MongoDB 或文件模式（`SysDirFile`，适合测试）
 - **Node.js**（可选）— 运行 `ui/WebServer/` 或 `schemaVisualizer/`
 
-快速启动演示环境（自动拉起 DynamoDB Local + 两个 Data Service + 一个 Inventory Service）：
+用 Docker 部署（MongoDB 单独一个目录；一个 UniTAO 系统一个目录，Inventory 和各 Data Service 是它的子目录、各自一个 compose 项目；先装 Inventory；详见 `docker-compose/README.md`）：
 ```bash
-docker compose -f docker-compose/2data1inv/docker-compose.yml up -d
+docker-compose/script/mongo_deploy.sh ~/infra/mongodb
+docker-compose/script/unitao_deploy.sh inventory ~/infra/unitao      # 先 Inventory -> ~/infra/unitao/inv
+docker-compose/script/unitao_deploy.sh dataservice ~/infra/unitao    # 再 Data Service -> ~/infra/unitao/ds
+docker-compose/script/unitao_vds.sh ~/infra/unitao/ds          # 可选：shared / mirrored vDS
 ```
 
 **Data Service 不写 `config.json`，运行时状态存在旁边的 `state.json`。** 三个值由 DS 自己产生、需要跨重启保留，由 `Config.LoadState` / `State.Save`（`src/DataService/Config/state.go`）读写 config 同目录下的 `state.json`：
@@ -241,7 +246,7 @@ docker compose -f docker-compose/2data1inv/docker-compose.yml up -d
 
 **迁移**：旧版本把这些值回写进了 `config.json`。`state.json` 不存在时，`LoadState` 会以 config 里的 `initialized` / `ds.instanceId` 为初值，立即写出 `state.json`，之后 `config.json` 里这两个字段不再起作用。所以本地被旧版本改脏的 `config.json`，**要先用新版本启动一次**、生成 `state.json`，再 `git checkout` 还原；以前加过 skip-worktree 的，先用 `git update-index --no-skip-worktree <file>` 撤销。
 
-compose 把 `./DataService01` bind-mount 到 `/opt/UniTAO/config`，所以 `state.json` 会出现在工作区里，`.gitignore` 已忽略 `docker-compose/**/state.json`。InventoryService 也不写自己的配置。
+`unitao_deploy.sh` 部署的实例把目标目录的 `config/` bind-mount 到 `/opt/UniTAO/config`，`state.json` 就写在那里（模板不在仓库里原地运行）。InventoryService 也不写自己的配置。
 
 ### Go 构建（所有目标）
 ```bash
@@ -331,8 +336,8 @@ MongoDB 后端读取时用投影去掉文档的内部主键 `_id`（`MongoDb.Obj
 # 单镜像（一体化）
 docker build -f ./docker/unitao/dockerfile -t unitao:latest .
 
-# 启动演示环境
-docker compose -f docker-compose/2data1inv/docker-compose.yml up -d
+# 部署（见 docker-compose/README.md）
+docker-compose/script/unitao_deploy.sh dataservice ~/infra/unitao
 
 # CI 构建（GitHub Actions 推送到 ghcr.io）
 ```

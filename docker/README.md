@@ -23,11 +23,11 @@ the former per-service images (`docker/DataService`, `docker/InventoryService`) 
 ### Run the admin tools
  - DataServiceAdmin
  ```
- docker run -it --rm --network {network_name} -v "$(pwd)"/DataService01:/opt/UniTAO/config ghcr.io/howeyhuo/unitao-dev:latest DataServiceAdmin {data service admin arguments}
+ docker run -it --rm --network {network_name} -v "$(pwd)"/config:/opt/UniTAO/config ghcr.io/howeyhuo/unitao-dev:latest DataServiceAdmin {data service admin arguments}
  ```
  - InventoryServiceAdmin, e.g. sync schema from all Data Services
  ```
- docker run -it --rm --network 2data1inv_default -v "$(pwd)"/InventoryService/config:/opt/UniTAO/config ghcr.io/howeyhuo/unitao-dev:latest InventoryServiceAdmin sync -config /opt/UniTAO/config/config.json
+ docker run -it --rm --network unitao_net -v "$(pwd)"/config:/opt/UniTAO/config ghcr.io/howeyhuo/unitao-dev:latest InventoryServiceAdmin sync -config /opt/UniTAO/config/config.json
  ```
 
 ### Clean Up

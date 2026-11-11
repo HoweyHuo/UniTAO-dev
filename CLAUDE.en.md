@@ -33,13 +33,16 @@ This means:
 The following are needed before you start:
 
 - **Go 1.18+** (some modules need 1.24) — to build all Go binaries
-- **Docker** — to run the demo environment (docker-compose) or build images
+- **Docker** — to deploy (docker-compose/) or build images
 - **DynamoDB Local** (optional) — the default database for running a Data Service locally; MongoDB or file mode (`SysDirFile`, good for testing) also work
 - **Node.js** (optional) — to run `ui/WebServer/` or `schemaVisualizer/`
 
-Quick start for the demo environment (brings up DynamoDB Local + two Data Services + one Inventory Service):
+Deploy with Docker (MongoDB in its own directory; one UniTAO system per directory, its Inventory and Data Services in subdirectories, each a compose project; the Inventory first; see `docker-compose/README.md`):
 ```bash
-docker compose -f docker-compose/2data1inv/docker-compose.yml up -d
+docker-compose/script/mongo_deploy.sh ~/infra/mongodb
+docker-compose/script/unitao_deploy.sh inventory ~/infra/unitao      # first the Inventory -> ~/infra/unitao/inv
+docker-compose/script/unitao_deploy.sh dataservice ~/infra/unitao    # then a Data Service -> ~/infra/unitao/ds
+docker-compose/script/unitao_vds.sh ~/infra/unitao/ds          # optional: shared / mirrored vDS
 ```
 
 **A Data Service never writes `config.json`; its runtime state lives in `state.json` next to it.** Three values are produced by the DS itself and must survive restarts. `Config.LoadState` / `State.Save` (`src/DataService/Config/state.go`) read and write them in `state.json` in the config directory:
@@ -50,7 +53,7 @@ docker compose -f docker-compose/2data1inv/docker-compose.yml up -d
 
 **Migration**: older versions wrote these values back into `config.json`. When `state.json` does not exist, `LoadState` seeds it from `initialized` / `ds.instanceId` in config and writes it out right away; after that those two config fields have no effect. So for a local `config.json` dirtied by an older version, **start the new version once first** to create `state.json`, then `git checkout` the file. If you added skip-worktree earlier, undo it first with `git update-index --no-skip-worktree <file>`.
 
-Compose bind-mounts `./DataService01` at `/opt/UniTAO/config`, so `state.json` shows up in the working tree; `.gitignore` already ignores `docker-compose/**/state.json`. The InventoryService does not write its config either.
+An instance deployed by `unitao_deploy.sh` bind-mounts `config/` of its target directory at `/opt/UniTAO/config`, so `state.json` is written there (the templates are not run in place in the repository). The InventoryService does not write its config either.
 
 ### Go (all targets)
 ```bash
@@ -128,8 +131,8 @@ go test ./test/src/DataServiceTest/... -run TestDataHandler
 # Single image (all-in-one)
 docker build -f ./docker/unitao/dockerfile -t unitao:latest .
 
-# Bring up demo environment
-docker compose -f docker-compose/2data1inv/docker-compose.yml up -d
+# Deploy (see docker-compose/README.md)
+docker-compose/script/unitao_deploy.sh dataservice ~/infra/unitao
 
 # Build image via CI (GitHub Actions pushes to ghcr.io)
 ```
@@ -200,7 +203,7 @@ test/                          # Integration & unit tests
 dbSchemas/                     # DB table schema definitions (DynamoDB, MongoDB)
 demo/                          # Step-by-step demo scripts (PowerShell + Python)
 docker/                        # Docker build scripts: the single image docker/unitao (published as unitao-dev) + UIServer
-docker-compose/                # Docker Compose environment configs
+docker-compose/                # deployment: script/ copies the templates in template/ (mongodb, dataservice, inventory) into a directory, configures and starts them; see docker-compose/README.md (Chinese version README.zh.md, keep both in sync)
 ui/WebServer/                  # Node.js static file server (for dashboard)
 schemaVisualizer/              # Express.js schema visualizer frontend server
 javascript/Schema/             # JavaScript port of schema library (jsonSchema.js, schema.js, record.js)

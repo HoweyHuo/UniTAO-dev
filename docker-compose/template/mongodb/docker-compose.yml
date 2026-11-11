@@ -1,0 +1,75 @@
+# UniTAO 的 Data Service 用的 MongoDB 实例，单独一个 compose：它建立网络（默认 mongo_net），
+# unitao_deploy.sh 部署的 Data Service 以外部网络的方式加入，用 mongodb://mongodb:27017 访问。
+# 另带一个 mongo-express（网页管理界面）。
+# 由 script/mongo_deploy.sh 部署到目标目录：准备 .env（root 密码、当前用户的 UID/GID、端口、mongo-express 的登录与密钥）和 data 目录并启动。
+# 项目名固定，不随目录名：别处同样叫 mongodb 的 compose 目录不会被当成同一个项目、被这里替换掉容器。
+name: unitao-mongodb
+services:
+  mongodb:
+    image: mongo:latest
+    container_name: mongodb
+    restart: always
+    # 以当前用户运行，data/ 里的数据库文件归当前用户（不设时以镜像的 mongodb 用户运行，文件归 UID 999）
+    user: "${UNITAO_UID:-999}:${UNITAO_GID:-999}"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      # 只在 data/ 为空、第一次启动时用来建 root 账号；之后改它不会改已有账号的密码。
+      # 密码都不用 ${VAR:?}：那样连 down / ps / logs 也要先有 .env。空着时镜像的入口脚本报错退出，不会无密码启动
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGODB_ROOT_PASSWORD:-}
+    volumes:
+      - ./data:/data/db
+    # 只给本机的工具用（mongosh、Compass）；UniTAO 经 Docker 网络访问，不需要这个端口
+    ports:
+      - "127.0.0.1:${MONGODB_PORT:-27017}:27017"
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    networks: [mongodb]
+
+  # 网页管理界面，以 root 连接 MongoDB。密码原样拼进连接 URL（镜像不做编码），所以 root 密码只能含 URL 安全的字符
+  mongo-express:
+    image: mongo-express:latest
+    container_name: mongo-express
+    restart: always
+    environment:
+      ME_CONFIG_MONGODB_URL: mongodb://root:${MONGODB_ROOT_PASSWORD:-}@mongodb:27017/
+      ME_CONFIG_MONGODB_ENABLE_ADMIN: "true"
+      # 网页登录（basic auth）
+      ME_CONFIG_BASICAUTH: "true"
+      ME_CONFIG_BASICAUTH_USERNAME: ${MONGO_EXPRESS_USER:-admin}
+      ME_CONFIG_BASICAUTH_PASSWORD: ${MONGO_EXPRESS_PASSWORD:-}
+      ME_CONFIG_SITE_SESSIONSECRET: ${MONGO_EXPRESS_SECRET:-}
+      ME_CONFIG_SITE_COOKIESECRET: ${MONGO_EXPRESS_SECRET:-}
+    # 网页登录密码为空时 mongo-express 会用默认的 admin / pass，所以先检查，空着就报错退出（原入口是 /docker-entrypoint.sh mongo-express）
+    entrypoint:
+      - /sbin/tini
+      - --
+      - sh
+      - -c
+      - |
+        if [ -z "$$ME_CONFIG_BASICAUTH_PASSWORD" ] || [ -z "$$ME_CONFIG_SITE_SESSIONSECRET" ] ||
+           [ "$${ME_CONFIG_MONGODB_URL#mongodb://root:@}" != "$$ME_CONFIG_MONGODB_URL" ]; then
+          echo "mongo-express: a password in .env is empty (MONGODB_ROOT_PASSWORD, MONGO_EXPRESS_PASSWORD, MONGO_EXPRESS_SECRET), run script/mongo_deploy.sh" >&2
+          exit 1
+        fi
+        exec /docker-entrypoint.sh mongo-express
+    # 内网的其它机器也能打开（凭网页登录）；只想本机用就改成 "127.0.0.1:${MONGO_EXPRESS_PORT:-8081}:8081"
+    ports:
+      - "${MONGO_EXPRESS_PORT:-8081}:8081"
+    # /status 不需要网页登录；用 127.0.0.1（localhost 会解析到 IPv6，而 mongo-express 只监听 IPv4）。
+    # 有了它 docker compose up --wait（mongo_deploy.sh）会等到网页能打开才返回
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8081/status"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    networks: [mongodb]
+
+networks:
+  mongodb:
+    name: ${UNITAO_MONGODB_NETWORK:-mongo_net}

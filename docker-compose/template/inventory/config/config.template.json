@@ -1,0 +1,18 @@
+{
+    "database": {
+        "type": "sysdirfile",
+        "sysdirfile": {
+            "path": "/opt/UniTAO/data"
+        }
+    },
+    "http": {
+        "type": "http",
+        "dns": "<instance name>",
+        "port": "80",
+        "id": "<instance name>",
+        "headers": {}
+    },
+    "sync": {
+        "intervalSec": "<sync interval>"
+    }
+}

@@ -1,0 +1,25 @@
+# UniTAO Inventory Service 实例。用 script/unitao_deploy.sh 部署：复制本目录到目标目录，生成 .env 和 config/config.json。
+# 变量都在 .env（见 .env.template）；COMPOSE_PROJECT_NAME 是 compose 项目名。
+# 加入已有的 unitao 网络，与 Data Service 用容器名互访。
+services:
+  inventory:
+    image: ${UNITAO_IMAGE:-ghcr.io/howeyhuo/unitao-dev:latest}
+    container_name: ${UNITAO_NAME:?set UNITAO_NAME in .env}
+    restart: always
+    user: "${UNITAO_UID:-0}:${UNITAO_GID:-0}"
+    environment:
+      HOME: /tmp
+    volumes:
+      - ./config:/opt/UniTAO/config
+      # Inventory 的记录（sysdirfile）
+      - ./data:/opt/UniTAO/data
+      - ./logs:/opt/UniTAO/log
+    ports:
+      - "${UNITAO_PORT:-8000}:80"
+    networks: [unitao]
+    command: "InventoryService -config /opt/UniTAO/config/config.json -log /opt/UniTAO/log"
+
+networks:
+  unitao:
+    name: ${UNITAO_NETWORK:-unitao_net}
+    external: true
