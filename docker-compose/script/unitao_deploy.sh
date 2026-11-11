@@ -1,0 +1,180 @@
+#!/usr/bin/env bash
+
+# ************************************************************************************************************
+# Copyright (c) 2022 Salesforce, Inc.
+# All rights reserved.
+
+# UniTAO was originally created in 2022 by Shai Herzog & Yi Huo as an 
+# Universal No-Coding Heterogeneous Infrastructure Maintenance & Inventory system that is holistically driven by open/community-developed semantic models/schemas.
+
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as published
+# by the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU Affero General Public License for more details.
+
+# You should have received a copy of the GNU Affero General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>
+
+# This copyright notice and license applies to all files in this directory or sub-directories, except when stated otherwise explicitly.
+
+# 部署一个 UniTAO 实例（Data Service 或 Inventory Service）到指定目录：复制 template/<kind>/，按交互的回答生成 .env 和
+# config/config.json，建好目录和 Docker 网络，然后启动。实例只带默认的 local vDS；shared / mirrored vDS 之后用 unitao_vds.sh 加。
+#
+# 用法: unitao_deploy.sh [dataservice|inventory] [<目标目录>]
+#   没给的参数交互询问；每个问题都有默认值（回车接受），只有 MongoDB 密码必须输入。需要 python3（生成 config.json）。
+#
+# 同一台主机上，Data Service 与 Inventory Service 经 unitao 网络（默认 unitao_net）用容器名互访；
+# 在不同主机上时，回答 Inventory 的 URL 和本 Data Service 从别的主机访问的 URL 即可。
+# 部署后在目标目录里用 docker compose 管理；删除实例：docker compose down，再删掉目录（数据库里的表另行删除）。
+
+set -euo pipefail
+SCRIPTS="$(cd "$(dirname "$0")" && pwd)"
+TEMPLATES="$(cd "$SCRIPTS/../template" && pwd)"
+command -v python3 >/dev/null || { echo "unitao_deploy.sh needs python3 (to write config.json)" >&2; exit 1; }
+die() { echo "$*" >&2; exit 1; }
+
+kind=${1:-}
+target=${2:-}
+[ $# -le 2 ] || die "usage: $(basename "$0") [dataservice|inventory] [<target directory>]"
+case $kind in -h|--help) sed -n '/^# 用法:/,/^$/s/^# \{0,1\}//p' "$0"; exit 0 ;; esac
+
+interactive=0; [ -t 0 ] && interactive=1
+# ask <提示> <默认值> [secret]：交互时询问（回车取默认），非交互时取默认；没有默认值又不能问就退出
+ask() {
+    local prompt=$1 def=${2:-} secret=${3:-} val=
+    if [ "$interactive" = 1 ]; then
+        while :; do
+            if [ -n "$secret" ]; then read -rsp "$prompt: " val; echo >&2; else read -rp "$prompt${def:+ [$def]}: " val; fi
+            val=${val:-$def}
+            [ -n "$val" ] && break
+        done
+    else
+        val=$def
+        [ -n "$val" ] || die "$prompt: no default, run interactively"
+    fi
+    printf '%s' "$val"
+}
+port_free() { ! ss -ltnH "sport = :$1" 2>/dev/null | grep -q . && ! docker ps --format '{{.Ports}}' | grep -q ":$1->"; }
+free_port() { local port=$1; while ! port_free "$port"; do port=$((port + 1)); done; echo "$port"; }
+valid_name() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; }
+
+if [ -z "$kind" ]; then
+    [ "$interactive" = 1 ] || die "usage: $(basename "$0") dataservice|inventory <target directory>"
+    PS3="what to deploy: "
+    select kind in dataservice inventory; do [ -n "$kind" ] && break; done
+fi
+[ -d "$TEMPLATES/$kind" ] || die "unknown kind [$kind]: dataservice or inventory"
+
+def_name=unitao-ds; [ "$kind" = inventory ] && def_name=unitao-inv
+while :; do
+    name=$(ask "instance name (container and compose project name)" "$def_name")
+    valid_name "$name" || { echo "only letters, digits and . _ - (starting with a letter or digit)" >&2; [ "$interactive" = 1 ] || exit 1; continue; }
+    if docker container inspect "$name" >/dev/null 2>&1; then
+        echo "a container named [$name] already exists" >&2; [ "$interactive" = 1 ] || exit 1; continue
+    fi
+    break
+done
+target=${target:-$(ask "target directory" "$PWD/$name")}
+target=$(realpath -m "$target")
+if [ -e "$target" ] && [ -n "$(ls -A "$target" 2>/dev/null)" ]; then
+    die "$target is not empty: deploy into a new directory (an existing instance is managed with docker compose there)"
+fi
+
+def_port=8001; [ "$kind" = inventory ] && def_port=8000
+port=$(ask "port on this host" "$(free_port $def_port)")
+[[ $port =~ ^[0-9]+$ ]] || die "port must be a number"
+image=$(ask "image" "ghcr.io/howeyhuo/unitao-dev:latest")
+network=$(ask "Docker network shared by Data Services and Inventory Service" "unitao_net")
+host=$(hostname -f 2>/dev/null || hostname)
+
+declare -A values=( ["<instance name>"]=$name )
+envs=( "COMPOSE_PROJECT_NAME=$name" "UNITAO_NAME=$name" "UNITAO_PORT=$port" "UNITAO_UID=$(id -u)" "UNITAO_GID=$(id -g)"
+       "UNITAO_IMAGE=$image" "UNITAO_NETWORK=$network" )
+
+if [ "$kind" = dataservice ]; then
+    inv=$(docker ps --filter "network=$network" --filter "label=com.docker.compose.service=inventory" --format '{{.Names}}' 2>/dev/null | head -n 1)
+    values["<inventory url>"]=$(ask "Inventory Service URL (http://<container name> in the same network, or http://<host>:<port>)" "http://${inv:-unitao-inv}")
+    values["<url in the unitao network>"]="http://$name"
+    values["<url from other hosts>"]=$(ask "URL of this Data Service from other hosts" "http://$host:$port")
+    mongo_net=$(ask "Docker network of the MongoDB container" "mongo_net")
+    values["<mongodb endpoint>"]=$(ask "MongoDB endpoint (as seen from that network)" "mongodb://mongodb:27017")
+    values["<mongodb database>"]=$(ask "MongoDB database" "$name")
+    values["<table name>"]=$(ask "base name of the tables" "$name")
+    values["<mongodb user>"]=$(ask "MongoDB user" "root")
+    values["<mongodb password>"]=$(ask "MongoDB password" "" secret)
+    channel=$(ask "host directory mounted at /opt/UniTAO/channel (dir channels, file:// git repositories)" "$target/channel")
+    envs+=( "UNITAO_MONGODB_NETWORK=$mongo_net" "UNITAO_CHANNEL_DIR=$channel" )
+else
+    values["<sync interval>"]=$(ask "seconds between schema syncs with the Data Services" "300")
+    [[ ${values["<sync interval>"]} =~ ^[0-9]+$ ]] || die "sync interval must be a number"
+fi
+start=$(ask "start it now? (y/n)" "y")
+
+# ---- 部署 ----
+mkdir -p "$target"
+cp -a "$TEMPLATES/$kind/." "$target/"
+cd "$target"
+
+(umask 077; : > .env)
+while IFS= read -r line; do
+    if [[ $line =~ ^([A-Za-z_][A-Za-z0-9_]*)= ]]; then
+        key=${BASH_REMATCH[1]}
+        for kv in "${envs[@]}"; do
+            if [ "${kv%%=*}" = "$key" ]; then line=$kv; break; fi
+        done
+    fi
+    printf '%s\n' "$line"
+done < .env.template > .env
+
+for p in "${!values[@]}"; do printf '%s\0%s\0' "$p" "${values[$p]}"; done |
+python3 -c '
+import json, sys
+parts = sys.stdin.buffer.read().decode().split("\0")[:-1]
+values = dict(zip(parts[0::2], parts[1::2]))
+def fill(node):
+    if isinstance(node, dict):
+        return {k: fill(v) for k, v in node.items()}
+    if isinstance(node, list):
+        return [fill(v) for v in node]
+    if isinstance(node, str) and node in values:
+        v = values[node]
+        return int(v) if v.isdigit() and node == "<sync interval>" else v
+    if isinstance(node, str) and node.startswith("<") and node.endswith(">"):
+        sys.exit("no value for " + node)
+    return node
+with open("config/config.template.json") as f:
+    cfg = fill(json.load(f))
+with open("config/config.json", "w") as f:
+    json.dump(cfg, f, indent=4, ensure_ascii=False)
+    f.write("\n")
+'
+chmod 600 config/config.json
+rm -f .env.template config/config.template.json
+mkdir -p data logs
+[ "$kind" = dataservice ] && mkdir -p "$channel"
+echo "== deployed $kind [$name] into $target"
+
+for net in "$network" ${mongo_net:+"$mongo_net"}; do
+    docker network inspect "$net" >/dev/null 2>&1 && continue
+    if [ "$net" = "$network" ]; then
+        docker network create "$net" >/dev/null
+        echo "== created Docker network $net"
+    else
+        echo "!! Docker network [$net] does not exist: start MongoDB first (script/mongo_deploy.sh), then docker compose up -d in $target" >&2
+        start=n
+    fi
+done
+
+if [[ $start == [yY]* ]]; then
+    docker compose up -d
+    echo "== started; http://localhost:$port"
+else
+    echo "-> start it with: cd $target && docker compose up -d"
+fi
+[ "$kind" = dataservice ] && echo "-> shared / mirrored vDS: $SCRIPTS/unitao_vds.sh $target"
+echo "-> remove it: cd $target && docker compose down, then delete the directory${mongo_net:+ (and the database ${values["<mongodb database>"]} in MongoDB)}"
