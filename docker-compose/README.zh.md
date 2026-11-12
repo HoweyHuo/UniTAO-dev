@@ -10,6 +10,8 @@ script/
   mongo_deploy.sh      部署 template/mongodb：MongoDB + mongo-express
   unitao_deploy.sh     部署 template/dataservice 或 template/inventory：一个 UniTAO 实例
   unitao_vds.sh        在已部署的 Data Service 上增删 shared / mirrored vDS
+  unitao_update.sh     把已部署的实例更新到当前模板和最新镜像
+  common.sh            脚本共用的函数
 template/
   mongodb/             给 Data Service 和 Inventory Service 用的 MongoDB（见其 README）
   dataservice/         带默认 local vDS 的 Data Service
@@ -78,7 +80,22 @@ $S/unitao_vds.sh ~/infra/unitao-howey/ds               # 5. 可选：shared / mi
 
 容器以你的用户身份运行（`UNITAO_UID` / `UNITAO_GID`），所以它写出的文件都归你；镜像的入口脚本会把你的 UID 加进它的 `/etc/passwd`（ssh 需要）。Data Service 为 git 服务器生成的 ssh 密钥存在命名卷 `ssh` 里（`ssh.dir` = `/opt/UniTAO/ssh`），不在目录里。
 
-两个模板都设了 `pull_policy: always`：每次 `docker compose up` 都向 registry 确认镜像标签当前指向哪个镜像，变了就下载（只下变了的层），所以在实例目录里运行 `docker compose up -d` 就会换到最新的 `latest`。`docker compose restart` 和容器崩溃后的自动重启用本地镜像。所以 registry 或它的下载地址连不上时（比如某些网络连不上 ghcr 的镜像层下载地址），直接 `docker compose up` 会一直挂着；用 `docker compose up -d --pull never` 以本地镜像启动。`unitao_deploy.sh` 和 `unitao_vds.sh` 自己处理：先拉取，失败或 90 秒没有任何进展时用本地镜像启动（`!! cannot pull …: starting with the local copy`），本地也没有就退出。要把新镜像放到这样的主机上，就在那里构建（`docker build -f ./docker/unitao/dockerfile -t ghcr.io/howeyhuo/unitao-dev:latest .`，Go 代理见 `docker/README.md`）。加这一项之前部署的实例，在它的 `docker-compose.yml` 里 `image:` 下面加一行 `pull_policy: always`，或者在 `up` 之前先 `docker compose pull`。
+两个模板都设了 `pull_policy: always`：每次 `docker compose up` 都向 registry 确认镜像标签当前指向哪个镜像，变了就下载（只下变了的层），所以在实例目录里运行 `docker compose up -d` 就会换到最新的 `latest`。`docker compose restart` 和容器崩溃后的自动重启用本地镜像。所以 registry 或它的下载地址连不上时（比如某些网络连不上 ghcr 的镜像层下载地址），直接 `docker compose up` 会一直挂着；用 `docker compose up -d --pull never` 以本地镜像启动。`unitao_deploy.sh`、`unitao_vds.sh`、`unitao_update.sh` 自己处理：先拉取，失败或 90 秒没有新的输出时用本地镜像启动（`!! cannot pull …: starting with the local copy`），本地也没有就退出。要把新镜像放到这样的主机上，就在那里构建（`docker build -f ./docker/unitao/dockerfile -t ghcr.io/howeyhuo/unitao-dev:latest .`，Go 代理见 `docker/README.md`）。加这一项之前部署的实例，用 `unitao_update.sh` 补上。
+
+### 更新已部署的实例
+
+脚本在仓库里运行，`git pull` 就更新了。`unitao_deploy.sh` 从 `template/` 复制到实例目录里的文件不会跟着变；`unitao_update.sh` 把它们更新到当前模板：
+
+```
+$S/unitao_update.sh ~/infra/unitao-howey        # UniTAO 目录里的所有实例，先 Inventory
+$S/unitao_update.sh ~/infra/unitao-howey/ds     # 一个实例
+```
+
+ - `docker-compose.yml` 换成模板里的（它不含实例相关的内容，都在 `.env` 里）；内容不同时旧文件留作 `docker-compose.yml.old`。
+ - `.env.template` 里新增的变量追加进 `.env`，已有的值不动；没有默认值的新变量打印出来，由你设置。
+ - `config/config.json` 和 `state.json` 不改；需要你处理的项打印出来：Inventory 用的不是 MongoDB、Data Service 的 vDS 里还有旧的密钥字段。
+ - 正在运行的实例会被重建：拉最新镜像，拉不下来用本地的（见上文）。没在运行的保持停止；`--no-start` 只更新文件。
+ - 还在用文件存储（`sysdirfile`）的 Inventory 被跳过：新模板不再挂 `data/`，重建会丢掉它的记录。先把它换到 MongoDB（见下文）。
 
 以后要改某个回答，编辑 `.env` 或 `config/config.json`，再运行 `docker compose up -d`（改了容器名或端口会重建容器）。删除实例：在它的目录里运行 `docker compose down -v`（`-v` 连同 ssh 密钥卷一起删），再删掉目录；它的数据留在 MongoDB 里，直到你删掉它的数据库。
 
