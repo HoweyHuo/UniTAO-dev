@@ -11,7 +11,7 @@ script/
   unitao_deploy.sh     deploys template/dataservice or template/inventory: one UniTAO instance
   unitao_vds.sh        adds / removes shared and mirrored vDS on a deployed Data Service
 template/
-  mongodb/             MongoDB for the Data Services (see its README)
+  mongodb/             MongoDB for the Data Services and Inventory Services (see its README)
   dataservice/         a Data Service with the default local vDS
   inventory/           an Inventory Service
 ```
@@ -61,10 +61,10 @@ just running `$S/unitao_deploy.sh` walks you through it. it asks for the UniTAO 
 | Docker network | the network of the instances in the directory, else `<base>_net` | shared by the Data Services and the Inventory Service of one system, created if missing; they reach each other by container name |
 | Inventory Service URL | `http://<Inventory in the directory>`, else `http://<running Inventory in that network>`, else `http://<base>-inv` | Data Service only. on another host: `http://<host>:<port>` |
 | URL from other hosts | `http://<hostname>:<port>` | Data Service only. registered in Inventory next to `http://<name>`; `localhost` works only on this host |
-| MongoDB network, endpoint, database, table name, user, password | `mongo_net`, `mongodb://mongodb:27017`, `<name>`, `<name>`, `root` | Data Service only |
+| MongoDB network, endpoint, database, table name, user, password | `mongo_net`, `mongodb://mongodb:27017`, `<name>`, `<name>`, `root` | both kinds keep their data in MongoDB, each in its own database; the table name is asked of a Data Service only |
 | sync interval | `300` | Inventory only: seconds between schema syncs |
 
-it then writes `.env` and `config/config.json` (both mode 600, the config holds the MongoDB password), creates `data/` and `logs/` (and `channel/` for a Data Service), and starts the instance. a Data Service starts with the default `local` vDS only; nothing about channels is asked here, that is `unitao_vds.sh`'s job.
+it then writes `.env` and `config/config.json` (both mode 600, the config holds the MongoDB password), creates `logs/` (and `data/` and `channel/` for a Data Service), and starts the instance. a Data Service starts with the default `local` vDS only; nothing about channels is asked here, that is `unitao_vds.sh`'s job.
 
 ```
 ~/infra/unitao-howey/ds/
@@ -78,7 +78,9 @@ it then writes `.env` and `config/config.json` (both mode 600, the config holds 
 
 the containers run as your user (`UNITAO_UID` / `UNITAO_GID`), so everything they write is yours; the image's entrypoint adds your UID to its `/etc/passwd` (ssh needs one). a Data Service keeps the ssh key it generates for git servers in the named volume `ssh` (`ssh.dir` = `/opt/UniTAO/ssh`), not in the directory.
 
-to change an answer later, edit `.env` or `config/config.json` and run `docker compose up -d` (a new container name or port recreates the container). to remove an instance: `docker compose down -v` in its directory (`-v` also removes the ssh key volume), then delete the directory; the tables of a Data Service stay in MongoDB until you drop its database.
+to change an answer later, edit `.env` or `config/config.json` and run `docker compose up -d` (a new container name or port recreates the container). to remove an instance: `docker compose down -v` in its directory (`-v` also removes the ssh key volume), then delete the directory; its data stays in MongoDB until you drop its database.
+
+an Inventory Service deployed by an older version keeps its records in files under `inv/data/` (`"type": "sysdirfile"` in its config) and keeps working. to move it to MongoDB, deploy a new one into a new directory with the same name and port after `docker compose down` in the old one: nothing has to be copied, the Data Services register again within `SelfRegCheckSec` and the next sync rebuilds the referrals. `pinnedSources`, if you set any, has to be copied into the new config.
 
 ## Shared and mirrored vDS
 
@@ -166,7 +168,7 @@ what happens on the channel:
 
 if site-mirror stays away longer than `subscriberTimeoutHours` (24 by default, `--subscriber-timeout`), site-shared drops its progress file and stops keeping batches for it; when site-mirror comes back it subscribes again and reloads everything.
 
-clean up: `docker compose down -v` in the four directories, `rm -rf ~/demo`, and drop the databases `site-shared-ds` and `site-mirror-ds` in MongoDB.
+clean up: `docker compose down -v` in the four directories, `rm -rf ~/demo`, and drop the databases `site-shared-inv`, `site-shared-ds`, `site-mirror-inv` and `site-mirror-ds` in MongoDB.
 
 ### How the git channel works
 

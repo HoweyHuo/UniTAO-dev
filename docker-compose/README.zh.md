@@ -11,7 +11,7 @@ script/
   unitao_deploy.sh     部署 template/dataservice 或 template/inventory：一个 UniTAO 实例
   unitao_vds.sh        在已部署的 Data Service 上增删 shared / mirrored vDS
 template/
-  mongodb/             给 Data Service 用的 MongoDB（见其 README）
+  mongodb/             给 Data Service 和 Inventory Service 用的 MongoDB（见其 README）
   dataservice/         带默认 local vDS 的 Data Service
   inventory/           Inventory Service
 ```
@@ -61,10 +61,10 @@ $S/unitao_vds.sh ~/infra/unitao-howey/ds               # 5. 可选：shared / mi
 | Docker 网络 | 目录里各实例的网络，否则 `<base>_net` | 一个系统的 Data Service 和 Inventory Service 共用，不存在就建；它们用容器名互访 |
 | Inventory Service URL | `http://<目录里的 Inventory>`，否则 `http://<该网络里运行中的 Inventory>`，否则 `http://<base>-inv` | 仅 Data Service。Inventory 在别的主机上时：`http://<host>:<port>` |
 | 从别的主机访问的 URL | `http://<hostname>:<port>` | 仅 Data Service。和 `http://<name>` 一起注册到 Inventory；`localhost` 只在本机有效 |
-| MongoDB 网络、地址、数据库、表名、用户、密码 | `mongo_net`、`mongodb://mongodb:27017`、`<name>`、`<name>`、`root` | 仅 Data Service |
+| MongoDB 网络、地址、数据库、表名、用户、密码 | `mongo_net`、`mongodb://mongodb:27017`、`<name>`、`<name>`、`root` | 两种实例都把数据存在 MongoDB，各用自己的数据库；表名只问 Data Service |
 | 同步间隔 | `300` | 仅 Inventory：与各 Data Service 同步 schema 的间隔秒数 |
 
-然后它写出 `.env` 和 `config/config.json`（权限都是 600，config 里有 MongoDB 密码），建 `data/`、`logs/`（Data Service 还有 `channel/`），并启动实例。Data Service 启动时只有默认的 `local` vDS；这里不问任何通道相关的问题，那是 `unitao_vds.sh` 的事。
+然后它写出 `.env` 和 `config/config.json`（权限都是 600，config 里有 MongoDB 密码），建 `logs/`（Data Service 还有 `data/` 和 `channel/`），并启动实例。Data Service 启动时只有默认的 `local` vDS；这里不问任何通道相关的问题，那是 `unitao_vds.sh` 的事。
 
 ```
 ~/infra/unitao-howey/ds/
@@ -78,7 +78,9 @@ $S/unitao_vds.sh ~/infra/unitao-howey/ds               # 5. 可选：shared / mi
 
 容器以你的用户身份运行（`UNITAO_UID` / `UNITAO_GID`），所以它写出的文件都归你；镜像的入口脚本会把你的 UID 加进它的 `/etc/passwd`（ssh 需要）。Data Service 为 git 服务器生成的 ssh 密钥存在命名卷 `ssh` 里（`ssh.dir` = `/opt/UniTAO/ssh`），不在目录里。
 
-以后要改某个回答，编辑 `.env` 或 `config/config.json`，再运行 `docker compose up -d`（改了容器名或端口会重建容器）。删除实例：在它的目录里运行 `docker compose down -v`（`-v` 连同 ssh 密钥卷一起删），再删掉目录；Data Service 的表留在 MongoDB 里，直到你删掉它的数据库。
+以后要改某个回答，编辑 `.env` 或 `config/config.json`，再运行 `docker compose up -d`（改了容器名或端口会重建容器）。删除实例：在它的目录里运行 `docker compose down -v`（`-v` 连同 ssh 密钥卷一起删），再删掉目录；它的数据留在 MongoDB 里，直到你删掉它的数据库。
+
+旧版本部署的 Inventory Service 把记录存在 `inv/data/` 下的文件里（config 里是 `"type": "sysdirfile"`），照常能用。要换到 MongoDB，在旧目录里 `docker compose down` 后，用同样的名字和端口部署一个新的到新目录：不需要复制任何东西，Data Service 在 `SelfRegCheckSec` 内重新注册，下一次 sync 重建 referral。设过 `pinnedSources` 的话要复制到新的 config 里。
 
 ## Shared 与 mirrored vDS
 
@@ -166,7 +168,7 @@ curl localhost:8044/rack                         # site-mirror 的 Inventory 里
 
 如果 site-mirror 离开超过 `subscriberTimeoutHours`（默认 24，`--subscriber-timeout`），site-shared 删掉它的进度文件，不再为它保留 batch；site-mirror 回来后会重新订阅并重新加载全部数据。
 
-清理：在四个实例目录里运行 `docker compose down -v`，`rm -rf ~/demo`，再在 MongoDB 里删掉数据库 `site-shared-ds` 和 `site-mirror-ds`。
+清理：在四个实例目录里运行 `docker compose down -v`，`rm -rf ~/demo`，再在 MongoDB 里删掉数据库 `site-shared-inv`、`site-shared-ds`、`site-mirror-inv` 和 `site-mirror-ds`。
 
 ### git 通道如何工作
 
