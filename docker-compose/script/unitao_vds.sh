@@ -295,7 +295,8 @@ PY
 
 # 远端仓库的默认分支（HEAD 指向的分支）。读到了（空仓库、本机还不存在的 file:// 仓库时输出空）返回 0；
 # 读不到（连不上、没有权限）时在 stderr 说明原因并返回 1。
-# 用 docker compose run 起一个该服务的临时容器，所以和 Data Service 用同样的 ssh 密钥（ssh 卷）、凭据和挂载
+# 用 docker compose run 起一个该服务的临时容器，所以和 Data Service 用同样的 ssh 密钥（ssh 卷）、凭据和挂载；
+# --pull missing：用本地已有的镜像，不像 up 那样每次向 registry 确认（模板里是 pull_policy: always）
 # docker compose run 跑 git 用的环境变量（-e ...），放进数组 GIT_ENV
 git_env() {
     local sshdir
@@ -310,7 +311,7 @@ remote_branch() {
     if [[ $repo == file://* ]]; then h=$(host_of "${repo#file://}") && [ -e "$h" ] || return 0; fi
     git_env
     err=$(mktemp)
-    if ! out=$(docker compose run --rm --no-deps -T "${GIT_ENV[@]}" "$svc" timeout 30 git ls-remote --symref "$repo" HEAD 2>"$err"); then
+    if ! out=$(docker compose run --rm --no-deps --pull missing -T "${GIT_ENV[@]}" "$svc" timeout 30 git ls-remote --symref "$repo" HEAD 2>"$err"); then
         echo "!! cannot read $repo: $(grep -v '^[[:space:]]*$' "$err" | grep -vi '^warning:' | head -n 1)" >&2
         rm -f "$err"
         return 1
@@ -489,7 +490,7 @@ clean_channel() {
     if [[ $repo == file://* ]]; then h=$(host_of "${repo#file://}") && [ -e "$h" ] || { echo "-> no $what on the channel"; return 0; }; fi
     git_env
     err=$(mktemp)
-    out=$(docker compose run --rm --no-deps -T "${GIT_ENV[@]}" -e KIND="$kind" -e TYPE="$type" -e REPO="$repo" -e BRANCH="$branch" \
+    out=$(docker compose run --rm --no-deps --pull missing -T "${GIT_ENV[@]}" -e KIND="$kind" -e TYPE="$type" -e REPO="$repo" -e BRANCH="$branch" \
         -e FOLDER="$folder" -e OWNER="$id" -e SUBID="$id" -e MSG="remove $kind vDS $name: drop its files in $folder" \
         "$svc" sh -c "$CHANNEL_CLEAN" 2>"$err") || out=
     case $out in

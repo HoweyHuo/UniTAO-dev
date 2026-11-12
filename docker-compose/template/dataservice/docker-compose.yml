@@ -4,6 +4,9 @@
 services:
   dataservice:
     image: ${UNITAO_IMAGE:-ghcr.io/howeyhuo/unitao-dev:latest}
+    # 每次 docker compose up 都向 registry 确认标签当前指向的镜像，latest 前移后自动下载（只下变了的层）；
+    # docker compose restart 和容器自动重启不会下载
+    pull_policy: always
     container_name: ${UNITAO_NAME:?set UNITAO_NAME in .env}
     restart: always
     user: "${UNITAO_UID:-0}:${UNITAO_GID:-0}"
