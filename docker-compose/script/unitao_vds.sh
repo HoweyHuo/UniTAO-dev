@@ -34,6 +34,9 @@
 #       [--branch <b>] [--folder <f>] [--workdir <path>] [--pull-interval <秒>]
 #   show shared|mirrored <name>      打印要交给其它 site 的东西
 #   remove shared|mirrored <name>    mirrored 有 alias 时用 alias
+#   recipient list <name>                               列出 shared/<name> 的 subscriber 白名单（recipient 和 subscriber id）
+#   recipient add <name> [<recipient>] [--note <说明>]   把一个 mirror 的 recipient（它 add / show 时打印的）加进白名单
+#   recipient remove <name> [<recipient|subscriber id>]  从白名单删除
 #   缺少的值（名字、通道、指纹）交互询问；非交互时必须在命令行给出。
 #
 #   --branch      git 通道的分支，两边要相同；默认是仓库的默认分支（经 Data Service 的 ssh 密钥 / 凭据读远端 HEAD），读不到时 main
@@ -48,6 +51,7 @@
 #             recipients（subscriber 白名单，Data Service 启动时建；把每个 mirror 的 recipient 追加进去再重启）
 #   mirrored: identity（解密私钥，不离开本实例）、recipient（公钥，交给 shared 追加进它的 recipients）
 #   git 通道的克隆默认在 data/vds/<kind>/<name>/channel。仓库是 /opt/UniTAO/channel 下的 file:// 且不存在时，建一个空的裸仓库。
+# recipient add / remove 改 shared 的 recipients 文件，然后重启 Data Service（白名单在启动时读取）。
 # remove 从 config.json 删掉这一项，删除它的文件和克隆（其它 vDS 还在用的除外）。重启后 Data Service 删除该 vDS 的表
 #   并从 Inventory 注销；通道上的内容（manifest、进度文件）不动。
 
@@ -81,11 +85,12 @@ while [ $# -gt 0 ]; do
     esac
 done
 case ${1:-} in
-    ""|list|add|show|remove) target=$PWD ;;
+    ""|list|add|show|remove|recipient) target=$PWD ;;
     *) target=$1; shift ;;
 esac
 [ -f "$target/docker-compose.yml" ] || die "no docker-compose.yml in $target: give the directory of a Data Service deployed with unitao_deploy.sh"
 cd "$target"
+target=$PWD   # 菜单的动作以子进程重新运行本脚本，要用绝对路径
 
 if [ -f .env ]; then set -a; . ./.env; set +a; fi
 RUN_AS="${UNITAO_UID:-$(id -u)}:${UNITAO_GID:-$(id -g)}"
@@ -270,14 +275,15 @@ do_show() {
         list=$(cfgpy field shared "$name" channel.encrypt.recipientsFile)
         host=$(host_of "$list") || return 0
         n=0; [ -f "$host" ] && n=$(grep -cv '^[[:space:]]*\(#\|$\)' "$host" || true)
-        echo "-> shared/$name: subscriber whitelist $(rel "$host") has $n recipient(s); append each mirror's recipient, then restart"
+        echo "-> shared/$name: subscriber whitelist $(rel "$host") has $n recipient(s); add each mirror's recipient with: recipient add $name <recipient>"
     else
         key=$(cfgpy field mirrored "$name" channel.decrypt.identityFile)
         host=$(host_of "$key") || die "$key is not in a bind mount"
         r="$(dirname "$host")/recipient"
         [ -s "$r" ] || die "$(rel "$r") is missing"
-        echo "-> mirrored/$name: recipient (in $(rel "$r")), append it to the recipients of the shared vDS on the publishing site:"
+        echo "-> mirrored/$name: recipient (in $(rel "$r")), add it to the whitelist of the shared vDS on the publishing site:"
         echo "   $(cat "$r")"
+        echo "   unitao_vds.sh <its directory> recipient add $(cfgpy field mirrored "$name" name) $(cat "$r")"
         echo "   subscriber id: $(base64 -d <"$r" | sha256sum | cut -d' ' -f1)"
     fi
 }
@@ -493,6 +499,140 @@ do_remove() {
     [ "$failed" = 0 ]
 }
 
+# ---- shared 的 subscriber 白名单（recipients 文件：每行一个 base64 X25519 公钥，# 开头是注释） ----
+recpy() {
+    python3 - "$@" <<'PY2'
+import base64, hashlib, os, sys
+op, path, *args = sys.argv[1:]
+HEADER = ("# subscriber whitelist of this shared vDS: one recipient (base64 X25519 public key from\n"
+          "# `DataServiceAdmin enckey`) per line, # starts a comment. restart the Data Service after editing.\n")
+
+def subid(r):
+    try:
+        raw = base64.b64decode(r, validate=True)
+    except Exception:
+        return None
+    return hashlib.sha256(raw).hexdigest() if len(raw) == 32 else None
+
+lines = open(path).read().splitlines() if os.path.exists(path) else []
+
+def entries():
+    for i, l in enumerate(lines):
+        t = l.strip()
+        if t and not t.startswith("#"):
+            yield i, t
+
+def save():
+    with open(path, "w") as f:
+        f.write("\n".join(lines) + "\n" if lines else HEADER)
+
+if op == "list":
+    for i, r in entries():
+        prev = lines[i - 1].strip() if i > 0 else ""
+        note = prev[len("# note:"):].strip() if prev.startswith("# note:") else ""
+        print("%s\t%s\t%s" % (subid(r) or "(invalid)", r, note))
+elif op == "add":
+    r, note = args[0].strip(), args[1] if len(args) > 1 else ""
+    sid = subid(r)
+    if sid is None:
+        sys.exit("[%s] is not a recipient (base64 of a 32-byte X25519 public key)" % r)
+    if any(t == r for _, t in entries()):
+        print("exists\t" + sid)
+        sys.exit(0)
+    if not lines:
+        lines = HEADER.rstrip("\n").split("\n")
+    if note:
+        lines.append("# note: " + note.replace("\n", " "))
+    lines.append(r)
+    save()
+    print("added\t" + sid)
+elif op == "remove":
+    key = args[0].strip()
+    hit = [i for i, t in entries() if t == key or subid(t) == key.lower()]
+    if not hit:
+        sys.exit("[%s] is not in %s" % (key, path))
+    drop = set(hit)
+    for i in hit:  # 连同 add 时写在它上面的说明一起删
+        if i > 0 and lines[i - 1].strip().startswith("# note:"):
+            drop.add(i - 1)
+    removed = [subid(lines[i].strip()) for i in hit]
+    lines = [l for i, l in enumerate(lines) if i not in drop]
+    save()
+    print("\n".join("removed\t" + x for x in removed))
+PY2
+}
+
+# 输出 shared/<name> 的 recipients 文件在宿主机上的路径
+recipients_host() {
+    local name=$1 list
+    check_name "$name"
+    exists shared "$name" || die "shared/$name is not in $(rel "$cfg_host")"
+    list=$(cfgpy field shared "$name" channel.encrypt.recipientsFile)
+    [ -n "$list" ] || die "shared/$name has no channel.encrypt.recipientsFile"
+    host_of "$list" || die "$list is not in a bind mount"
+}
+
+do_recipient() {
+    local op=${1:-} name=${2:-} host key= note= out n
+    [ -n "$name" ] || die "recipient list|add|remove <name> ..."
+    shift 2
+    host=$(recipients_host "$name")
+    case $op in
+        list)
+            [ $# -eq 0 ] || die "recipient list <name>"
+            out=$(recpy list "$host")
+            if [ -z "$out" ]; then echo "shared/$name: no recipients in $(rel "$host")"; return 0; fi
+            echo "shared/$name: recipients in $(rel "$host")"
+            { printf 'SUBSCRIBER ID\tRECIPIENT\tNOTE\n'; echo "$out"; } | column -t -s $'\t'
+            ;;
+        add|remove)
+            if [ $# -gt 0 ] && [[ $1 != --* ]]; then key=$1; shift; fi
+            while [ $# -gt 0 ]; do
+                [ $# -ge 2 ] || die "$1 needs a value"
+                case $op:$1 in
+                    add:--note) note=$2 ;;
+                    *) die "unknown option [$1] for recipient $op (-h)" ;;
+                esac
+                shift 2
+            done
+            if [ "$op" = add ]; then
+                if [ "$(id -u)" = 0 ] && [ "${RUN_AS%%:*}" != 0 ] && [ ! -e "$host" ]; then
+                    die "do not add a recipient as root (sudo) before the file exists: the Data Service runs as UID ${RUN_AS%%:*}"
+                fi
+                [ -n "$key" ] || key=$(ask "recipient of the mirror (printed by its add / show)" "")
+                [ -n "$note" ] || [ "$interactive" = 0 ] || read -rp "note (which site / mirror, optional): " note
+                out=$(recpy add "$host" "$key" "$note")
+                if [ "${out%%$'\t'*}" = exists ]; then echo "-> already in $(rel "$host"): subscriber ${out#*$'\t'}"; return 0; fi
+                echo "== added subscriber ${out#*$'\t'} to $(rel "$host")"
+            else
+                if [ -z "$key" ]; then
+                    [ "$interactive" = 1 ] || die "recipient remove <name> <recipient|subscriber id>"
+                    local -a items; mapfile -t items < <(recpy list "$host" | awk -F'\t' '{ print $1 ($3 == "" ? "" : "  (" $3 ")") }')
+                    [ ${#items[@]} -gt 0 ] || die "shared/$name has no recipients"
+                    local PS3="which subscriber: " item
+                    select item in "${items[@]}"; do [ -n "$item" ] && break; done
+                    key=${item%% *}
+                fi
+                out=$(recpy remove "$host" "$key")
+                echo "$out" | while IFS=$'\t' read -r _ id; do echo "== removed subscriber $id from $(rel "$host")"; done
+            fi
+            n=$(recpy list "$host" | grep -c . || true)
+            echo "-> shared/$name: $n recipient(s)"
+            restart_ds
+            ;;
+        *) die "recipient list|add|remove <name> ..." ;;
+    esac
+}
+
+# 交互菜单里选一个已有的 shared vDS，输出名字
+pick_shared() {
+    local -a items; mapfile -t items < <(cfgpy list | awk -F'\t' '$1 == "shared" { print $2 }')
+    [ ${#items[@]} -gt 0 ] || die "no shared vDS yet"
+    local PS3="which shared vDS: " item
+    select item in "${items[@]}"; do [ -n "$item" ] && break; done
+    echo "$item"
+}
+
 # 交互菜单里选一个已有的 vDS，输出 "kind name"
 pick() {
     local -a items; mapfile -t items < <(cfgpy list | cut -f1,2 | tr '\t' '/')
@@ -515,12 +655,19 @@ menu() {
     echo "vDS of $svc in $target"
     while :; do
         local PS3="action: " action kn
-        select action in list "add shared" "add mirrored" show remove quit; do [ -n "$action" ] && break; done
+        select action in list "add shared" "add mirrored" show recipients remove quit; do [ -n "$action" ] && break; done
         case $action in
             list) sub list || true ;;
             "add shared") sub add shared || true ;;
             "add mirrored") sub add mirrored || true ;;
             show) kn=$(pick) && sub show $kn || true ;;
+            recipients)
+                if kn=$(pick_shared) && sub recipient list "$kn"; then
+                    local PS3="recipients of shared/$kn: " ra
+                    select ra in add remove back; do [ -n "$ra" ] && break; done
+                    [ "$ra" = back ] || sub recipient "$ra" "$kn" || true
+                fi
+                ;;
             remove) kn=$(pick) && read -rp "remove ${kn/ //}, its keys and its table? [y/N] " a && [[ $a == [yY]* ]] && sub remove $kn || true ;;
             quit) break ;;
         esac
@@ -535,5 +682,6 @@ case $cmd in
     show) check_kind "${1:-}"; check_name "${2:-}"; do_show "$1" "$2" ;;
     add) [ $# -gt 0 ] || die "add shared|mirrored ..."; do_add "$@" ;;
     remove) check_kind "${1:-}"; check_name "${2:-}"; do_remove "$1" "$2" ;;
+    recipient) do_recipient "$@" ;;
     *) usage >&2; exit 1 ;;
 esac
