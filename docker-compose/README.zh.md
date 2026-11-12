@@ -78,7 +78,7 @@ $S/unitao_vds.sh ~/infra/unitao-howey/ds               # 5. 可选：shared / mi
 
 容器以你的用户身份运行（`UNITAO_UID` / `UNITAO_GID`），所以它写出的文件都归你；镜像的入口脚本会把你的 UID 加进它的 `/etc/passwd`（ssh 需要）。Data Service 为 git 服务器生成的 ssh 密钥存在命名卷 `ssh` 里（`ssh.dir` = `/opt/UniTAO/ssh`），不在目录里。
 
-两个模板都设了 `pull_policy: always`：每次 `docker compose up` 都向 registry 确认镜像标签当前指向哪个镜像，变了就下载（只下变了的层），所以在实例目录里运行 `docker compose up -d` 就会换到最新的 `latest`。`docker compose restart` 和容器崩溃后的自动重启用本地镜像。因此 `up` 需要能连上 registry；离线时用 `docker compose up -d --pull never`。加这一项之前部署的实例，在它的 `docker-compose.yml` 里 `image:` 下面加一行 `pull_policy: always`，或者在 `up` 之前先 `docker compose pull`。
+两个模板都设了 `pull_policy: always`：每次 `docker compose up` 都向 registry 确认镜像标签当前指向哪个镜像，变了就下载（只下变了的层），所以在实例目录里运行 `docker compose up -d` 就会换到最新的 `latest`。`docker compose restart` 和容器崩溃后的自动重启用本地镜像。所以 registry 或它的下载地址连不上时（比如某些网络连不上 ghcr 的镜像层下载地址），直接 `docker compose up` 会一直挂着；用 `docker compose up -d --pull never` 以本地镜像启动。`unitao_deploy.sh` 和 `unitao_vds.sh` 自己处理：先拉取，失败或 90 秒没有任何进展时用本地镜像启动（`!! cannot pull …: starting with the local copy`），本地也没有就退出。要把新镜像放到这样的主机上，就在那里构建（`docker build -f ./docker/unitao/dockerfile -t ghcr.io/howeyhuo/unitao-dev:latest .`，Go 代理见 `docker/README.md`）。加这一项之前部署的实例，在它的 `docker-compose.yml` 里 `image:` 下面加一行 `pull_policy: always`，或者在 `up` 之前先 `docker compose pull`。
 
 以后要改某个回答，编辑 `.env` 或 `config/config.json`，再运行 `docker compose up -d`（改了容器名或端口会重建容器）。删除实例：在它的目录里运行 `docker compose down -v`（`-v` 连同 ssh 密钥卷一起删），再删掉目录；它的数据留在 MongoDB 里，直到你删掉它的数据库。
 
