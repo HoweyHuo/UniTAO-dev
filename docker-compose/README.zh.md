@@ -100,6 +100,10 @@ unitao_vds.sh <目录> remove shared|mirrored <name>
 | shared | `signing.pem`、`fingerprint`、`recipients` | 签名私钥（不离开本实例）；它的指纹，每个 mirror 都需要；订阅方白名单（由 Data Service 创建，每行一个 recipient） |
 | mirrored | `identity`、`recipient` | 解密私钥（不离开本实例）；它的公钥，交给发布方加进白名单 |
 
+git 通道的分支默认是仓库的默认分支（Gitee 上常是 `master`），用 Data Service 的 ssh 密钥和凭据从远端读取；读不到时（还没有权限、空仓库）用 `main`。分支总会写进配置；两边必须用同一个分支，用 `--branch` 指定。
+
+以 Data Service 运行的用户（`UNITAO_UID`，在 docker 组里）运行脚本，不要用 sudo：`add` 拒绝以 root 运行，因为 root 建出的文件 Data Service 用不了。`remove` 可以用 sudo，比如清理这种文件。
+
 git 通道克隆在 `data/vds/<kind>/<name>/channel`。`file:///opt/UniTAO/channel/<repo>.git` 的仓库不存在时，会在通道目录里建一个空的裸仓库。
 
 本机上的通道（`file:///opt/UniTAO/channel/<repo>.git` 或 `--dir /opt/UniTAO/channel…`）放在挂到 `/opt/UniTAO/channel` 的宿主机目录里，默认是实例目录里的 `channel/`。加第一个这样的 vDS 时会询问这个目录（`--channel-dir <宿主机路径>`）；同一台主机上两个 site 用这种方式交换数据时，两边给同一个目录。它写进 `.env` 的 `UNITAO_CHANNEL_DIR`，并重建容器；一旦有 vDS 在用，就不能再改。用 git 服务器时这些都不需要。

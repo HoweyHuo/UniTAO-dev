@@ -100,6 +100,10 @@ values not given on the command line (name, channel, fingerprint) are asked for;
 | shared | `signing.pem`, `fingerprint`, `recipients` | the signing key (private, never leaves the instance); its fingerprint, which every mirror needs; the subscriber whitelist (created by the Data Service, one recipient per line) |
 | mirrored | `identity`, `recipient` | the decryption key (private, never leaves the instance); its public key, for the publisher's whitelist |
 
+the branch of a git channel defaults to the repository's default branch (on Gitee often `master`), read from the remote with the Data Service's ssh key and credentials; when it cannot be read (no access yet, an empty repository) it is `main`. it is always written to the config; both sides must use the same branch, `--branch` sets it.
+
+run the script as the user the Data Service runs as (`UNITAO_UID`, in group docker), not with sudo: `add` refuses to run as root, because the Data Service could not use the files root creates. `remove` may run with sudo, e.g. to clean up such files.
+
 a git channel is cloned into `data/vds/<kind>/<name>/channel`. a `file:///opt/UniTAO/channel/<repo>.git` repository that does not exist yet is created as an empty bare repository in the channel directory.
 
 a channel on this host (`file:///opt/UniTAO/channel/<repo>.git` or `--dir /opt/UniTAO/channel…`) lives in the host directory mounted at `/opt/UniTAO/channel`, by default `channel/` in the instance directory. the first such vDS asks for that directory (`--channel-dir <host path>`); when two sites on one host exchange data this way, give both the same directory. it is written to `UNITAO_CHANNEL_DIR` in `.env` and the container is recreated; once a vDS uses it, it stays. a git server needs none of this.

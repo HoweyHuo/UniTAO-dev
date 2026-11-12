@@ -36,6 +36,7 @@
 #   remove shared|mirrored <name>    mirrored 有 alias 时用 alias
 #   缺少的值（名字、通道、指纹）交互询问；非交互时必须在命令行给出。
 #
+#   --branch      git 通道的分支，两边要相同；默认是仓库的默认分支（经 Data Service 的 ssh 密钥 / 凭据读远端 HEAD），读不到时 main
 #   --channel-dir 通道在本机上时（file:///opt/UniTAO/channel/... 或 --dir /opt/UniTAO/channel...）挂到 /opt/UniTAO/channel 的
 #                 宿主机目录，两个 site 在同一台主机上就给同一个目录；默认是实例目录里的 channel/。写进 .env 的 UNITAO_CHANNEL_DIR，
 #                 已有别的 vDS 用本机通道时不能再改
@@ -310,6 +311,19 @@ PY
     echo "== channel directory on this host: $new (UNITAO_CHANNEL_DIR in .env)"
 }
 
+# 远端仓库的默认分支（HEAD 指向的分支），查不到（连不上、没有权限、空仓库）时输出空。
+# 用 docker compose run 起一个该服务的临时容器，所以和 Data Service 用同样的 ssh 密钥（ssh 卷）、凭据和挂载
+remote_branch() {
+    local repo=$1 h sshdir out env=(-e GIT_TERMINAL_PROMPT=0)
+    if [[ $repo == file://* ]]; then h=$(host_of "${repo#file://}") && [ -e "$h" ] || return 0; fi
+    if ! docker compose config | grep -q GIT_SSH_COMMAND; then   # compose 里自带了 GIT_SSH_COMMAND 就用它的
+        sshdir=$(python3 -c 'import json,sys; print((json.load(open(sys.argv[1])).get("ssh") or {}).get("dir") or "/opt/UniTAO/ssh")' "$cfg_host")
+        env+=(-e "GIT_SSH_COMMAND=ssh -i $sshdir/id_ed25519 -o IdentitiesOnly=yes -o UserKnownHostsFile=$sshdir/known_hosts -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o ConnectTimeout=15")
+    fi
+    out=$(docker compose run --rm --no-deps -T "${env[@]}" "$svc" timeout 30 git ls-remote --symref "$repo" HEAD 2>/dev/null) || true
+    sed -n 's|^ref: refs/heads/\([^[:space:]]*\)[[:space:]]*HEAD$|\1|p' <<<"$out" | head -n 1
+}
+
 # file:///opt/UniTAO/channel/... 的仓库不存在时建一个空的裸仓库（发布方第一次 push 建分支）
 init_local_repo() {
     local repo=$1 branch=${2:-main} path host
@@ -325,6 +339,11 @@ do_add() {
     local kind=$1; shift
     local name= repo= dir= chdir= branch= folder= workdir= fingerprint= alias= pairs=() opt val asked=0
     check_kind "$kind"
+    # 以 root（sudo）add 时建出的目录和文件归 root，以 UNITAO_UID 运行的 Data Service 和密钥工具都写不进、读不到。
+    # remove 只删除，用 root 正好能清理这种残留
+    if [ "$(id -u)" = 0 ] && [ "${RUN_AS%%:*}" != 0 ]; then
+        die "do not add a vDS as root (sudo): the Data Service runs as UID ${RUN_AS%%:*} and could not use the files root creates. run it as that user (in group docker)"
+    fi
     if [ $# -gt 0 ] && [[ $1 != --* ]]; then name=$1; shift; fi
     while [ $# -gt 0 ]; do
         opt=$1; val=${2:-}; [ $# -ge 2 ] || die "$opt needs a value"
@@ -364,6 +383,17 @@ do_add() {
     if [ -z "$folder" ] && [ "$asked" = 1 ]; then
         folder=$(ask "folder of the vDS in the channel (the same on both sites)" "$name")
     fi
+    # 分支默认取仓库的默认分支（Gitee 常是 master），总是写进配置；Data Service 自己的缺省是 main
+    if [ -n "$repo" ] && [ -z "$branch" ]; then
+        echo "-> reading the default branch of $repo ..." >&2
+        local def; def=$(remote_branch "$repo")
+        if [ "$asked" = 1 ]; then
+            branch=$(ask "branch (the same on both sites)" "${def:-main}")
+        else
+            branch=${def:-main}
+            echo "== branch $branch${def:+ (the default branch of the repository)}" >&2
+        fi
+    fi
     if [ "$kind" = mirrored ] && [ -z "$fingerprint" ]; then
         fingerprint=$(ask "fingerprint of shared/$name (its fingerprint file on the publishing site, SHA256:...)" "")
     fi
@@ -383,7 +413,7 @@ do_add() {
     if [ -n "$repo" ]; then
         workdir=${workdir:-$DATAROOT/$kind/$lname/channel}
         pairs+=("channel.type=git" "channel.repo=$repo")
-        [ -z "$branch" ] || pairs+=("channel.branch=$branch")
+        pairs+=("channel.branch=$branch")
         [ -z "$folder" ] || pairs+=("channel.folder=$folder")
         pairs+=("channel.workDir=$workdir")
         host_of "$workdir" >/dev/null || echo "!! $workdir is not in a bind mount: the clone is lost when the container is recreated (it is fetched again)" >&2
@@ -442,6 +472,14 @@ pick() {
     echo "${item%%/*} ${item#*/}"
 }
 
+# 菜单的每个动作在单独的进程里运行：在 `|| true` 里 bash 会关掉 set -e，出错后会接着往下做（写进半成品的配置）
+sub() {
+    local opts=()
+    [ -z "$service" ] || opts+=(--service "$service")
+    [ "$restart" = 1 ] || opts+=(--no-restart)
+    "$SELF" "${opts[@]}" "$target" "$@"
+}
+
 menu() {
     [ "$interactive" = 1 ] || { usage >&2; exit 1; }
     echo "vDS of $svc in $target"
@@ -449,11 +487,11 @@ menu() {
         local PS3="action: " action kn
         select action in list "add shared" "add mirrored" show remove quit; do [ -n "$action" ] && break; done
         case $action in
-            list) (do_list) || true ;;
-            "add shared") (do_add shared) || true ;;
-            "add mirrored") (do_add mirrored) || true ;;
-            show) (kn=$(pick) && do_show $kn) || true ;;
-            remove) (kn=$(pick) && read -rp "remove ${kn/ //}, its keys and its table? [y/N] " a && [[ $a == [yY]* ]] && do_remove $kn) || true ;;
+            list) sub list || true ;;
+            "add shared") sub add shared || true ;;
+            "add mirrored") sub add mirrored || true ;;
+            show) kn=$(pick) && sub show $kn || true ;;
+            remove) kn=$(pick) && read -rp "remove ${kn/ //}, its keys and its table? [y/N] " a && [[ $a == [yY]* ]] && sub remove $kn || true ;;
             quit) break ;;
         esac
         echo
