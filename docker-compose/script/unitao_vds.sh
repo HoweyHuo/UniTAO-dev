@@ -53,7 +53,8 @@
 #   git 通道的克隆默认在 data/vds/<kind>/<name>/channel。仓库是 /opt/UniTAO/channel 下的 file:// 且不存在时，建一个空的裸仓库。
 # recipient add / remove 改 shared 的 recipients 文件，然后重启 Data Service（白名单在启动时读取）。
 # remove 从 config.json 删掉这一项，删除它的文件和克隆（其它 vDS 还在用的除外）。重启后 Data Service 删除该 vDS 的表
-#   并从 Inventory 注销；通道上的内容（manifest、进度文件）不动。
+#   并从 Inventory 注销。之后清理它留在通道上的东西：shared 删 folder 下自己的 manifest、queue、history、subscribers
+#   （manifest 是别的密钥签的就不动），mirrored 删来源 folder 下自己的进度文件；--no-restart 而 Data Service 在运行时不清理。
 
 set -euo pipefail
 SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
@@ -202,6 +203,12 @@ elif op == "field":
     for p in args[2].split("."):
         e = (e or {}).get(p)
     print(e or "")
+elif op == "channel":
+    # 类型、仓库（dir 通道是路径）、分支、folder（缺省是 vDS 的 name，与 Channel.Config.ResolvedFolder 相同）
+    _, e = find(args[0], args[1])
+    ch = e.get("channel") or {}
+    print("\t".join((ch.get("type") or "", ch.get("repo") or ch.get("path") or "",
+                     ch.get("branch") or "main", (ch.get("folder") or e["name"]).strip("/"))))
 elif op == "files":
     _, e = find(args[0], args[1])
     files(e)
@@ -320,15 +327,21 @@ PY
 # 远端仓库的默认分支（HEAD 指向的分支）。读到了（空仓库、本机还不存在的 file:// 仓库时输出空）返回 0；
 # 读不到（连不上、没有权限）时在 stderr 说明原因并返回 1。
 # 用 docker compose run 起一个该服务的临时容器，所以和 Data Service 用同样的 ssh 密钥（ssh 卷）、凭据和挂载
+# docker compose run 跑 git 用的环境变量（-e ...），放进数组 GIT_ENV
+git_env() {
+    local sshdir
+    GIT_ENV=(-e GIT_TERMINAL_PROMPT=0)
+    docker compose config | grep -q GIT_SSH_COMMAND && return 0   # compose 里自带了 GIT_SSH_COMMAND 就用它的
+    sshdir=$(python3 -c 'import json,sys; print((json.load(open(sys.argv[1])).get("ssh") or {}).get("dir") or "/opt/UniTAO/ssh")' "$cfg_host")
+    GIT_ENV+=(-e "GIT_SSH_COMMAND=ssh -i $sshdir/id_ed25519 -o IdentitiesOnly=yes -o UserKnownHostsFile=$sshdir/known_hosts -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=4")
+}
+
 remote_branch() {
-    local repo=$1 h sshdir out err env=(-e GIT_TERMINAL_PROMPT=0)
+    local repo=$1 h out err
     if [[ $repo == file://* ]]; then h=$(host_of "${repo#file://}") && [ -e "$h" ] || return 0; fi
-    if ! docker compose config | grep -q GIT_SSH_COMMAND; then   # compose 里自带了 GIT_SSH_COMMAND 就用它的
-        sshdir=$(python3 -c 'import json,sys; print((json.load(open(sys.argv[1])).get("ssh") or {}).get("dir") or "/opt/UniTAO/ssh")' "$cfg_host")
-        env+=(-e "GIT_SSH_COMMAND=ssh -i $sshdir/id_ed25519 -o IdentitiesOnly=yes -o UserKnownHostsFile=$sshdir/known_hosts -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o ConnectTimeout=15")
-    fi
+    git_env
     err=$(mktemp)
-    if ! out=$(docker compose run --rm --no-deps -T "${env[@]}" "$svc" timeout 30 git ls-remote --symref "$repo" HEAD 2>"$err"); then
+    if ! out=$(docker compose run --rm --no-deps -T "${GIT_ENV[@]}" "$svc" timeout 30 git ls-remote --symref "$repo" HEAD 2>"$err"); then
         echo "!! cannot read $repo: $(grep -v '^[[:space:]]*$' "$err" | grep -vi '^warning:' | head -n 1)" >&2
         rm -f "$err"
         return 1
@@ -477,11 +490,83 @@ do_add() {
     restart_ds
 }
 
+# 在通道容器里删除一个 vDS 留在通道上的东西，stdout 输出一行结果：deleted、none、foreign <指纹>。
+# shared：folder 下自己的 manifest、queue、history、subscribers（manifest 不是自己的密钥签的就不动；不碰下级 folder）。
+# mirrored：来源 folder 下自己的进度文件 subscribers/<id>.json。
+# git 通道在临时克隆里改、提交、push，被拒或连接断了就从头重做。
+CHANNEL_CLEAN='
+set -u
+del() {
+    r=$1/$FOLDER
+    if [ "$KIND" = shared ]; then
+        [ -f "$r/manifest.json" ] || { echo none; return 0; }
+        fp=$(sed -n "s/^ *\"fingerprint\": *\"\\([^\"]*\\)\".*/\\1/p" "$r/manifest.json" | head -n 1)
+        [ "$fp" = "$FP" ] || { echo "foreign ${fp:-unknown}"; return 0; }
+        set -- manifest.json manifest.sig queue history subscribers
+    else
+        [ -f "$r/subscribers/$SUBID.json" ] || { echo none; return 0; }
+        set -- "subscribers/$SUBID.json"
+    fi
+    (cd "$r" && $RM "$@") >&2 || return 1
+    echo deleted
+}
+if [ "$TYPE" = dir ]; then RM="rm -rf"; del "$REPO"; exit; fi
+RM="git rm -rq --ignore-unmatch --"
+d=$(mktemp -d); trap "rm -rf $d" EXIT
+n=0
+while :; do
+    n=$((n + 1)); rm -rf "$d/c"
+    if heads=$(timeout 60 git ls-remote --heads "$REPO" "$BRANCH"); then
+        [ -n "$heads" ] || { echo none; exit 0; }
+        if timeout 600 git clone -q --depth 1 -b "$BRANCH" "$REPO" "$d/c" >&2; then
+            out=$(del "$d/c") || exit 1
+            [ "$out" = deleted ] || { echo "$out"; exit 0; }
+            git -C "$d/c" -c user.name=UniTAO -c user.email=unitao@localhost commit -qm "$MSG" >&2 || exit 1
+            timeout 600 git -C "$d/c" push -q origin "$BRANCH" >&2 && { echo deleted; exit 0; }
+        fi
+    fi
+    [ $n -lt 5 ] || exit 1
+    sleep 3
+done
+'
+
+# remove 之后清理该 vDS 留在通道上的东西。$2 是 cfgpy channel 的输出，$3 是 shared 的指纹或 mirrored 的 subscriber id
+clean_channel() {
+    local kind=$1 type repo branch folder id=$3 what h out err
+    IFS=$'\t' read -r type repo branch folder <<<"$2"
+    if [ "$kind" = shared ]; then what="manifest of shared/$name in $folder"; else what="progress file of mirrored/$name in $folder"; fi
+    [ -n "$id" ] || { echo "!! the channel is left as it is: cannot tell the $what (its key file is missing)" >&2; return 1; }
+    if [[ $repo == file://* ]]; then h=$(host_of "${repo#file://}") && [ -e "$h" ] || { echo "-> no $what on the channel"; return 0; }; fi
+    git_env
+    err=$(mktemp)
+    out=$(docker compose run --rm --no-deps -T "${GIT_ENV[@]}" -e KIND="$kind" -e TYPE="$type" -e REPO="$repo" -e BRANCH="$branch" \
+        -e FOLDER="$folder" -e FP="$id" -e SUBID="$id" -e MSG="remove $kind vDS $name: drop its files in $folder" \
+        "$svc" sh -c "$CHANNEL_CLEAN" 2>"$err") || out=
+    case $out in
+        deleted) echo "== deleted the $what from the channel" ;;
+        none) echo "-> no $what on the channel" ;;
+        foreign*) echo "-> left the manifest in $folder as it is: it is signed by another key (${out#foreign })" ;;
+        *) echo "!! could not clean the $what: $(grep -v '^[[:space:]]*$' "$err" | grep -vi '^\(warning:\|remote:\)' | tail -n 1)" >&2
+           rm -f "$err"; return 1 ;;
+    esac
+    rm -f "$err"
+}
+
 do_remove() {
-    local kind=$1 name=$2 line field path host others failed=0 d
+    local kind=$1 name=$2 line field path host others failed=0 d chan id= f
     exists "$kind" "$name" || die "$kind/$name is not in $(rel "$cfg_host")"
     local -a mine; mapfile -t mine < <(cfgpy files "$kind" "$name")
     others=$(cfgpy otherfiles "$kind" "$name" | cut -f2)
+    # 删密钥之前记下在通道上认自己的东西：shared 的指纹，mirrored 的 subscriber id（recipient 的 sha256）
+    chan=$(cfgpy channel "$kind" "$name")
+    if [ "$kind" = shared ]; then
+        f=$(cfgpy field shared "$name" signingKeyFile)
+        if host=$(host_of "$f") && [ -s "$(dirname "$host")/fingerprint" ]; then id=$(cat "$(dirname "$host")/fingerprint")
+        elif [ -s "${host:-}" ]; then id=$(admin "$f" fingerprint -key "$f" 2>/dev/null || true); fi
+    else
+        f=$(cfgpy field mirrored "$name" channel.decrypt.identityFile)
+        host=$(host_of "$f") && [ -s "$(dirname "$host")/recipient" ] && id=$(base64 -d <"$(dirname "$host")/recipient" | sha256sum | cut -d' ' -f1)
+    fi
     cfgpy remove "$kind" "$name"
     echo "== removed $kind/$name from $(rel "$cfg_host")"
     for line in "${mine[@]}" "keydir"$'\t'"$KEYROOT/$kind/$name"; do
@@ -495,7 +580,13 @@ do_remove() {
         host=$(host_of "$d") && rmdir "$host" 2>/dev/null || true
     done
     restart_ds
-    echo "-> the Data Service drops the table of $kind/$name and unregisters it from Inventory when it starts; the channel is left as it is"
+    # 还在运行旧配置的 Data Service 会把 manifest / 进度文件写回去，这时不清理
+    if [ "$restart" = 0 ] && [ -n "$(docker compose ps -q --status running "$svc" 2>/dev/null)" ]; then
+        echo "-> the channel is left as it is: $svc still runs $kind/$name (run remove without --no-restart to clean it)"
+    else
+        clean_channel "$kind" "$chan" "$id" || failed=1
+    fi
+    echo "-> the Data Service drops the table of $kind/$name and unregisters it from Inventory when it starts"
     [ "$failed" = 0 ]
 }
 
