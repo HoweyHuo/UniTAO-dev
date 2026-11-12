@@ -91,6 +91,9 @@ unitao_vds.sh <目录> add shared <name> --repo <url> [--folder <f>] [--branch <
 unitao_vds.sh <目录> add mirrored <name> --fingerprint <SHA256:…> --repo <url> [--folder <f>] [--alias <a>] [--pull-interval <s>] …
 unitao_vds.sh <目录> show shared|mirrored <name>
 unitao_vds.sh <目录> remove shared|mirrored <name>
+unitao_vds.sh <目录> recipient list <name>
+unitao_vds.sh <目录> recipient add <name> <recipient> [--note <说明>]
+unitao_vds.sh <目录> recipient remove <name> <recipient|subscriber id>
 ```
 
 命令行没给的值（名字、通道、指纹）会询问；`-h` 列出所有选项。用 `--dir <path>` 代替 `--repo` 就是 `dir` 通道。它修改 `config/config.json` 的 `vds` 段，把每个 vDS 的文件放在 `config/vds/<kind>/<name>/`，Data Service 在运行时重启它（`--no-restart` 不重启；配置在启动时读取）：
@@ -113,7 +116,9 @@ git 通道克隆在 `data/vds/<kind>/<name>/channel`。`file:///opt/UniTAO/chann
 **两边之间的交接**由你来做：
 
  - 发布方的 `fingerprint` 交给每个 mirror：`add mirrored … --fingerprint "$(cat …/config/vds/shared/<name>/fingerprint)"`。它是密钥的指纹（`SHA256:` 加 64 位十六进制），不是 `signing.pem`。
- - 每个 mirror 的 `recipient` 追加到发布方的 `recipients`，然后重启发布方。在那之前 mirror 一直是 `untrusted`。
+ - 每个 mirror 的 `recipient`（它 `add` / `show` 时打印）加进发布方的白名单：在发布方运行 `recipient add <name> <recipient>`。在那之前 mirror 一直是 `untrusted`。
+
+`recipient` 修改 shared vDS 的白名单 `config/vds/shared/<name>/recipients`，并重启 Data Service（白名单在启动时读取）。`add` 检查给的值是不是 recipient，已有的跳过；`--note` 在它上面加一行 `# note:`，`list` 把它显示在 subscriber id 旁边。`remove` 接受 recipient 或它的 subscriber id（`list` 和通道上 `subscribers/<id>.json` 里的 id），连同它的说明一起删。被删的 mirror 无法解密之后发布的 batch，它的进度文件在 `subscriberTimeoutHours` 后被删除。
 
 ### 示例：同一台主机上的两个 site
 
@@ -136,8 +141,7 @@ REPO=file:///opt/UniTAO/channel/exchange.git
 $S/unitao_vds.sh ~/demo/site-shared/ds add shared catalog --repo $REPO --channel-dir ~/demo/channel --folder infra/catalog --publish-interval 5
 $S/unitao_vds.sh ~/demo/site-mirror/ds add mirrored catalog --repo $REPO --channel-dir ~/demo/channel --folder infra/catalog --pull-interval 10 \
     --fingerprint "$(cat ~/demo/site-shared/ds/config/vds/shared/catalog/fingerprint)"
-cat ~/demo/site-mirror/ds/config/vds/mirrored/catalog/recipient >> ~/demo/site-shared/ds/config/vds/shared/catalog/recipients
-(cd ~/demo/site-shared/ds && docker compose restart)
+$S/unitao_vds.sh ~/demo/site-shared/ds recipient add catalog "$(cat ~/demo/site-mirror/ds/config/vds/mirrored/catalog/recipient)" --note site-mirror
 ```
 
 试一下：

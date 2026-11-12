@@ -91,6 +91,9 @@ unitao_vds.sh <directory> add shared <name> --repo <url> [--folder <f>] [--branc
 unitao_vds.sh <directory> add mirrored <name> --fingerprint <SHA256:…> --repo <url> [--folder <f>] [--alias <a>] [--pull-interval <s>] …
 unitao_vds.sh <directory> show shared|mirrored <name>
 unitao_vds.sh <directory> remove shared|mirrored <name>
+unitao_vds.sh <directory> recipient list <name>
+unitao_vds.sh <directory> recipient add <name> <recipient> [--note <text>]
+unitao_vds.sh <directory> recipient remove <name> <recipient|subscriber id>
 ```
 
 values not given on the command line (name, channel, fingerprint) are asked for; `-h` lists every option. `--dir <path>` instead of `--repo` makes a `dir` channel. it edits the `vds` section of `config/config.json`, keeps the files of each vDS in `config/vds/<kind>/<name>/`, and restarts the Data Service if it runs (`--no-restart` skips that; the config is read at start):
@@ -113,7 +116,9 @@ a channel on this host (`file:///opt/UniTAO/channel/<repo>.git` or `--dir /opt/U
 **the hand-over** between the two sides stays with you:
 
  - the publisher's `fingerprint` goes to every mirror: `add mirrored … --fingerprint "$(cat …/config/vds/shared/<name>/fingerprint)"`. it is the fingerprint of the key (`SHA256:` and 64 hex digits), not `signing.pem`.
- - each mirror's `recipient` is appended to the publisher's `recipients`, then the publisher is restarted. until then the mirror stays `untrusted`.
+ - each mirror's `recipient` (printed by its `add` / `show`) goes into the publisher's whitelist: `recipient add <name> <recipient>` on the publisher. until then the mirror stays `untrusted`.
+
+`recipient` edits the whitelist `config/vds/shared/<name>/recipients` of a shared vDS and restarts the Data Service (the whitelist is read at start). `add` checks that the value is a recipient and skips one already there; `--note` puts a `# note:` line above it, shown by `list` next to the subscriber id. `remove` takes the recipient or its subscriber id (the id `list` and the channel's `subscribers/<id>.json` show) and removes its note too. a removed mirror cannot decrypt the batches published after that; its progress file is dropped after `subscriberTimeoutHours`.
 
 ### Example: two sites on one host
 
@@ -136,8 +141,7 @@ REPO=file:///opt/UniTAO/channel/exchange.git
 $S/unitao_vds.sh ~/demo/site-shared/ds add shared catalog --repo $REPO --channel-dir ~/demo/channel --folder infra/catalog --publish-interval 5
 $S/unitao_vds.sh ~/demo/site-mirror/ds add mirrored catalog --repo $REPO --channel-dir ~/demo/channel --folder infra/catalog --pull-interval 10 \
     --fingerprint "$(cat ~/demo/site-shared/ds/config/vds/shared/catalog/fingerprint)"
-cat ~/demo/site-mirror/ds/config/vds/mirrored/catalog/recipient >> ~/demo/site-shared/ds/config/vds/shared/catalog/recipients
-(cd ~/demo/site-shared/ds && docker compose restart)
+$S/unitao_vds.sh ~/demo/site-shared/ds recipient add catalog "$(cat ~/demo/site-mirror/ds/config/vds/mirrored/catalog/recipient)" --note site-mirror
 ```
 
 try it:
