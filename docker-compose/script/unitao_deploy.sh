@@ -30,10 +30,11 @@
 #   目录名也是默认的实例名前缀和网络名：~/infra/unitao-howey 下是 unitao-howey-inv、unitao-howey-ds，网络 unitao-howey_net。
 #   目录里还没有 Inventory 时建议先部署它，部署完 Inventory 可以接着部署 Data Service。
 #   没给的参数交互询问；每个问题都有默认值（回车接受），只有 MongoDB 密码必须输入。需要 python3（生成 config.json）。
+#   Data Service 和 Inventory Service 都把数据存在 MongoDB 里，各用一个 database（默认是实例名）。
 #
 # 同一台主机上，Data Service 与 Inventory Service 经 unitao 网络用容器名互访；
 # 在不同主机上时，回答 Inventory 的 URL 和本 Data Service 从别的主机访问的 URL 即可。
-# 部署后在目标目录里用 docker compose 管理；删除实例：docker compose down，再删掉目录（数据库里的表另行删除）。
+# 部署后在目标目录里用 docker compose 管理；删除实例：docker compose down，再删掉目录（MongoDB 里它的 database 另行删除）。
 
 set -euo pipefail
 SCRIPTS="$(cd "$(dirname "$0")" && pwd)"
@@ -160,19 +161,20 @@ if [ "$kind" = dataservice ]; then
     values["<inventory url>"]=$(ask "Inventory Service URL (http://<container name> in the same network, or http://<host>:<port>)" "http://${inv:-$base-inv}")
     values["<url in the unitao network>"]="http://$name"
     values["<url from other hosts>"]=$(ask "URL of this Data Service from other hosts" "http://$host:$port")
-    mongo_net=$(ask "Docker network of the MongoDB container" "mongo_net")
-    docker network inspect "$mongo_net" >/dev/null 2>&1 ||
-        echo "!! Docker network [$mongo_net] does not exist yet: deploy MongoDB first ($SCRIPTS/mongo_deploy.sh); the instance is set up but not started" >&2
-    values["<mongodb endpoint>"]=$(ask "MongoDB endpoint (as seen from that network)" "mongodb://mongodb:27017")
-    values["<mongodb database>"]=$(ask "MongoDB database" "$name")
-    values["<table name>"]=$(ask "base name of the tables" "$name")
-    values["<mongodb user>"]=$(ask "MongoDB user" "root")
-    values["<mongodb password>"]=$(ask "MongoDB password" "" secret)
-    envs+=( "UNITAO_MONGODB_NETWORK=$mongo_net" )
 else
     values["<sync interval>"]=$(ask "seconds between schema syncs with the Data Services" "300")
     [[ ${values["<sync interval>"]} =~ ^[0-9]+$ ]] || die "sync interval must be a number"
 fi
+# 两种实例都把数据存在 MongoDB，各用自己的 database
+mongo_net=$(ask "Docker network of the MongoDB container" "mongo_net")
+docker network inspect "$mongo_net" >/dev/null 2>&1 ||
+    echo "!! Docker network [$mongo_net] does not exist yet: deploy MongoDB first ($SCRIPTS/mongo_deploy.sh); the instance is set up but not started" >&2
+values["<mongodb endpoint>"]=$(ask "MongoDB endpoint (as seen from that network)" "mongodb://mongodb:27017")
+values["<mongodb database>"]=$(ask "MongoDB database" "$name")
+[ "$kind" = dataservice ] && values["<table name>"]=$(ask "base name of the tables" "$name")
+values["<mongodb user>"]=$(ask "MongoDB user" "root")
+values["<mongodb password>"]=$(ask "MongoDB password" "" secret)
+envs+=( "UNITAO_MONGODB_NETWORK=$mongo_net" )
 start=$(ask "start it now? (y/n)" "y")
 
 # ---- 部署 ----
@@ -215,9 +217,9 @@ with open("config/config.json", "w") as f:
 '
 chmod 600 config/config.json
 rm -f .env.template config/config.template.json
-mkdir -p data logs
-# 通道目录先用目标目录里的 channel/（.env 的默认值）；要和别的 site 共用本机目录时，unitao_vds.sh 加 vDS 时再改
-[ "$kind" = dataservice ] && mkdir -p channel
+mkdir -p logs
+# data/ 放 git 通道的克隆；通道目录先用目标目录里的 channel/（.env 的默认值），要和别的 site 共用本机目录时，unitao_vds.sh 加 vDS 时再改
+[ "$kind" = dataservice ] && mkdir -p data channel
 echo "== deployed $kind [$name] into $target"
 
 for net in "$network" ${mongo_net:+"$mongo_net"}; do

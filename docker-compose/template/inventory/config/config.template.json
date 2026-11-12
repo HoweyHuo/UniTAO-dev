@@ -1,8 +1,11 @@
 {
     "database": {
-        "type": "sysdirfile",
-        "sysdirfile": {
-            "path": "/opt/UniTAO/data"
+        "type": "mongodb",
+        "mongodb": {
+            "endpoint": "<mongodb endpoint>",
+            "database": "<mongodb database>",
+            "user": "<mongodb user>",
+            "password": "<mongodb password>"
         }
     },
     "http": {
