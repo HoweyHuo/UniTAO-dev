@@ -311,17 +311,39 @@ PY
     echo "== channel directory on this host: $new (UNITAO_CHANNEL_DIR in .env)"
 }
 
-# 远端仓库的默认分支（HEAD 指向的分支），查不到（连不上、没有权限、空仓库）时输出空。
+# 远端仓库的默认分支（HEAD 指向的分支）。读到了（空仓库、本机还不存在的 file:// 仓库时输出空）返回 0；
+# 读不到（连不上、没有权限）时在 stderr 说明原因并返回 1。
 # 用 docker compose run 起一个该服务的临时容器，所以和 Data Service 用同样的 ssh 密钥（ssh 卷）、凭据和挂载
 remote_branch() {
-    local repo=$1 h sshdir out env=(-e GIT_TERMINAL_PROMPT=0)
+    local repo=$1 h sshdir out err env=(-e GIT_TERMINAL_PROMPT=0)
     if [[ $repo == file://* ]]; then h=$(host_of "${repo#file://}") && [ -e "$h" ] || return 0; fi
     if ! docker compose config | grep -q GIT_SSH_COMMAND; then   # compose 里自带了 GIT_SSH_COMMAND 就用它的
         sshdir=$(python3 -c 'import json,sys; print((json.load(open(sys.argv[1])).get("ssh") or {}).get("dir") or "/opt/UniTAO/ssh")' "$cfg_host")
         env+=(-e "GIT_SSH_COMMAND=ssh -i $sshdir/id_ed25519 -o IdentitiesOnly=yes -o UserKnownHostsFile=$sshdir/known_hosts -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o ConnectTimeout=15")
     fi
-    out=$(docker compose run --rm --no-deps -T "${env[@]}" "$svc" timeout 30 git ls-remote --symref "$repo" HEAD 2>/dev/null) || true
+    err=$(mktemp)
+    if ! out=$(docker compose run --rm --no-deps -T "${env[@]}" "$svc" timeout 30 git ls-remote --symref "$repo" HEAD 2>"$err"); then
+        echo "!! cannot read $repo: $(grep -v '^[[:space:]]*$' "$err" | grep -vi '^warning:' | head -n 1)" >&2
+        rm -f "$err"
+        return 1
+    fi
+    rm -f "$err"
     sed -n 's|^ref: refs/heads/\([^[:space:]]*\)[[:space:]]*HEAD$|\1|p' <<<"$out" | head -n 1
+}
+
+# 读不到远端时，打印 Data Service 的 ssh 公钥（config 旁边的 state.json），要先把它加到 git 服务器上
+show_ssh_key() {
+    local repo=$1 state key
+    [[ $repo == file://* || $repo == http://* || $repo == https://* ]] && return 0
+    docker compose config | grep -q GIT_SSH_COMMAND && return 0
+    state="$(dirname "$cfg_host")/state.json"
+    key=$(python3 -c 'import json,sys; s=json.load(open(sys.argv[1])).get("ssh") or {}; print(s.get("publicKey") or "")' "$state" 2>/dev/null || true)
+    if [ -n "$key" ]; then
+        echo "-> add the ssh key of the Data Service (ssh.publicKey in $(rel "$state")) to the git server, with write access:" >&2
+        echo "   $key" >&2
+    else
+        echo "-> $(rel "$state") has no ssh.publicKey yet: start the Data Service once, it generates the key" >&2
+    fi
 }
 
 # file:///opt/UniTAO/channel/... 的仓库不存在时建一个空的裸仓库（发布方第一次 push 建分支）
@@ -386,10 +408,18 @@ do_add() {
     # 分支默认取仓库的默认分支（Gitee 常是 master），总是写进配置；Data Service 自己的缺省是 main
     if [ -n "$repo" ] && [ -z "$branch" ]; then
         echo "-> reading the default branch of $repo ..." >&2
-        local def; def=$(remote_branch "$repo")
-        if [ "$asked" = 1 ]; then
+        local def=
+        if ! def=$(remote_branch "$repo"); then
+            show_ssh_key "$repo"
+            while [ "$interactive" = 1 ]; do
+                read -rp "press Enter to read it again (after adding the key), or type the branch to use: " val
+                if [ -n "$val" ]; then branch=$val; break; fi
+                def=$(remote_branch "$repo") && break
+            done
+        fi
+        if [ -z "$branch" ] && [ "$asked" = 1 ]; then
             branch=$(ask "branch (the same on both sites)" "${def:-main}")
-        else
+        elif [ -z "$branch" ]; then
             branch=${def:-main}
             echo "== branch $branch${def:+ (the default branch of the repository)}" >&2
         fi

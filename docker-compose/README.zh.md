@@ -100,7 +100,7 @@ unitao_vds.sh <目录> remove shared|mirrored <name>
 | shared | `signing.pem`、`fingerprint`、`recipients` | 签名私钥（不离开本实例）；它的指纹，每个 mirror 都需要；订阅方白名单（由 Data Service 创建，每行一个 recipient） |
 | mirrored | `identity`、`recipient` | 解密私钥（不离开本实例）；它的公钥，交给发布方加进白名单 |
 
-git 通道的分支默认是仓库的默认分支（Gitee 上常是 `master`），用 Data Service 的 ssh 密钥和凭据从远端读取；读不到时（还没有权限、空仓库）用 `main`。分支总会写进配置；两边必须用同一个分支，用 `--branch` 指定。
+git 通道的分支默认是仓库的默认分支（Gitee 上常是 `master`），用 Data Service 的 ssh 密钥和凭据从远端读取；空仓库用 `main`。读不到远端时（比如 Data Service 的 ssh 公钥还没加到 git 服务器上），脚本打印原因和 `config/state.json` 里的公钥；交互时等你加好公钥后重新读取（也可以直接输入分支），非交互时用 `main`。分支总会写进配置；两边必须用同一个分支，用 `--branch` 指定。
 
 以 Data Service 运行的用户（`UNITAO_UID`，在 docker 组里）运行脚本，不要用 sudo：`add` 拒绝以 root 运行，因为 root 建出的文件 Data Service 用不了。`remove` 可以用 sudo，比如清理这种文件。
 

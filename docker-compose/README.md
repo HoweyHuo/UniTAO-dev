@@ -100,7 +100,7 @@ values not given on the command line (name, channel, fingerprint) are asked for;
 | shared | `signing.pem`, `fingerprint`, `recipients` | the signing key (private, never leaves the instance); its fingerprint, which every mirror needs; the subscriber whitelist (created by the Data Service, one recipient per line) |
 | mirrored | `identity`, `recipient` | the decryption key (private, never leaves the instance); its public key, for the publisher's whitelist |
 
-the branch of a git channel defaults to the repository's default branch (on Gitee often `master`), read from the remote with the Data Service's ssh key and credentials; when it cannot be read (no access yet, an empty repository) it is `main`. it is always written to the config; both sides must use the same branch, `--branch` sets it.
+the branch of a git channel defaults to the repository's default branch (on Gitee often `master`), read from the remote with the Data Service's ssh key and credentials; an empty repository gives `main`. when the remote cannot be read (e.g. the Data Service's ssh key is not on the git server yet), the script prints the reason and the public key from `config/state.json`; interactively it waits for you to add the key and reads again (or takes a branch you type), otherwise it uses `main`. it is always written to the config; both sides must use the same branch, `--branch` sets it.
 
 run the script as the user the Data Service runs as (`UNITAO_UID`, in group docker), not with sudo: `add` refuses to run as root, because the Data Service could not use the files root creates. `remove` may run with sudo, e.g. to clean up such files.
 
