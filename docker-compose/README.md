@@ -10,6 +10,8 @@ script/
   mongo_deploy.sh      deploys template/mongodb: MongoDB + mongo-express
   unitao_deploy.sh     deploys template/dataservice or template/inventory: one UniTAO instance
   unitao_vds.sh        adds / removes shared and mirrored vDS on a deployed Data Service
+  unitao_update.sh     brings deployed instances up to the current templates and the newest image
+  common.sh            functions the scripts share
 template/
   mongodb/             MongoDB for the Data Services and Inventory Services (see its README)
   dataservice/         a Data Service with the default local vDS
@@ -78,7 +80,22 @@ it then writes `.env` and `config/config.json` (both mode 600, the config holds 
 
 the containers run as your user (`UNITAO_UID` / `UNITAO_GID`), so everything they write is yours; the image's entrypoint adds your UID to its `/etc/passwd` (ssh needs one). a Data Service keeps the ssh key it generates for git servers in the named volume `ssh` (`ssh.dir` = `/opt/UniTAO/ssh`), not in the directory.
 
-both templates set `pull_policy: always`: every `docker compose up` asks the registry where the image tag points now and downloads it when it moved (only the changed layers), so `docker compose up -d` in an instance directory brings it to the newest `latest`. `docker compose restart` and the automatic restarts of a crashed container use the local image. a plain `docker compose up` therefore hangs when the registry or its downloads cannot be reached (e.g. ghcr's layer host from some networks); use `docker compose up -d --pull never` to start with the local image. `unitao_deploy.sh` and `unitao_vds.sh` do that themselves: they pull first, and when the pull fails or shows no progress for 90 seconds they start with the local image (`!! cannot pull …: starting with the local copy`), or stop when there is none. to get a new image onto such a host, build it there (`docker build -f ./docker/unitao/dockerfile -t ghcr.io/howeyhuo/unitao-dev:latest .`, see `docker/README.md` for a Go proxy). instances deployed before this was added get it by adding `pull_policy: always` under `image:` in their `docker-compose.yml`, or by running `docker compose pull` before `up`.
+both templates set `pull_policy: always`: every `docker compose up` asks the registry where the image tag points now and downloads it when it moved (only the changed layers), so `docker compose up -d` in an instance directory brings it to the newest `latest`. `docker compose restart` and the automatic restarts of a crashed container use the local image. a plain `docker compose up` therefore hangs when the registry or its downloads cannot be reached (e.g. ghcr's layer host from some networks); use `docker compose up -d --pull never` to start with the local image. `unitao_deploy.sh`, `unitao_vds.sh` and `unitao_update.sh` do that themselves: they pull first, and when the pull fails or shows no new output for 90 seconds they start with the local image (`!! cannot pull …: starting with the local copy`), or stop when there is none. to get a new image onto such a host, build it there (`docker build -f ./docker/unitao/dockerfile -t ghcr.io/howeyhuo/unitao-dev:latest .`, see `docker/README.md` for a Go proxy). instances deployed before this was added get it from `unitao_update.sh`.
+
+### Updating deployed instances
+
+the scripts run from the repository, so `git pull` updates them. what `unitao_deploy.sh` copied from `template/` into an instance directory does not follow; `unitao_update.sh` brings it up to date:
+
+```
+$S/unitao_update.sh ~/infra/unitao-howey        # every instance in the UniTAO directory, Inventory first
+$S/unitao_update.sh ~/infra/unitao-howey/ds     # one instance
+```
+
+ - `docker-compose.yml` is replaced by the template's (it holds nothing specific to the instance, that is all in `.env`); a changed one is kept as `docker-compose.yml.old`.
+ - variables new in `.env.template` are appended to `.env`, existing values are kept; a new variable without a default is printed for you to set.
+ - `config/config.json` and `state.json` are not changed; what needs your attention is printed: an Inventory with another database than MongoDB, old key fields in a Data Service's vDS.
+ - a running instance is recreated: it pulls the newest image, or starts with the local copy when the pull fails (see above). a stopped one stays stopped; `--no-start` only updates the files.
+ - an Inventory that still keeps its records in files (`sysdirfile`) is skipped: the new template no longer mounts `data/`, recreating it would lose its records. move it to MongoDB first (below).
 
 to change an answer later, edit `.env` or `config/config.json` and run `docker compose up -d` (a new container name or port recreates the container). to remove an instance: `docker compose down -v` in its directory (`-v` also removes the ssh key volume), then delete the directory; its data stays in MongoDB until you drop its database.
 
