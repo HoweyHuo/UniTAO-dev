@@ -78,6 +78,8 @@ $S/unitao_vds.sh ~/infra/unitao-howey/ds               # 5. 可选：shared / mi
 
 容器以你的用户身份运行（`UNITAO_UID` / `UNITAO_GID`），所以它写出的文件都归你；镜像的入口脚本会把你的 UID 加进它的 `/etc/passwd`（ssh 需要）。Data Service 为 git 服务器生成的 ssh 密钥存在命名卷 `ssh` 里（`ssh.dir` = `/opt/UniTAO/ssh`），不在目录里。
 
+两个模板都设了 `pull_policy: always`：每次 `docker compose up` 都向 registry 确认镜像标签当前指向哪个镜像，变了就下载（只下变了的层），所以在实例目录里运行 `docker compose up -d` 就会换到最新的 `latest`。`docker compose restart` 和容器崩溃后的自动重启用本地镜像。因此 `up` 需要能连上 registry；离线时用 `docker compose up -d --pull never`。加这一项之前部署的实例，在它的 `docker-compose.yml` 里 `image:` 下面加一行 `pull_policy: always`，或者在 `up` 之前先 `docker compose pull`。
+
 以后要改某个回答，编辑 `.env` 或 `config/config.json`，再运行 `docker compose up -d`（改了容器名或端口会重建容器）。删除实例：在它的目录里运行 `docker compose down -v`（`-v` 连同 ssh 密钥卷一起删），再删掉目录；它的数据留在 MongoDB 里，直到你删掉它的数据库。
 
 旧版本部署的 Inventory Service 把记录存在 `inv/data/` 下的文件里（config 里是 `"type": "sysdirfile"`），照常能用。要换到 MongoDB，在旧目录里 `docker compose down` 后，用同样的名字和端口部署一个新的到新目录：不需要复制任何东西，Data Service 在 `SelfRegCheckSec` 内重新注册，下一次 sync 重建 referral。设过 `pinnedSources` 的话要复制到新的 config 里。
