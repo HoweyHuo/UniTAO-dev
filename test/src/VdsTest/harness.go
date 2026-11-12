@@ -18,7 +18,6 @@ import (
 
 	"Data/DbConfig"
 	"Data/DbIface"
-	"DataService/Channel"
 	"DataService/DataServer"
 	"InventoryService/InventoryServer"
 )
@@ -175,20 +174,6 @@ func writeJson(t *testing.T, path string, data interface{}) string {
 		t.Fatal(err)
 	}
 	return path
-}
-
-// newSigningKey 生成签名私钥文件，返回文件路径与指纹。
-func newSigningKey(t *testing.T) (string, string) {
-	t.Helper()
-	pemData, pub, err := Channel.GenerateSigningKey()
-	if err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(t.TempDir(), "signing.pem")
-	if err := os.WriteFile(path, pemData, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return path, Channel.Fingerprint(pub)
 }
 
 type response struct {

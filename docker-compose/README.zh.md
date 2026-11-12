@@ -70,7 +70,7 @@ $S/unitao_vds.sh ~/infra/unitao-howey/ds               # 5. 可选：shared / mi
 ~/infra/unitao-howey/ds/
   docker-compose.yml   来自 template/dataservice
   .env                 回答的内容：COMPOSE_PROJECT_NAME、UNITAO_NAME、UNITAO_PORT、UNITAO_UID/GID、UNITAO_IMAGE、网络、UNITAO_CHANNEL_DIR
-  config/              config.json、state.json，以及 config/vds/（shared / mirrored vDS 的密钥，见下文）
+  config/              config.json、state.json
   data/                git 通道的克隆
   channel/             通道目录，直到 unitao_vds.sh 指定了别的目录
   logs/
@@ -88,37 +88,35 @@ Data Service 可以经 Communication Channel（通常是双方都能访问的 gi
 unitao_vds.sh <目录>                         # 交互菜单
 unitao_vds.sh <目录> list
 unitao_vds.sh <目录> add shared <name> --repo <url> [--folder <f>] [--branch <b>] [--publish-interval <s>] …
-unitao_vds.sh <目录> add mirrored <name> --fingerprint <SHA256:…> --repo <url> [--folder <f>] [--alias <a>] [--pull-interval <s>] …
-unitao_vds.sh <目录> show shared|mirrored <name>
+unitao_vds.sh <目录> add mirrored <name> --repo <url> [--folder <f>] [--alias <a>] [--pull-interval <s>] …
 unitao_vds.sh <目录> remove shared|mirrored <name>
-unitao_vds.sh <目录> recipient list <name>
-unitao_vds.sh <目录> recipient add <name> <recipient> [--note <说明>]
-unitao_vds.sh <目录> recipient remove <name> <recipient|subscriber id>
 ```
 
-命令行没给的值（名字、通道、指纹）会询问；`-h` 列出所有选项。用 `--dir <path>` 代替 `--repo` 就是 `dir` 通道。它修改 `config/config.json` 的 `vds` 段，把每个 vDS 的文件放在 `config/vds/<kind>/<name>/`，Data Service 在运行时重启它（`--no-restart` 不重启；配置在启动时读取）：
+命令行没给的值（名字、通道）会询问；`-h` 列出所有选项。用 `--dir <path>` 代替 `--repo` 就是 `dir` 通道。它修改 `config/config.json` 的 `vds` 段，Data Service 在运行时重启它（`--no-restart` 不重启；配置在启动时读取）。
 
-| 类型 | 文件 | |
-|---|---|---|
-| shared | `signing.pem`、`fingerprint`、`recipients` | 签名私钥（不离开本实例）；它的指纹，每个 mirror 都需要；订阅方白名单（由 Data Service 创建，每行一个 recipient） |
-| mirrored | `identity`、`recipient` | 解密私钥（不离开本实例）；它的公钥，交给发布方加进白名单 |
+shared vDS 和它的 mirror 配**同一个通道地址**就连上了：仓库、分支、folder（folder 默认是 vDS 名）。不需要交换密钥：通道不加密、不签名，谁能读写由 git 服务器（`dir` 通道是文件权限）决定。这个地址同时是来源的身份：Inventory 按它把 shared 和它的 mirror 合并（`GET /{vDS}/config` 的 `instanceId`），用同样配置重建的 Data Service 直接接管原来的 folder（见"备份与重建"）。
 
 git 通道的分支默认是仓库的默认分支（Gitee 上常是 `master`），用 Data Service 的 ssh 密钥和凭据从远端读取；空仓库用 `main`。读不到远端时（比如 Data Service 的 ssh 公钥还没加到 git 服务器上），脚本打印原因和 `config/state.json` 里的公钥；交互时等你加好公钥后重新读取（也可以直接输入分支），非交互时用 `main`。分支总会写进配置；两边必须用同一个分支，用 `--branch` 指定。
 
-以 Data Service 运行的用户（`UNITAO_UID`，在 docker 组里）运行脚本，不要用 sudo：`add` 拒绝以 root 运行，因为 root 建出的文件 Data Service 用不了。`remove` 可以用 sudo，比如清理这种文件。
+以 Data Service 运行的用户（`UNITAO_UID`，在 docker 组里）运行脚本，不要用 sudo：`add` 拒绝以 root 运行，因为 root 建出的文件（通道目录里的裸仓库）Data Service 用不了。`remove` 可以用 sudo，比如清理这种文件。
 
 git 通道克隆在 `data/vds/<kind>/<name>/channel`。`file:///opt/UniTAO/channel/<repo>.git` 的仓库不存在时，会在通道目录里建一个空的裸仓库。
 
 本机上的通道（`file:///opt/UniTAO/channel/<repo>.git` 或 `--dir /opt/UniTAO/channel…`）放在挂到 `/opt/UniTAO/channel` 的宿主机目录里，默认是实例目录里的 `channel/`。加第一个这样的 vDS 时会询问这个目录（`--channel-dir <宿主机路径>`）；同一台主机上两个 site 用这种方式交换数据时，两边给同一个目录。它写进 `.env` 的 `UNITAO_CHANNEL_DIR`，并重建容器；一旦有 vDS 在用，就不能再改。用 git 服务器时这些都不需要。
 
-`remove` 删除这一项、它的文件和克隆（其它 vDS 还在用的除外）；Data Service 再次启动时删除该 vDS 的表，并从 Inventory 注销。重启后用 Data Service 的 ssh 密钥在临时克隆里清理该 vDS 留在通道上的东西：shared 删除自己 folder 下的 `manifest.json`、`manifest.sig`、`queue/`、`history/`、`subscribers/`（manifest 是别的密钥签的就不动，也不碰下级 folder），这样以同名重新 add（新密钥）的 shared 才能在那里发布；mirrored 删除来源 folder 下自己的进度文件 `subscribers/<id>.json`。`--no-restart` 而 Data Service 在运行时不清理通道（运行中的 Data Service 会把文件写回去）。
+`remove` 删除这一项和它的克隆（其它 vDS 还在用的除外），以及旧版本放在 `config/vds/<kind>/<name>/` 的密钥文件；Data Service 再次启动时删除该 vDS 的表，并从 Inventory 注销。重启后用 Data Service 的 ssh 密钥在临时克隆里清理该 vDS 留在通道上的东西：shared 删除自己 folder 下的 `manifest.json`、`queue/`、`history/`、`subscribers/`（只在 manifest 是本 Data Service 实例写的时候，也不碰下级 folder）；mirrored 删除来源 folder 下自己的进度文件 `subscribers/<id>.json`。`--no-restart` 而 Data Service 在运行时不清理通道（运行中的 Data Service 会把文件写回去）。
 
-**两边之间的交接**由你来做：
+### 备份与重建
 
- - 发布方的 `fingerprint` 交给每个 mirror：`add mirrored … --fingerprint "$(cat …/config/vds/shared/<name>/fingerprint)"`。它是密钥的指纹（`SHA256:` 加 64 位十六进制），不是 `signing.pem`。
- - 每个 mirror 的 `recipient`（它 `add` / `show` 时打印）加进发布方的白名单：在发布方运行 `recipient add <name> <recipient>`。在那之前 mirror 一直是 `untrusted`。
+通道不要求两边备份任何东西：从零重建的 Data Service（新目录、空数据库）用同样的 `add shared` / `add mirrored` 设置，自己就能接上。
 
-`recipient` 修改 shared vDS 的白名单 `config/vds/shared/<name>/recipients`，并重启 Data Service（白名单在启动时读取）。`add` 检查给的值是不是 recipient，已有的跳过；`--note` 在它上面加一行 `# note:`，`list` 把它显示在 subscriber id 旁边。`remove` 接受 recipient 或它的 subscriber id（`list` 和通道上 `subscribers/<id>.json` 里的 id），连同它的说明一起删。被删的 mirror 无法解密之后发布的 batch，它的进度文件在 `subscriberTimeoutHours` 后被删除。
+ - **重建发布方**：manifest 里记着写它的 Data Service 实例（`instance`，来自 `state.json`）。新实例看到别的实例写的 manifest，记日志 `take it over`，用自己的数据在新的 epoch 里重新开始这个 folder。它的 mirror 发现 epoch 变了，重新订阅，用重建后的数据替换本地副本；在那之前继续提供旧副本。如果旧实例还在运行，两边会一直互相接管（每轮都记日志）：给它们各自的 folder。
+ - **发布方从较旧的备份恢复**（同一个 `state.json`、较旧的数据库）：通道比数据库已提交的还新，发布方同样重新开始这个 folder。
+ - **重建 mirror**：它有新的 subscriber id，重新订阅并加载全量 history；发布方在 `subscriberTimeoutHours` 后删掉旧的进度文件。
+
+重建真正需要的是 git 权限：新的 Data Service 有新的 ssh 密钥（`unitao_vds.sh add` 读不到仓库时会打印，也在 `config/state.json` 里），要加到 git 服务器上。
+
+旧版本写的配置照样能用：`signingKeyFile`、`trustedFingerprint`、`channel.encrypt`、`channel.decrypt` 被忽略（日志和 `GET /{vDS}/config` 的 `ignoredConfig` 列出它们，可以删掉）。通道上旧格式的 manifest 由发布方在第一轮重新开始。
 
 ### 示例：同一台主机上的两个 site
 
@@ -139,9 +137,7 @@ $S/unitao_deploy.sh dataservice ~/demo/site-mirror
 REPO=file:///opt/UniTAO/channel/exchange.git
 # 两个 Data Service 都把 ~/demo/channel 挂到 /opt/UniTAO/channel，仓库就在那里
 $S/unitao_vds.sh ~/demo/site-shared/ds add shared catalog --repo $REPO --channel-dir ~/demo/channel --folder infra/catalog --publish-interval 5
-$S/unitao_vds.sh ~/demo/site-mirror/ds add mirrored catalog --repo $REPO --channel-dir ~/demo/channel --folder infra/catalog --pull-interval 10 \
-    --fingerprint "$(cat ~/demo/site-shared/ds/config/vds/shared/catalog/fingerprint)"
-$S/unitao_vds.sh ~/demo/site-shared/ds recipient add catalog "$(cat ~/demo/site-mirror/ds/config/vds/mirrored/catalog/recipient)" --note site-mirror
+$S/unitao_vds.sh ~/demo/site-mirror/ds add mirrored catalog --repo $REPO --channel-dir ~/demo/channel --folder infra/catalog --pull-interval 10
 ```
 
 试一下：
@@ -152,7 +148,7 @@ curl -X POST localhost:8031/shared/catalog -d '{"__type":"schema","__id":"rack",
 curl -X POST localhost:8031/shared/catalog -d '{"__type":"rack","__id":"r1","__ver":"0.0.1","data":{"name":"rack one"}}'
 
 # site-shared 推送了什么
-git -C ~/demo/channel/exchange.git ls-tree -r --name-only main   # infra/catalog/manifest.json、manifest.sig、subscribers/<site-mirror id>.json
+git -C ~/demo/channel/exchange.git ls-tree -r --name-only main   # infra/catalog/manifest.json、subscribers/<site-mirror id>.json
 
 # 约 15 秒内（每 5 秒发布、每 10 秒拉取）出现在 site-mirror 上，只读
 curl localhost:8041/mirrored/catalog/rack/r1
@@ -164,7 +160,7 @@ curl localhost:8044/rack                         # site-mirror 的 Inventory 里
 通道上发生了什么：
 
  1. site-mirror 推送 `subscribers/<它的 id>.json`，`state: subscribe`（发布方不必已经存在）。
- 2. site-shared 把写入发布为 `queue/…-….jsonl.gz.enc`，看到订阅请求后，把它的全部记录写成 `history/<id>/0001.jsonl.gz.aes`；manifest 把它授权给 site-mirror（内容密钥用 site-mirror 的公钥包装）。
+ 2. site-shared 把写入发布为 `queue/…-….jsonl.gz`，看到订阅请求后，把它的全部记录写成 `history/<id>/0001.jsonl.gz`；manifest 把它分给 site-mirror 的订阅请求。
  3. site-mirror 加载 history（替换它的表），从那里继续消费 queue，并汇报 `state: active` 和 cursor。
  4. site-shared 删除该 history 以及 site-mirror 已经处理过的所有 batch。
 
@@ -178,16 +174,17 @@ curl localhost:8044/rack                         # site-mirror 的 Inventory 里
 
 ```
 infra/catalog/
-  manifest.json, manifest.sig             # 发布方签名：lastSeq、queue batch 和 history 分片及其 sha256、history 授权
-  queue/<from>-<to>.jsonl.gz.enc          # 增量 batch，对所有接收方加密
-  history/<id>/<n>.jsonl.gz.aes           # 全量 history 的分片；内容密钥在 manifest 里为每个被授权方各包装一份
-  subscribers/<id>.json                   # 每个 mirror 自己写：request、state、cursor
+  manifest.json                           # 发布方写：所属实例、epoch、lastSeq、queue batch 和 history 分片及其 sha256、每份 history 分给了哪些订阅请求
+  queue/<from>-<to>.jsonl.gz              # 增量 batch
+  history/<id>/<n>.jsonl.gz               # 全量 history 的分片
+  subscribers/<id>.json                   # 每个 mirror 自己写：request、state、cursor、epoch
 ```
 
  - **每次写入（两边都一样）**：`fetch --depth 1`，把克隆 reset 到远端分支，只写自己的文件，commit，push。push 被拒（别人先推了）就从 fetch 重做，不 rebase。远端是空仓库也可以，第一次 push 会建分支。
  - **发布方**推送 batch 和 history，并清理所有 mirror 都处理过的内容；最多每 `compactIntervalHours` 把分支压成一个提交（`push --force-with-lease`，并发的 push 不会丢）并对克隆运行 `gc`。
  - **mirror** 只在进度变化时推送，所以空闲的通道不会有新提交。它需要仓库的写权限。
  - git 以非交互方式运行（`GIT_TERMINAL_PROMPT=0`）：凭据必须在 Data Service 启动前就准备好。
+ - 文件是普通的 gzip JSONL：能读仓库的人就能读到数据。仓库保持私有，只给发布和镜像的 Data Service 访问权限。
 
 ### 使用 git 服务器
 

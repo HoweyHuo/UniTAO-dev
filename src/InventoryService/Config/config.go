@@ -46,8 +46,8 @@ type ServerConfig struct {
 	Database DbConfig.DatabaseConfig `json:"database"`
 	Http     Http.Config             `json:"http"`
 	Sync     SyncConfig              `json:"sync"`
-	// PinnedSources 把 shared / mirrored vDS 的名字固定给某个公钥指纹：{"prod": "SHA256:..."}。
-	// 被固定的名字只给这个指纹使用，不受注册先后影响。
+	// PinnedSources 把 shared / mirrored vDS 的名字固定给某个来源（SourceId，/{vDS}/config 的 instanceId）：{"prod": "SHA256:..."}。
+	// 被固定的名字只给这个来源使用，不受注册先后影响。
 	PinnedSources map[string]string `json:"pinnedSources"`
 }
 

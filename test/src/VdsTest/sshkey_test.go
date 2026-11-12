@@ -135,12 +135,9 @@ func TestGitChannelUsesSSHIdentity(t *testing.T) {
 	unsetEnv(t, "GIT_SSH_COMMAND")
 	unsetEnv(t, "GIT_SSH")
 
-	_, fingerprint := signer(t)
-	subKey := newSubKey(t)
 	refresh := func() {
 		cfg := Channel.Config{Type: Channel.TypeGit, Repo: "ssh://git@unitao.invalid/channel.git", WorkDir: filepath.Join(t.TempDir(), "work"), Folder: "infra"}
-		sub, err := Channel.NewSubscriber(subConfig(cfg, subKey), "prod", fingerprint, nil)
-		mustNoErr(t, err, "new subscriber")
+		sub := newSub(t, cfg, "prod", "subA")
 		if err := sub.Refresh(); err == nil || errors.Is(err, Channel.ErrNotPublished) {
 			t.Fatalf("expect fetch through fake ssh to fail, got %v", err)
 		}
@@ -259,13 +256,11 @@ func TestGitCommandTimeout(t *testing.T) {
 	restore := Channel.SetGitTimeout(2 * time.Second)
 	defer restore()
 
-	_, fingerprint := signer(t)
 	cfg := Channel.Config{Type: Channel.TypeGit, Repo: "ssh://git@unitao.invalid/channel.git", WorkDir: filepath.Join(t.TempDir(), "work"), Folder: "infra"}
-	sub, err := Channel.NewSubscriber(subConfig(cfg, newSubKey(t)), "prod", fingerprint, nil)
-	mustNoErr(t, err, "new subscriber")
+	sub := newSub(t, cfg, "prod", "subA")
 
 	start := time.Now()
-	err = sub.Refresh()
+	err := sub.Refresh()
 	elapsed := time.Since(start)
 	if err == nil || !strings.Contains(err.Error(), "timed out after 2s") {
 		t.Fatalf("expect a timeout error, got %v", err)

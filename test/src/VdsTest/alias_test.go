@@ -15,19 +15,17 @@ import (
 // 在 config 中给它配 alias 并重启，DS 上的路径和 Inventory 的 dsId 都变成 alias，旧记录被删除。
 //
 // Inventory 的 DELETE 被人为延迟：注册必须等旧 URL 注销完成后再进行，否则新名字的注册会因
-// 指纹相同被合并进旧记录，拿回旧名字。
+// 来源（SourceId）相同被合并进旧记录，拿回旧名字。
 func TestMirroredAliasUnifiesInventoryId(t *testing.T) {
 	inv := startInventory(t, nil)
 	channelDir := filepath.Join(t.TempDir(), "channel")
-	keyFile, fingerprint := newSigningKey(t)
-	keyB := newSubKey(t)
+	sourceId := dirSourceId(channelDir, "prod")
 
 	// 来源在另一个网络，不注册到这个 Inventory
 	dsA := newDsNode(t, "dsA", "")
 	dsA.start(t, map[string]interface{}{
 		"shared": []interface{}{map[string]interface{}{
-			"name": "prod", "signingKeyFile": keyFile, "publishIntervalSec": 3600,
-			"channel": withEncrypt(dirChannel(channelDir), recipientsFile(t, keyB)),
+			"name": "prod", "publishIntervalSec": 3600, "channel": dirChannel(channelDir),
 		}},
 	})
 	expectStatus(t, call(t, http.MethodPost, dsA.Url+"/shared/prod", schemaRecord("rack", "0.0.1", rackSchema)), http.StatusCreated, "post rack schema")
@@ -42,13 +40,12 @@ func TestMirroredAliasUnifiesInventoryId(t *testing.T) {
 	}), http.StatusAccepted, "register other prod")
 
 	mirrorCfg := map[string]interface{}{
-		"name": "prod", "trustedFingerprint": fingerprint, "pullIntervalSec": 3600,
-		"channel": withDecrypt(dirChannel(channelDir), keyB),
+		"name": "prod", "pullIntervalSec": 3600, "channel": dirChannel(channelDir),
 	}
 	dsB := newDsNode(t, "dsB", inv.Url)
 	dsB.start(t, map[string]interface{}{"local": map[string]interface{}{}, "mirrored": []interface{}{mirrorCfg}})
 	syncAll(t, pub, dsB.srv.GetVds("mirrored/prod").Mirror)
-	derived := DataHandler.DerivedDsId("prod", fingerprint)
+	derived := DataHandler.DerivedDsId("prod", sourceId)
 	waitFor(t, "mirror registered under derived id", func() bool {
 		return dsB.srv.GetVds("mirrored/prod").InvId() == derived
 	})

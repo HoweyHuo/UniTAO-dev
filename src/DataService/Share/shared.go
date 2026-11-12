@@ -1,8 +1,6 @@
 package Share
 
 import (
-	"crypto/ed25519"
-	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -20,10 +18,9 @@ const (
 	MaxBatchChanges               = 1000
 
 	// subscriber 在 /config 中显示的状态（除了 Channel.StateSubscribe / StateActive）
-	SubscriberDead      = "dead"      // 本轮被判定死亡，进度文件已删除
-	SubscriberGap       = "gap"       // 进度落在已删除的 batch 之前，等它重新订阅
-	SubscriberUntrusted = "untrusted" // 不在接收方列表中，忽略
-	SubscriberInvalid   = "invalid"   // 进度文件内容不合法，忽略
+	SubscriberDead    = "dead"    // 本轮被判定死亡，进度文件已删除
+	SubscriberGap     = "gap"     // 进度落在已删除的 batch 之前或属于旧 epoch，等它重新订阅
+	SubscriberInvalid = "invalid" // 进度文件内容不合法，忽略
 )
 
 // SubscriberStatus 是 publisher 最近一轮看到的一个 subscriber。
@@ -45,8 +42,8 @@ type HistoryStatus struct {
 	Bytes     int    `json:"bytes"`
 	Published string `json:"published"`
 	Grants    int    `json:"grants"`
-	Pending   int    `json:"pending"`  // 还没加载完的授权
-	Reusable  bool   `json:"reusable"` // 新订阅方能否直接拿到它的授权
+	Pending   int    `json:"pending"`  // 还没加载完的分配
+	Reusable  bool   `json:"reusable"` // 新订阅方能否直接分到它
 }
 
 // PublisherOptions 是 shared vDS 配置中与发布相关的参数，0 表示默认值。
@@ -59,7 +56,7 @@ type PublisherOptions struct {
 
 // Publisher 是 shared vDS 的后台发布器（见 plan/feature-channel-queue/plan.md）：
 //   - 把 outbox 按 seq 连续打包成 queue batch；
-//   - 为新订阅请求提供 history：复用期内授权已有的 history，否则打包一份新的；
+//   - 为新订阅请求提供 history：复用期内分给已有的 history，否则打包一份新的；
 //   - 判定死亡的 subscriber，删除所有存活 subscriber 都处理过的 batch；
 //   - 定期压缩通道历史。
 type Publisher struct {
@@ -67,7 +64,7 @@ type Publisher struct {
 	handler         *DataHandler.Handler
 	outbox          *Outbox
 	channel         Channel.Publisher
-	fingerprint     string
+	sourceId        string
 	publishInterval time.Duration
 	timeout         time.Duration
 	compactInterval time.Duration
@@ -85,7 +82,8 @@ type Publisher struct {
 	stop            chan struct{}
 }
 
-func NewPublisher(name string, handler *DataHandler.Handler, outbox *Outbox, channel Channel.Publisher, signer ed25519.PrivateKey, opts PublisherOptions, logger *log.Logger) *Publisher {
+// NewPublisher 创建发布器。sourceId 是来源的身份（Channel.SourceId），只用于展示。
+func NewPublisher(name string, handler *DataHandler.Handler, outbox *Outbox, channel Channel.Publisher, sourceId string, opts PublisherOptions, logger *log.Logger) *Publisher {
 	if logger == nil {
 		logger = log.Default()
 	}
@@ -101,15 +99,12 @@ func NewPublisher(name string, handler *DataHandler.Handler, outbox *Outbox, cha
 	if opts.HistoryReuseHours <= 0 {
 		opts.HistoryReuseHours = DefaultHistoryReuseHours
 	}
-	if channel.RecipientCount() == 0 {
-		logger.Printf("Publisher[shared/%s]: recipients file has no key; changes are not written to the queue until a subscriber's recipient is added (restart after adding)", name)
-	}
 	return &Publisher{
 		Name:            name,
 		handler:         handler,
 		outbox:          outbox,
 		channel:         channel,
-		fingerprint:     Channel.Fingerprint(signer.Public().(ed25519.PublicKey)),
+		sourceId:        sourceId,
 		publishInterval: time.Duration(opts.PublishIntervalSec) * time.Second,
 		timeout:         time.Duration(opts.SubscriberTimeoutHours) * time.Hour,
 		compactInterval: time.Duration(opts.CompactIntervalHours) * time.Hour,
@@ -139,8 +134,8 @@ func (p *Publisher) Log(message string) {
 	p.log.Printf("Publisher[shared/%s]: %s", p.Name, message)
 }
 
-func (p *Publisher) Fingerprint() string {
-	return p.fingerprint
+func (p *Publisher) SourceId() string {
+	return p.sourceId
 }
 
 func (p *Publisher) setError(err error) {
@@ -229,11 +224,7 @@ func (p *Publisher) PublishPending() error {
 			return err
 		}
 		last := batch[len(batch)-1].Seq
-		if p.channel.RecipientCount() == 0 {
-			p.Log(fmt.Sprintf("no recipients: advanced to seq %d without a queue batch", last))
-		} else {
-			p.Log(fmt.Sprintf("published seq %d-%d", batch[0].Seq, last))
-		}
+		p.Log(fmt.Sprintf("published seq %d-%d", batch[0].Seq, last))
 		state.LastPublished = last
 		state.LastPublishTime = p.now().UTC().Format(time.RFC3339)
 		if err := p.outbox.SavePublishState(state); err != nil {
@@ -246,9 +237,11 @@ func (p *Publisher) PublishPending() error {
 }
 
 // reconcileLocked 让本地发布进度与通道一致（需持有 p.lock）：
-//   - 通道比本地新：上次写入通道后、保存进度前进程退出，按通道前移本地进度；
-//   - 通道比本地旧（仓库被重置或更换）或是旧格式：已发布的变更已从 outbox 删除，无法补发，
-//     让通道从本地进度重新开始；subscriber 会发现缺口并重新订阅。
+//   - 通道上还没有本来源、是旧格式，或 manifest 是另一个 DS 实例写的（重建的实例接管 folder，或两个实例
+//     配置了同一个 folder）：从本地进度 Reset，换新的 epoch，subscriber 重新订阅；
+//   - 通道比本地新、但没有超过 outbox 已提交的 seq：上次写入通道后、保存进度前进程退出，按通道前移本地进度；
+//   - 通道比 outbox 已提交的 seq 还新：本地状态丢失或从备份恢复，通道上的变更与本地数据对不上，Reset；
+//   - 通道比本地旧（仓库被重置或更换）：已发布的变更已从 outbox 删除，无法补发，Reset。
 func (p *Publisher) reconcileLocked(state *PublishState) error {
 	view, err := p.channel.View()
 	if err != nil {
@@ -259,11 +252,22 @@ func (p *Publisher) reconcileLocked(state *PublishState) error {
 		p.Log(fmt.Sprintf("channel holds an old-format manifest; reset it at seq %d", state.LastPublished))
 		return p.channel.Reset(state.LastPublished)
 	case !view.Published:
-		// 通道上还没有本来源：立即写出（签名的）manifest，不等第一条数据。
-		// 订阅方由此能确认来源存在、校验指纹并开始订阅；git 不保存空目录，folder 的存在就体现为这份 manifest。
+		// 通道上还没有本来源：立即写出 manifest，不等第一条数据。
+		// 订阅方由此能确认来源存在并开始订阅；git 不保存空目录，folder 的存在就体现为这份 manifest。
 		p.Log(fmt.Sprintf("channel has no manifest of this source yet; initialize it at seq %d", state.LastPublished))
 		return p.channel.Reset(state.LastPublished)
+	case view.Foreign:
+		p.Log(fmt.Sprintf("WARNING: channel folder was written by DS instance [%s]; take it over and reset at seq %d, subscribers will re-subscribe (if that instance still runs, two instances share this folder)", view.Owner, state.LastPublished))
+		return p.channel.Reset(state.LastPublished)
 	case view.LastSeq > state.LastPublished:
+		committed, err := p.outbox.CurrentSeq()
+		if err != nil {
+			return err
+		}
+		if view.LastSeq > committed {
+			p.Log(fmt.Sprintf("channel is at seq %d, beyond the local outbox seq %d (local state lost or restored from a backup); reset at seq %d, subscribers will re-subscribe", view.LastSeq, committed, state.LastPublished))
+			return p.channel.Reset(state.LastPublished)
+		}
 		p.Log(fmt.Sprintf("channel is at seq %d, local progress %d; catch up", view.LastSeq, state.LastPublished))
 		state.LastPublished = view.LastSeq
 		if err := p.outbox.SavePublishState(state); err != nil {
@@ -289,7 +293,7 @@ func (p *Publisher) expired(published string, now time.Time) bool {
 	return p.olderThan(published, p.timeout, now)
 }
 
-// findGrant 返回授权给 subscriber 这个订阅请求的 history（有多份时取 seq 最大的）。
+// findGrant 返回分给 subscriber 这个订阅请求的 history（有多份时取 seq 最大的）。
 func findGrant(histories []Channel.HistoryRef, subscriber string, request string) (*Channel.HistoryRef, *Channel.GrantRef) {
 	var found *Channel.HistoryRef
 	var grant *Channel.GrantRef
@@ -314,18 +318,18 @@ func queueCovers(view *Channel.View, seq uint64) bool {
 	return false
 }
 
-// reusable 判断一份 history 能否授权给新订阅方：本进程有它的内容密钥、在复用期内、之后的 queue 还完整。
+// reusable 判断一份 history 能否分给新订阅方：在复用期内、之后的 queue 还完整。
 func (p *Publisher) reusable(view *Channel.View, h *Channel.HistoryRef, now time.Time) bool {
-	return p.channel.CanGrant(h.Id) && !p.olderThan(h.Published, p.reuseWindow, now) && queueCovers(view, h.Seq)
+	return !p.olderThan(h.Published, p.reuseWindow, now) && queueCovers(view, h.Seq)
 }
 
 // Maintain 处理订阅请求、判定死亡 subscriber，并删除所有存活 subscriber 都处理过的 batch 与 history。
 //
-// 存活 subscriber 的进度：active 取 cursor；subscribe 取授权给它的 history 的 seq。所有存活 subscriber
+// 存活 subscriber 的进度：active 取 cursor；subscribe 取分给它的 history 的 seq。所有存活 subscriber
 // 中最小的进度之前的 batch 都可以删除；没有存活 subscriber 时删除全部 batch，新 subscriber 总会拿到 history。
 //
-// 新订阅请求优先授权给复用期内最新的 history（只改 manifest），没有可复用的才打包一份新的，
-// 本轮的所有新请求共用它。一份 history 的所有授权都不再等待（订阅方已 active、换了请求、死亡或进度文件
+// 新订阅请求优先分给复用期内最新的 history（只改 manifest），没有可复用的才打包一份新的，
+// 本轮的所有新请求共用它。一份 history 的所有分配都不再等待（订阅方已 active、换了请求、死亡或进度文件
 // 已删除）时删除它。
 func (p *Publisher) Maintain() error {
 	p.lock.Lock()
@@ -338,7 +342,7 @@ func (p *Publisher) Maintain() error {
 	if err != nil {
 		return err
 	}
-	if view.OldFormat {
+	if view.OldFormat || !view.Published || view.Foreign {
 		return nil // PublishPending 下一轮会 Reset
 	}
 	now := p.now()
@@ -350,12 +354,6 @@ func (p *Publisher) Maintain() error {
 	needHistory := []Channel.Progress{}
 	for _, sub := range view.Subscribers {
 		status := SubscriberStatus{Id: sub.Id, Request: sub.Request, State: sub.State, Cursor: sub.Cursor, Updated: sub.Updated}
-		if !p.channel.Trusted(sub.Id) {
-			status.State = SubscriberUntrusted
-			status.Reason = "not in the recipients list"
-			statuses = append(statuses, status)
-			continue
-		}
 		live := false
 		var cursor uint64
 		dead := ""
@@ -383,6 +381,9 @@ func (p *Publisher) Maintain() error {
 				}
 			}
 			switch {
+			case sub.Epoch != view.Epoch:
+				status.State = SubscriberGap
+				status.Reason = fmt.Sprintf("cursor belongs to epoch %s, the channel is at epoch %s (channel was reset)", shortId(sub.Epoch), shortId(view.Epoch))
 			case sub.Cursor > lastSeq:
 				status.State = SubscriberGap
 				status.Reason = fmt.Sprintf("cursor %d is beyond published seq %d (channel was reset)", sub.Cursor, lastSeq)
@@ -431,7 +432,7 @@ func (p *Publisher) Maintain() error {
 			minCursor = provided.Seq
 		}
 	}
-	// history：所有授权都不再等待时删除
+	// history：所有分配都不再等待时删除
 	historyStatus := []HistoryStatus{}
 	for idx := range view.Histories {
 		h := &view.Histories[idx]
@@ -483,7 +484,7 @@ func (p *Publisher) Maintain() error {
 	return nil
 }
 
-// provideHistory 给新订阅请求一份 history：复用期内最新的可复用 history 直接加授权，否则打包一份新的。
+// provideHistory 给新订阅请求一份 history：复用期内最新的可复用 history 直接分给它们，否则打包一份新的。
 // 返回更新后的 history 条目（订阅方加载后从它的 seq 开始消费 queue）。
 func (p *Publisher) provideHistory(view *Channel.View, state *PublishState, subs []Channel.Progress, now time.Time) (*Channel.HistoryRef, error) {
 	grants := []Channel.HistoryGrant{}
@@ -499,15 +500,13 @@ func (p *Publisher) provideHistory(view *Channel.View, state *PublishState, subs
 	}
 	if reuse != nil {
 		ref, err := p.channel.GrantHistory(reuse.Id, grants)
-		if err == nil {
-			for _, sub := range subs {
-				p.Log(fmt.Sprintf("history %s at seq %d granted to subscriber %s", shortId(ref.Id), ref.Seq, sub.Id))
-			}
-			return ref, nil
-		}
-		if !errors.Is(err, Channel.ErrHistoryKeyUnknown) {
+		if err != nil {
 			return nil, err
 		}
+		for _, sub := range subs {
+			p.Log(fmt.Sprintf("history %s at seq %d granted to subscriber %s", shortId(ref.Id), ref.Seq, sub.Id))
+		}
+		return ref, nil
 	}
 	h := &Channel.History{Seq: state.LastPublished, Source: p.Name, Ts: now.UTC().Format(time.RFC3339), Records: p.handler.EachSyncedRecord}
 	ref, err := p.channel.PublishHistory(h, grants)
@@ -555,11 +554,10 @@ func (p *Publisher) CompactIfDue() error {
 // Status 返回 /{vDS}/config 中展示的发布状态。
 func (p *Publisher) Status() map[string]interface{} {
 	result := map[string]interface{}{
-		"fingerprint":            p.fingerprint,
+		"sourceId":               p.sourceId,
 		"subscriberTimeoutHours": p.timeout.Hours(),
 		"compactIntervalHours":   p.compactInterval.Hours(),
 		"historyReuseHours":      p.reuseWindow.Hours(),
-		"recipients":             p.channel.RecipientCount(),
 	}
 	if seq, err := p.outbox.CurrentSeq(); err == nil {
 		result["outboxSeq"] = seq

@@ -77,7 +77,7 @@ func ArgHandler() AdminArgs {
 	dataLogPath := dataCmd.String("log", "", "path that hold log")
 
 	if len(os.Args) < 2 {
-		log.Fatal("expected [table, data, keygen, fingerprint, enckey] subcommands")
+		log.Fatal("expected [table, data] subcommands")
 	}
 	args := AdminArgs{
 		cmd: os.Args[1],
@@ -242,9 +242,6 @@ func ImportTables(db DbIface.Database, tableList []interface{}, args AdminArgs, 
 }
 
 func main() {
-	if RunKeyCommand(os.Args) {
-		return
-	}
 	args := ArgHandler()
 	log.Print("Admin tool for Data Service")
 	config := Config.Confuguration{}

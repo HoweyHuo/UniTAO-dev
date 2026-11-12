@@ -3,6 +3,7 @@ package DataServer
 import (
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 
 	"DataService/Channel"
@@ -12,6 +13,8 @@ import (
 	"DataService/DataJournal"
 	"DataService/DataJournal/ProcessIface"
 	"DataService/Share"
+
+	"github.com/google/uuid"
 )
 
 const (
@@ -36,7 +39,8 @@ type Vds struct {
 	SharedConfig   *Config.SharedVdsConfig
 	MirroredConfig *Config.MirroredVdsConfig
 
-	// InstanceId 是注册到 Inventory 的身份：local 为实例 UUID，shared / mirrored 为来源公钥指纹。
+	// InstanceId 是注册到 Inventory 的身份：local 为实例 UUID，shared / mirrored 为来源的 SourceId
+	// （通道地址的 sha256），shared 与它的各个 mirror 相同。
 	InstanceId string
 	idLock     sync.Mutex
 	invId      string
@@ -83,6 +87,7 @@ func (srv *Server) configuredVds() []*Vds {
 			Path:         fmt.Sprintf("%s/%s", KindShared, cfg.Name),
 			Table:        vdsTable(&srv.config, KindShared, cfg.Name),
 			SharedConfig: cfg,
+			InstanceId:   Channel.SourceId(cfg.Channel, cfg.Channel.ResolvedFolder(cfg.Name)),
 		})
 	}
 	for idx := range srv.config.Vds.Mirrored {
@@ -93,7 +98,7 @@ func (srv *Server) configuredVds() []*Vds {
 			Path:           fmt.Sprintf("%s/%s", KindMirrored, cfg.LocalName()),
 			Table:          vdsTable(&srv.config, KindMirrored, cfg.LocalName()),
 			MirroredConfig: cfg,
-			InstanceId:     cfg.TrustedFingerprint,
+			InstanceId:     Channel.SourceId(cfg.Channel, cfg.Channel.ResolvedFolder(cfg.Name)),
 		})
 	}
 	return result
@@ -114,6 +119,21 @@ func (srv *Server) setupVds(journalLogger *log.Logger) error {
 		st.Table = vdsTable(&srv.config, KindLocal, "")
 	}
 	srv.removeDeletedVds(configured)
+	// shared 把实例 id 写进通道的 manifest，用来发现 folder 被别的实例接管；没有时现在生成（随 state 一起保存）
+	if srv.config.Ds.InstanceId == "" {
+		srv.config.Ds.InstanceId = uuid.NewString()
+	}
+	for _, vds := range vdsList {
+		var ignored []string
+		if vds.SharedConfig != nil {
+			ignored = vds.SharedConfig.Ignored()
+		} else if vds.MirroredConfig != nil {
+			ignored = vds.MirroredConfig.Ignored()
+		}
+		if len(ignored) > 0 {
+			srv.log.Printf("vDS [%s]: config fields [%s] are no longer used (the channel has no encryption or signing), they can be removed", vds.Path, strings.Join(ignored, ", "))
+		}
+	}
 	if err := srv.forceInitIfNeeded(); err != nil {
 		return err
 	}
@@ -260,45 +280,46 @@ func (srv *Server) setupJournal(vds *Vds, journalLogger *log.Logger, extra ...Pr
 
 func (srv *Server) setupShared(vds *Vds, journalLogger *log.Logger) error {
 	cfg := vds.SharedConfig
-	signer, err := Channel.LoadSigningKey(cfg.SigningKeyFile)
-	if err != nil {
-		return err
-	}
-	channel, err := Channel.NewPublisher(cfg.Channel, cfg.Name, signer, srv.log)
+	channel, err := Channel.NewPublisher(cfg.Channel, cfg.Name, srv.config.Ds.InstanceId, srv.log)
 	if err != nil {
 		return err
 	}
 	outbox := Share.NewOutbox(srv.db, vds.Table)
-	vds.Publisher = Share.NewPublisher(cfg.Name, vds.Handler, outbox, channel, signer, Share.PublisherOptions{
+	vds.Publisher = Share.NewPublisher(cfg.Name, vds.Handler, outbox, channel, vds.InstanceId, Share.PublisherOptions{
 		PublishIntervalSec:     cfg.PublishIntervalSec,
 		SubscriberTimeoutHours: cfg.SubscriberTimeoutHours,
 		CompactIntervalHours:   cfg.CompactIntervalHours,
 		HistoryReuseHours:      cfg.HistoryReuseHours,
 	}, srv.log)
-	vds.InstanceId = vds.Publisher.Fingerprint()
 	return srv.setupJournal(vds, journalLogger, Share.NewChannelPublish(cfg.Name, outbox, journalLogger))
 }
 
 func (srv *Server) setupMirrored(vds *Vds) error {
 	cfg := vds.MirroredConfig
-	channel, err := Channel.NewSubscriber(cfg.Channel, cfg.Name, cfg.TrustedFingerprint, srv.log)
+	path := vds.Path
+	// subscriber id 在第一次启动时生成，随 state 保存（setupVds 结束时写出）；丢了就以新 id 重新订阅，
+	// 旧的进度文件由 publisher 超时删除
+	st := srv.state.VdsState(path)
+	if st.SubscriberId == "" {
+		st.SubscriberId = Channel.NewSubscriberId()
+	}
+	channel, err := Channel.NewSubscriber(cfg.Channel, cfg.Name, st.SubscriberId, srv.log)
 	if err != nil {
 		return err
 	}
-	path := vds.Path
 	loadState := func() Share.MirrorState {
 		st := srv.state.VdsState(path)
-		return Share.MirrorState{Request: st.Request, Loaded: st.Loaded, Cursor: st.Cursor, SourceFingerprint: st.SourceFingerprint}
+		return Share.MirrorState{Request: st.Request, Loaded: st.Loaded, Cursor: st.Cursor, Epoch: st.Epoch}
 	}
 	saveState := func(ms Share.MirrorState) error {
 		return srv.state.UpdateVds(path, &srv.config, func(st *Config.VdsState) {
 			st.Request = ms.Request
 			st.Loaded = ms.Loaded
 			st.Cursor = ms.Cursor
-			st.SourceFingerprint = ms.SourceFingerprint
+			st.Epoch = ms.Epoch
 		})
 	}
-	vds.Mirror = Share.NewMirror(cfg.Name, cfg.LocalName(), cfg.TrustedFingerprint, vds.Handler, channel, cfg.PullIntervalSec, loadState, saveState, srv.log)
+	vds.Mirror = Share.NewMirror(cfg.Name, cfg.LocalName(), vds.InstanceId, vds.Handler, channel, cfg.PullIntervalSec, loadState, saveState, srv.log)
 	return nil
 }
 
@@ -312,11 +333,6 @@ func channelInfo(cfg Channel.Config, name string) map[string]interface{} {
 		info["branch"] = cfg.ResolvedBranch()
 		info["workDir"] = cfg.WorkDir
 	}
-	info["encrypt"] = cfg.Encrypt != nil && cfg.Encrypt.RecipientsFile != ""
-	if cfg.Encrypt != nil && cfg.Encrypt.RecipientsFile != "" {
-		info["recipientsFile"] = cfg.Encrypt.RecipientsFile
-	}
-	info["decrypt"] = cfg.Decrypt != nil && cfg.Decrypt.IdentityFile != ""
 	return info
 }
 
@@ -347,7 +363,9 @@ func (srv *Server) vdsConfigInfo(vds *Vds) map[string]interface{} {
 	case KindShared:
 		info["name"] = vds.Name
 		info["channel"] = channelInfo(vds.SharedConfig.Channel, vds.SharedConfig.Name)
-		info["signingKeyConfigured"] = vds.SharedConfig.SigningKeyFile != ""
+		if ignored := vds.SharedConfig.Ignored(); len(ignored) > 0 {
+			info["ignoredConfig"] = ignored
+		}
 		for key, value := range vds.Publisher.Status() {
 			info[key] = value
 		}
@@ -355,6 +373,9 @@ func (srv *Server) vdsConfigInfo(vds *Vds) map[string]interface{} {
 		info["name"] = vds.MirroredConfig.Name
 		info["alias"] = vds.MirroredConfig.Alias
 		info["channel"] = channelInfo(vds.MirroredConfig.Channel, vds.MirroredConfig.Name)
+		if ignored := vds.MirroredConfig.Ignored(); len(ignored) > 0 {
+			info["ignoredConfig"] = ignored
+		}
 		for key, value := range vds.Mirror.Status() {
 			info[key] = value
 		}

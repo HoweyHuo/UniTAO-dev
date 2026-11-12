@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"DataService/Channel"
 	"DataService/Share"
 	"InventoryService/DataHandler"
 )
@@ -23,24 +24,9 @@ func dirChannel(path string) map[string]interface{} {
 	return map[string]interface{}{"type": "dir", "path": path}
 }
 
-// withEncrypt 给 shared 的 channel 配置加上接收方列表（subscriber 白名单）。
-func withEncrypt(channel map[string]interface{}, recipients string) map[string]interface{} {
-	result := map[string]interface{}{}
-	for k, v := range channel {
-		result[k] = v
-	}
-	result["encrypt"] = map[string]interface{}{"recipientsFile": recipients}
-	return result
-}
-
-// withDecrypt 给 mirrored 的 channel 配置加上自己的身份。
-func withDecrypt(channel map[string]interface{}, key subKey) map[string]interface{} {
-	result := map[string]interface{}{}
-	for k, v := range channel {
-		result[k] = v
-	}
-	result["decrypt"] = map[string]interface{}{"identityFile": key.IdentityFile}
-	return result
+// dirSourceId 是 dir 通道上一个来源的 SourceId（shared 与 mirror 注册到 Inventory 的身份）。
+func dirSourceId(path string, folder string) string {
+	return Channel.SourceId(Channel.Config{Type: Channel.TypeDir, Path: path}, folder)
 }
 
 // syncAll 走一轮完整的订阅 / 消费：mirror 登记或汇报进度 → publisher 打包 history、清理 →
@@ -85,23 +71,20 @@ func urlsOf(data map[string]interface{}) []string {
 func TestSharedMirroredEndToEnd(t *testing.T) {
 	inv := startInventory(t, nil)
 	channelDir := filepath.Join(t.TempDir(), "channel")
-	keyFile, fingerprint := newSigningKey(t)
-	keyB := newSubKey(t)
+	sourceId := dirSourceId(channelDir, "prod")
 
 	dsA := newDsNode(t, "dsA", inv.Url)
 	dsA.start(t, map[string]interface{}{
 		"local": map[string]interface{}{},
 		"shared": []interface{}{map[string]interface{}{
-			"name": "prod", "signingKeyFile": keyFile, "publishIntervalSec": 3600,
-			"channel": withEncrypt(dirChannel(channelDir), recipientsFile(t, keyB)),
+			"name": "prod", "publishIntervalSec": 3600, "channel": dirChannel(channelDir),
 		}},
 	})
 	dsB := newDsNode(t, "dsB", inv.Url)
 	dsB.start(t, map[string]interface{}{
 		"local": map[string]interface{}{},
 		"mirrored": []interface{}{map[string]interface{}{
-			"name": "prod", "trustedFingerprint": fingerprint, "pullIntervalSec": 3600,
-			"channel": withDecrypt(dirChannel(channelDir), keyB),
+			"name": "prod", "pullIntervalSec": 3600, "channel": dirChannel(channelDir),
 		}},
 	})
 	pub := dsA.srv.GetVds("shared/prod").Publisher
@@ -116,8 +99,11 @@ func TestSharedMirroredEndToEnd(t *testing.T) {
 	if kind := cfg.Map(t)["kind"]; kind != "shared" {
 		t.Fatalf("expect kind shared, got %v", kind)
 	}
-	if fp := cfg.Map(t)["instanceId"]; fp != fingerprint {
-		t.Fatalf("expect shared instanceId = fingerprint %s, got %v", fingerprint, fp)
+	if id := cfg.Map(t)["instanceId"]; id != sourceId {
+		t.Fatalf("expect shared instanceId = source id %s, got %v", sourceId, id)
+	}
+	if _, ok := cfg.Map(t)["ignoredConfig"]; ok {
+		t.Fatalf("expect no ignoredConfig without old fields, got %v", cfg.Map(t)["ignoredConfig"])
 	}
 	expectStatus(t, call(t, http.MethodGet, dsA.Url+"/nope/server", nil), http.StatusNotFound, "unknown vDS")
 
@@ -173,8 +159,9 @@ func TestSharedMirroredEndToEnd(t *testing.T) {
 		t.Fatalf("expect history removed after it was loaded, got %v", history)
 	}
 	pcfg := call(t, http.MethodGet, sharedUrl+"/config", nil).Map(t)
+	subscriberId := call(t, http.MethodGet, mirroredUrl+"/config", nil).Map(t)["subscriberId"]
 	subs, _ := pcfg["subscribers"].([]interface{})
-	if len(subs) != 1 || subs[0].(map[string]interface{})["state"] != "active" || subs[0].(map[string]interface{})["id"] != keyB.Id {
+	if len(subs) != 1 || subs[0].(map[string]interface{})["state"] != "active" || subs[0].(map[string]interface{})["id"] != subscriberId {
 		t.Fatalf("unexpected subscribers in shared config: %v", pcfg["subscribers"])
 	}
 	// 通道被清空（仓库重置）：publisher 让通道从当前 seq 重新开始，mirror 发现进度文件没了，重新订阅
@@ -186,7 +173,7 @@ func TestSharedMirroredEndToEnd(t *testing.T) {
 	syncAll(t, pub, mirror)
 	expectStatus(t, call(t, http.MethodGet, mirroredUrl+"/rack/r3", nil), http.StatusOK, "r3 on mirror after channel reset")
 	mcfg := call(t, http.MethodGet, mirroredUrl+"/config", nil).Map(t)
-	if mcfg["status"] != "ok" || mcfg["sourceFingerprint"] != fingerprint || mcfg["subscription"] != "active" || mcfg["subscriberId"] != keyB.Id {
+	if mcfg["status"] != "ok" || mcfg["sourceId"] != sourceId || mcfg["instanceId"] != sourceId || mcfg["subscription"] != "active" || mcfg["subscriberId"] != subscriberId {
 		t.Fatalf("unexpected mirror status: %v", mcfg)
 	}
 
@@ -204,7 +191,7 @@ func TestSharedMirroredEndToEnd(t *testing.T) {
 		t.Fatalf("inventory sync failed: %s", err)
 	}
 	prod, _ := getInvRecord(t, inv, "prod")
-	if prod["kind"] != "shared" || prod["instanceId"] != fingerprint {
+	if prod["kind"] != "shared" || prod["instanceId"] != sourceId {
 		t.Fatalf("unexpected merged record: %v", prod)
 	}
 	if urls := urlsOf(prod); urls[0] != sharedUrl {
@@ -236,21 +223,17 @@ func TestSharedMirroredEndToEnd(t *testing.T) {
 func TestRemoveMirroredVds(t *testing.T) {
 	inv := startInventory(t, nil)
 	channelDir := filepath.Join(t.TempDir(), "channel")
-	keyFile, fingerprint := newSigningKey(t)
-	keyB := newSubKey(t)
 	dsA := newDsNode(t, "dsA", "")
 	dsA.start(t, map[string]interface{}{
 		"shared": []interface{}{map[string]interface{}{
-			"name": "prod", "signingKeyFile": keyFile, "publishIntervalSec": 3600,
-			"channel": withEncrypt(dirChannel(channelDir), recipientsFile(t, keyB)),
+			"name": "prod", "publishIntervalSec": 3600, "channel": dirChannel(channelDir),
 		}},
 	})
 	expectStatus(t, call(t, http.MethodPost, dsA.Url+"/shared/prod", schemaRecord("rack", "0.0.1", rackSchema)), http.StatusCreated, "post rack schema")
 	waitJournal(t, dsA, "shared/prod", 1)
 
 	mirrorCfg := map[string]interface{}{
-		"name": "prod", "trustedFingerprint": fingerprint, "pullIntervalSec": 3600,
-		"channel": withDecrypt(dirChannel(channelDir), keyB),
+		"name": "prod", "pullIntervalSec": 3600, "channel": dirChannel(channelDir),
 	}
 	dsB := newDsNode(t, "dsB", inv.Url)
 	dsB.start(t, map[string]interface{}{"local": map[string]interface{}{}, "mirrored": []interface{}{mirrorCfg}})
@@ -269,8 +252,9 @@ func TestRemoveMirroredVds(t *testing.T) {
 	expectStatus(t, call(t, http.MethodGet, dsB.Url+"/mirrored/prod/rack", nil), http.StatusNotFound, "removed vDS")
 }
 
-// TestSignedRegistration 覆盖 Inventory 对签名 vDS 的名字分配：副本合并、撞名派生、同指纹不同名、pinnedSources、按 URL 注销。
-func TestSignedRegistration(t *testing.T) {
+// TestSourceRegistration 覆盖 Inventory 对 shared / mirrored vDS 的名字分配（身份是 SourceId）：副本合并、撞名派生、
+// 同来源不同名、pinnedSources、按 URL 注销。
+func TestSourceRegistration(t *testing.T) {
 	fpA := "SHA256:aaaaaaaa11111111"
 	fpB := "SHA256:bbbbbbbb22222222"
 	fpC := "SHA256:cccccccc33333333"
@@ -291,7 +275,7 @@ func TestSignedRegistration(t *testing.T) {
 	if id := register("prod", fpA, "mirrored", "http://127.0.0.1:9001/mirrored/prod"); id != "prod" {
 		t.Fatalf("expect prod, got %s", id)
 	}
-	// 同名同指纹：副本，URL 合并
+	// 同名同来源：副本，URL 合并
 	if id := register("prod", fpA, "mirrored", "http://127.0.0.1:9002/mirrored/prod"); id != "prod" {
 		t.Fatalf("expect replica merged into prod, got %s", id)
 	}
@@ -299,21 +283,21 @@ func TestSignedRegistration(t *testing.T) {
 	if urls := urlsOf(data); len(urls) != 2 {
 		t.Fatalf("expect 2 replica urls, got %v", urls)
 	}
-	// 同名不同指纹：派生名字
+	// 同名不同来源：派生名字
 	derived := DataHandler.DerivedDsId("prod", fpB)
 	if id := register("prod", fpB, "mirrored", "http://127.0.0.1:9003/mirrored/prod"); id != derived {
 		t.Fatalf("expect derived id %s, got %s", derived, id)
 	}
-	// 同指纹不同名（alias 不一致）：合并进已有记录
+	// 同来源不同名（alias 不一致）：合并进已有记录
 	if id := register("prod-alias", fpA, "mirrored", "http://127.0.0.1:9004/mirrored/prod-alias"); id != "prod" {
-		t.Fatalf("expect same-fingerprint merged into prod, got %s", id)
+		t.Fatalf("expect same-source merged into prod, got %s", id)
 	}
-	// local 占用了名字：签名 vDS 得到派生名字
+	// local 占用了名字：shared / mirrored 得到派生名字
 	register("plain", "uuid-1", "", "http://127.0.0.1:9005/local")
 	if id := register("plain", fpD, "shared", "http://127.0.0.1:9006/shared/plain"); id != DataHandler.DerivedDsId("plain", fpD) {
 		t.Fatalf("expect derived id for name taken by local, got %s", id)
 	}
-	// pinnedSources：名字被固定给 fpC，其它指纹得到派生名字；fpC 来时拿到名字
+	// pinnedSources：名字被固定给 fpC，其它来源得到派生名字；fpC 来时拿到名字
 	if id := register("pinned", fpE, "mirrored", "http://127.0.0.1:9007/mirrored/pinned"); id != DataHandler.DerivedDsId("pinned", fpE) {
 		t.Fatalf("expect non-pinned source get derived id, got %s", id)
 	}
@@ -335,13 +319,11 @@ func TestSignedRegistration(t *testing.T) {
 
 // TestSharedSchemaClosure shared 的 schema 不能引用本 vDS 之外的类型。
 func TestSharedSchemaClosure(t *testing.T) {
-	keyFile, _ := newSigningKey(t)
 	ds := newDsNode(t, "dsA", "")
 	ds.start(t, map[string]interface{}{
 		"local": map[string]interface{}{},
 		"shared": []interface{}{map[string]interface{}{
-			"name": "prod", "signingKeyFile": keyFile, "publishIntervalSec": 3600,
-			"channel": withEncrypt(dirChannel(filepath.Join(t.TempDir(), "channel")), recipientsFile(t, newSubKey(t))),
+			"name": "prod", "publishIntervalSec": 3600, "channel": dirChannel(filepath.Join(t.TempDir(), "channel")),
 		}},
 	})
 	expectStatus(t, call(t, http.MethodPost, ds.Url+"/local", schemaRecord("rack", "0.0.1", rackSchema)), http.StatusCreated, "post local rack schema")

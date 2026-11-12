@@ -70,7 +70,7 @@ it then writes `.env` and `config/config.json` (both mode 600, the config holds 
 ~/infra/unitao-howey/ds/
   docker-compose.yml   from template/dataservice
   .env                 the answers: COMPOSE_PROJECT_NAME, UNITAO_NAME, UNITAO_PORT, UNITAO_UID/GID, UNITAO_IMAGE, networks, UNITAO_CHANNEL_DIR
-  config/              config.json, state.json, and config/vds/ (keys of shared / mirrored vDS, see below)
+  config/              config.json, state.json
   data/                clones of git channels
   channel/             the channel directory, until unitao_vds.sh is given another one
   logs/
@@ -88,37 +88,35 @@ a Data Service can share a vDS with other networks (`shared/<name>`, the publish
 unitao_vds.sh <directory>                         # interactive menu
 unitao_vds.sh <directory> list
 unitao_vds.sh <directory> add shared <name> --repo <url> [--folder <f>] [--branch <b>] [--publish-interval <s>] …
-unitao_vds.sh <directory> add mirrored <name> --fingerprint <SHA256:…> --repo <url> [--folder <f>] [--alias <a>] [--pull-interval <s>] …
-unitao_vds.sh <directory> show shared|mirrored <name>
+unitao_vds.sh <directory> add mirrored <name> --repo <url> [--folder <f>] [--alias <a>] [--pull-interval <s>] …
 unitao_vds.sh <directory> remove shared|mirrored <name>
-unitao_vds.sh <directory> recipient list <name>
-unitao_vds.sh <directory> recipient add <name> <recipient> [--note <text>]
-unitao_vds.sh <directory> recipient remove <name> <recipient|subscriber id>
 ```
 
-values not given on the command line (name, channel, fingerprint) are asked for; `-h` lists every option. `--dir <path>` instead of `--repo` makes a `dir` channel. it edits the `vds` section of `config/config.json`, keeps the files of each vDS in `config/vds/<kind>/<name>/`, and restarts the Data Service if it runs (`--no-restart` skips that; the config is read at start):
+values not given on the command line (name, channel) are asked for; `-h` lists every option. `--dir <path>` instead of `--repo` makes a `dir` channel. it edits the `vds` section of `config/config.json` and restarts the Data Service if it runs (`--no-restart` skips that; the config is read at start).
 
-| kind | files | |
-|---|---|---|
-| shared | `signing.pem`, `fingerprint`, `recipients` | the signing key (private, never leaves the instance); its fingerprint, which every mirror needs; the subscriber whitelist (created by the Data Service, one recipient per line) |
-| mirrored | `identity`, `recipient` | the decryption key (private, never leaves the instance); its public key, for the publisher's whitelist |
+a shared vDS and its mirrors are connected by configuring **the same channel address**: repository, branch and folder (the folder defaults to the vDS name). there are no keys to exchange: the channel is neither encrypted nor signed, who can read and write it is decided by the git server (or the file permissions of a `dir` channel). the address is also the identity of the source: Inventory merges a shared vDS and its mirrors by it (`instanceId` in `GET /{vDS}/config`), and a Data Service rebuilt with the same config simply takes the folder over (see "Backup and rebuild").
 
 the branch of a git channel defaults to the repository's default branch (on Gitee often `master`), read from the remote with the Data Service's ssh key and credentials; an empty repository gives `main`. when the remote cannot be read (e.g. the Data Service's ssh key is not on the git server yet), the script prints the reason and the public key from `config/state.json`; interactively it waits for you to add the key and reads again (or takes a branch you type), otherwise it uses `main`. it is always written to the config; both sides must use the same branch, `--branch` sets it.
 
-run the script as the user the Data Service runs as (`UNITAO_UID`, in group docker), not with sudo: `add` refuses to run as root, because the Data Service could not use the files root creates. `remove` may run with sudo, e.g. to clean up such files.
+run the script as the user the Data Service runs as (`UNITAO_UID`, in group docker), not with sudo: `add` refuses to run as root, because the Data Service could not use the files root creates (a bare repository in the channel directory). `remove` may run with sudo, e.g. to clean up such files.
 
 a git channel is cloned into `data/vds/<kind>/<name>/channel`. a `file:///opt/UniTAO/channel/<repo>.git` repository that does not exist yet is created as an empty bare repository in the channel directory.
 
 a channel on this host (`file:///opt/UniTAO/channel/<repo>.git` or `--dir /opt/UniTAO/channel…`) lives in the host directory mounted at `/opt/UniTAO/channel`, by default `channel/` in the instance directory. the first such vDS asks for that directory (`--channel-dir <host path>`); when two sites on one host exchange data this way, give both the same directory. it is written to `UNITAO_CHANNEL_DIR` in `.env` and the container is recreated; once a vDS uses it, it stays. a git server needs none of this.
 
-`remove` deletes the entry, its files and its clone (except what another vDS still uses); when the Data Service starts again it drops the table of that vDS and unregisters it from Inventory. after the restart it cleans up what the vDS left on the channel, through a temporary clone with the ssh key of the Data Service: a shared vDS deletes its `manifest.json`, `manifest.sig`, `queue/`, `history/` and `subscribers/` in its folder (not when the manifest is signed by another key, and never the folders below it), so a shared vDS added again under the same name, with a new key, can publish there; a mirrored vDS deletes its progress file `subscribers/<id>.json` in the folder of its source. with `--no-restart` while the Data Service runs, the channel is left as it is (the running Data Service would write the files back).
+`remove` deletes the entry and its clone (except what another vDS still uses), and the key files older versions kept in `config/vds/<kind>/<name>/`; when the Data Service starts again it drops the table of that vDS and unregisters it from Inventory. after the restart it cleans up what the vDS left on the channel, through a temporary clone with the ssh key of the Data Service: a shared vDS deletes its `manifest.json`, `queue/`, `history/` and `subscribers/` in its folder (only when the manifest was written by this Data Service instance, never the folders below it); a mirrored vDS deletes its progress file `subscribers/<id>.json` in the folder of its source. with `--no-restart` while the Data Service runs, the channel is left as it is (the running Data Service would write the files back).
 
-**the hand-over** between the two sides stays with you:
+### Backup and rebuild
 
- - the publisher's `fingerprint` goes to every mirror: `add mirrored … --fingerprint "$(cat …/config/vds/shared/<name>/fingerprint)"`. it is the fingerprint of the key (`SHA256:` and 64 hex digits), not `signing.pem`.
- - each mirror's `recipient` (printed by its `add` / `show`) goes into the publisher's whitelist: `recipient add <name> <recipient>` on the publisher. until then the mirror stays `untrusted`.
+nothing on either side has to be backed up for the channel: a Data Service rebuilt from scratch (new directory, empty database) with the same `add shared` / `add mirrored` settings reconnects by itself.
 
-`recipient` edits the whitelist `config/vds/shared/<name>/recipients` of a shared vDS and restarts the Data Service (the whitelist is read at start). `add` checks that the value is a recipient and skips one already there; `--note` puts a `# note:` line above it, shown by `list` next to the subscriber id. `remove` takes the recipient or its subscriber id (the id `list` and the channel's `subscribers/<id>.json` show) and removes its note too. a removed mirror cannot decrypt the batches published after that; its progress file is dropped after `subscriberTimeoutHours`.
+ - **rebuilt publisher**: its manifest names the Data Service instance that wrote it (`instance`, from `state.json`). a new instance finds another one's manifest, logs `take it over` and restarts the folder in a new epoch from its own data. its mirrors notice the new epoch, subscribe again and replace their copy with the rebuilt data; they keep serving the old copy until then. if the old instance still runs, the two keep taking the folder from each other (logged every round): give each its own folder.
+ - **publisher restored from an older backup** (same `state.json`, older database): the channel is ahead of what the database has committed, so the publisher restarts the folder the same way.
+ - **rebuilt mirror**: it gets a new subscriber id, subscribes and loads a full history; the publisher drops the old one's progress file after `subscriberTimeoutHours`.
+
+what a rebuild does need is the git access: the new Data Service has a new ssh key (printed by `unitao_vds.sh add` when it cannot read the repository, and in `config/state.json`) that has to be added to the git server.
+
+config files written by older versions still work: `signingKeyFile`, `trustedFingerprint`, `channel.encrypt` and `channel.decrypt` are ignored (the log and `ignoredConfig` in `GET /{vDS}/config` list them, they can be deleted). an old-format manifest on the channel is restarted by the publisher on its first round.
 
 ### Example: two sites on one host
 
@@ -139,9 +137,7 @@ $S/unitao_deploy.sh dataservice ~/demo/site-mirror
 REPO=file:///opt/UniTAO/channel/exchange.git
 # both Data Services mount ~/demo/channel at /opt/UniTAO/channel, where the repository is
 $S/unitao_vds.sh ~/demo/site-shared/ds add shared catalog --repo $REPO --channel-dir ~/demo/channel --folder infra/catalog --publish-interval 5
-$S/unitao_vds.sh ~/demo/site-mirror/ds add mirrored catalog --repo $REPO --channel-dir ~/demo/channel --folder infra/catalog --pull-interval 10 \
-    --fingerprint "$(cat ~/demo/site-shared/ds/config/vds/shared/catalog/fingerprint)"
-$S/unitao_vds.sh ~/demo/site-shared/ds recipient add catalog "$(cat ~/demo/site-mirror/ds/config/vds/mirrored/catalog/recipient)" --note site-mirror
+$S/unitao_vds.sh ~/demo/site-mirror/ds add mirrored catalog --repo $REPO --channel-dir ~/demo/channel --folder infra/catalog --pull-interval 10
 ```
 
 try it:
@@ -152,7 +148,7 @@ curl -X POST localhost:8031/shared/catalog -d '{"__type":"schema","__id":"rack",
 curl -X POST localhost:8031/shared/catalog -d '{"__type":"rack","__id":"r1","__ver":"0.0.1","data":{"name":"rack one"}}'
 
 # what site-shared pushed
-git -C ~/demo/channel/exchange.git ls-tree -r --name-only main   # infra/catalog/manifest.json, manifest.sig, subscribers/<site-mirror id>.json
+git -C ~/demo/channel/exchange.git ls-tree -r --name-only main   # infra/catalog/manifest.json, subscribers/<site-mirror id>.json
 
 # within ~15 seconds (publish every 5s, pull every 10s) it is on site-mirror, read-only
 curl localhost:8041/mirrored/catalog/rack/r1
@@ -164,7 +160,7 @@ curl localhost:8044/rack                         # ["catalog/r1"] in site-mirror
 what happens on the channel:
 
  1. site-mirror pushes `subscribers/<its id>.json` with `state: subscribe` (the publisher does not need to exist yet).
- 2. site-shared publishes the writes as `queue/…-….jsonl.gz.enc`, sees the subscription and writes `history/<id>/0001.jsonl.gz.aes` with all its records; the manifest grants it to site-mirror (its content key wrapped for site-mirror's public key).
+ 2. site-shared publishes the writes as `queue/…-….jsonl.gz`, sees the subscription and writes `history/<id>/0001.jsonl.gz` with all its records; the manifest assigns it to site-mirror's request.
  3. site-mirror loads the history (replacing its table), consumes the queue from there and reports `state: active` with its cursor.
  4. site-shared deletes the history and every batch site-mirror has passed.
 
@@ -178,16 +174,17 @@ both sides use the same folder (`infra/catalog`) on branch `main`; other vDS can
 
 ```
 infra/catalog/
-  manifest.json, manifest.sig             # signed by the publisher: lastSeq, queue batches and history parts with their sha256, history grants
-  queue/<from>-<to>.jsonl.gz.enc          # incremental batches, encrypted to all recipients
-  history/<id>/<n>.jsonl.gz.aes           # parts of a full history; its content key is wrapped in the manifest for each grantee
-  subscribers/<id>.json                   # written by each mirror: request, state, cursor
+  manifest.json                           # written by the publisher: its instance, epoch, lastSeq, queue batches and history parts with their sha256, which requests each history serves
+  queue/<from>-<to>.jsonl.gz              # incremental batches
+  history/<id>/<n>.jsonl.gz               # parts of a full history
+  subscribers/<id>.json                   # written by each mirror: request, state, cursor, epoch
 ```
 
  - **every write, both sides**: `fetch --depth 1`, reset the clone to the remote branch, write only its own files, commit, push. a rejected push (someone else pushed first) is redone from the fetch, no rebase. an empty remote is fine, the first push creates the branch.
  - **the publisher** pushes batches and histories and prunes what every mirror has passed; at most every `compactIntervalHours` it squashes the branch into one commit (`push --force-with-lease`, so a concurrent push is never lost) and runs `gc` on its clone.
  - **a mirror** pushes its progress only when it changes, so an idle channel gets no commits. it needs write access to the repository.
  - git runs non-interactively (`GIT_TERMINAL_PROMPT=0`): credentials must be in place before the Data Service starts.
+ - the files are plain gzip JSONL: anyone who can read the repository can read the data. keep the repository private and give access only to the Data Services that publish or mirror.
 
 ### Using a git server
 
