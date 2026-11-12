@@ -89,14 +89,15 @@ type LocalVdsConfig struct{}
 
 // SharedVdsConfig 是一个 shared vDS：数据全部经 Channel 共享出去（publisher）。
 type SharedVdsConfig struct {
-	Name               string `json:"name"`
-	SigningKeyFile     string `json:"signingKeyFile"`
+	Name string `json:"name"`
+	// SigningKeyFile：旧版本的签名私钥，已不再使用，读入只是为了启动时提示可以删掉
+	SigningKeyFile     string `json:"signingKeyFile,omitempty"`
 	PublishIntervalSec int    `json:"publishIntervalSec"`
 	// SubscriberTimeoutHours：subscriber 的第一个未处理 batch 发布超过这么久，判定它死亡（默认 24）
 	SubscriberTimeoutHours int `json:"subscriberTimeoutHours"`
 	// CompactIntervalHours：压缩通道历史的最小间隔（默认 24，只对 git 通道有效）
 	CompactIntervalHours int `json:"compactIntervalHours"`
-	// HistoryReuseHours：history 发布后这么久之内，新订阅方直接拿到它的授权，不重新打包（默认 24）
+	// HistoryReuseHours：history 发布后这么久之内，新订阅方直接分到它，不重新打包（默认 24）
 	HistoryReuseHours int            `json:"historyReuseHours"`
 	Channel           Channel.Config `json:"channel"`
 }
@@ -104,11 +105,30 @@ type SharedVdsConfig struct {
 // MirroredVdsConfig 是一个 mirrored vDS（subscriber）：只读，所有变化来自 Channel。
 // Name 为来源的共享名；Alias 为本网使用的名字（路径与 Inventory dsId），缺省等于 Name。
 type MirroredVdsConfig struct {
-	Name               string         `json:"name"`
-	Alias              string         `json:"alias,omitempty"`
-	TrustedFingerprint string         `json:"trustedFingerprint"`
+	Name  string `json:"name"`
+	Alias string `json:"alias,omitempty"`
+	// TrustedFingerprint：旧版本的来源指纹，已不再使用，读入只是为了启动时提示可以删掉
+	TrustedFingerprint string         `json:"trustedFingerprint,omitempty"`
 	PullIntervalSec    int            `json:"pullIntervalSec"`
 	Channel            Channel.Config `json:"channel"`
+}
+
+// Ignored 返回配置里已不再使用的字段（旧版本的签名与加密配置）。
+func (s SharedVdsConfig) Ignored() []string {
+	result := s.Channel.Ignored()
+	if s.SigningKeyFile != "" {
+		result = append([]string{"signingKeyFile"}, result...)
+	}
+	return result
+}
+
+// Ignored 返回配置里已不再使用的字段（旧版本的指纹与解密配置）。
+func (m MirroredVdsConfig) Ignored() []string {
+	result := m.Channel.Ignored()
+	if m.TrustedFingerprint != "" {
+		result = append([]string{"trustedFingerprint"}, result...)
+	}
+	return result
 }
 
 // LocalName 返回 mirrored vDS 在本网使用的名字。
@@ -142,14 +162,8 @@ func (v *VdsConfig) Normalize() error {
 			return fmt.Errorf("duplicate shared vDS name [%s]", cfg.Name)
 		}
 		seen[cfg.Name] = true
-		if cfg.SigningKeyFile == "" {
-			return fmt.Errorf("shared vDS [%s] requires [signingKeyFile]", cfg.Name)
-		}
 		if err := cfg.Channel.Validate(); err != nil {
 			return fmt.Errorf("shared vDS [%s]: %s", cfg.Name, err)
-		}
-		if cfg.Channel.Encrypt == nil || cfg.Channel.Encrypt.RecipientsFile == "" {
-			return fmt.Errorf("shared vDS [%s] requires [channel.encrypt.recipientsFile] (the subscriber whitelist)", cfg.Name)
 		}
 	}
 	seen = map[string]bool{}
@@ -165,14 +179,8 @@ func (v *VdsConfig) Normalize() error {
 			return fmt.Errorf("duplicate mirrored vDS name [%s]", cfg.LocalName())
 		}
 		seen[cfg.LocalName()] = true
-		if cfg.TrustedFingerprint == "" {
-			return fmt.Errorf("mirrored vDS [%s] requires [trustedFingerprint]", cfg.LocalName())
-		}
 		if err := cfg.Channel.Validate(); err != nil {
 			return fmt.Errorf("mirrored vDS [%s]: %s", cfg.LocalName(), err)
-		}
-		if cfg.Channel.Decrypt == nil || cfg.Channel.Decrypt.IdentityFile == "" {
-			return fmt.Errorf("mirrored vDS [%s] requires [channel.decrypt.identityFile] (the subscriber identity)", cfg.LocalName())
 		}
 	}
 	return nil

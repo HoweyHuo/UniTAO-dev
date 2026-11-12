@@ -10,11 +10,7 @@ import (
 
 func TestVdsConfigNormalize(t *testing.T) {
 	dir := Channel.Config{Type: Channel.TypeDir, Path: "/tmp/x"}
-	pubDir := dir
-	pubDir.Encrypt = &Channel.EncryptConfig{RecipientsFile: "r"}
-	subDir := dir
-	subDir.Decrypt = &Channel.DecryptConfig{IdentityFile: "i"}
-	badFolder := pubDir
+	badFolder := dir
 	badFolder.Folder = "../escape"
 	empty := Config.VdsConfig{}
 	if err := empty.Normalize(); err != nil || empty.Local == nil {
@@ -25,18 +21,14 @@ func TestVdsConfigNormalize(t *testing.T) {
 		cfg    Config.VdsConfig
 		expect string
 	}{
-		{"slash in name", Config.VdsConfig{Shared: []Config.SharedVdsConfig{{Name: "a/b", SigningKeyFile: "k", Channel: dir}}}, "invalid shared vDS name"},
-		{"duplicate shared", Config.VdsConfig{Shared: []Config.SharedVdsConfig{{Name: "a", SigningKeyFile: "k", Channel: pubDir}, {Name: "a", SigningKeyFile: "k", Channel: pubDir}}}, "duplicate shared"},
-		{"shared without key", Config.VdsConfig{Shared: []Config.SharedVdsConfig{{Name: "a", Channel: dir}}}, "signingKeyFile"},
-		{"mirrored without fingerprint", Config.VdsConfig{Mirrored: []Config.MirroredVdsConfig{{Name: "a", Channel: dir}}}, "trustedFingerprint"},
+		{"slash in name", Config.VdsConfig{Shared: []Config.SharedVdsConfig{{Name: "a/b", Channel: dir}}}, "invalid shared vDS name"},
+		{"duplicate shared", Config.VdsConfig{Shared: []Config.SharedVdsConfig{{Name: "a", Channel: dir}, {Name: "a", Channel: dir}}}, "duplicate shared"},
 		{"alias collides", Config.VdsConfig{Mirrored: []Config.MirroredVdsConfig{
-			{Name: "a", TrustedFingerprint: "f1", Channel: subDir},
-			{Name: "b", Alias: "a", TrustedFingerprint: "f2", Channel: subDir},
+			{Name: "a", Channel: dir},
+			{Name: "b", Alias: "a", Channel: dir},
 		}}, "duplicate mirrored"},
-		{"unknown channel", Config.VdsConfig{Mirrored: []Config.MirroredVdsConfig{{Name: "a", TrustedFingerprint: "f", Channel: Channel.Config{Type: "ftp"}}}}, "ftp"},
-		{"shared without recipients", Config.VdsConfig{Shared: []Config.SharedVdsConfig{{Name: "a", SigningKeyFile: "k", Channel: dir}}}, "recipientsFile"},
-		{"mirrored without identity", Config.VdsConfig{Mirrored: []Config.MirroredVdsConfig{{Name: "a", TrustedFingerprint: "f", Channel: dir}}}, "identityFile"},
-		{"folder escapes", Config.VdsConfig{Shared: []Config.SharedVdsConfig{{Name: "a", SigningKeyFile: "k", Channel: badFolder}}}, "invalid channel folder"},
+		{"unknown channel", Config.VdsConfig{Mirrored: []Config.MirroredVdsConfig{{Name: "a", Channel: Channel.Config{Type: "ftp"}}}}, "ftp"},
+		{"folder escapes", Config.VdsConfig{Shared: []Config.SharedVdsConfig{{Name: "a", Channel: badFolder}}}, "invalid channel folder"},
 	}
 	for _, c := range cases {
 		err := c.cfg.Normalize()
@@ -44,14 +36,23 @@ func TestVdsConfigNormalize(t *testing.T) {
 			t.Errorf("%s: expect error containing [%s], got %v", c.name, c.expect, err)
 		}
 	}
+	// 不需要密钥；旧版本的签名 / 加密字段仍能解析，但不再要求，也不影响校验
+	old := dir
+	old.Encrypt = map[string]interface{}{"recipientsFile": "r"}
 	ok := Config.VdsConfig{
-		Shared:   []Config.SharedVdsConfig{{Name: "a", SigningKeyFile: "k", Channel: pubDir}},
-		Mirrored: []Config.MirroredVdsConfig{{Name: "a", TrustedFingerprint: "f", Channel: subDir}},
+		Shared:   []Config.SharedVdsConfig{{Name: "a", Channel: dir}, {Name: "b", SigningKeyFile: "k", Channel: old}},
+		Mirrored: []Config.MirroredVdsConfig{{Name: "a", Channel: dir}},
 	}
 	if err := ok.Normalize(); err != nil {
-		t.Fatalf("shared and mirrored may share a name, got %v", err)
+		t.Fatalf("shared and mirrored may share a name and need no keys, got %v", err)
 	}
 	if ok.Local != nil {
 		t.Fatalf("local must not be enabled implicitly when other vDS are configured")
+	}
+	if got := ok.Shared[0].Ignored(); len(got) != 0 {
+		t.Fatalf("expect nothing ignored without old fields, got %v", got)
+	}
+	if got := ok.Shared[1].Ignored(); len(got) != 2 || got[0] != "signingKeyFile" || got[1] != "channel.encrypt" {
+		t.Fatalf("expect the old fields reported as ignored, got %v", got)
 	}
 }

@@ -23,21 +23,19 @@
 # This copyright notice and license applies to all files in this directory or sub-directories, except when stated otherwise explicitly.
 
 # 维护一个已部署的 Data Service 实例（unitao_deploy.sh 部署的目录）上的 shared / mirrored vDS：
-# 改 config/config.json 的 vds 段，生成 / 删除每个 vDS 附带的文件，然后重启 Data Service 让配置生效。需要 python3。
+# 改 config/config.json 的 vds 段，然后重启 Data Service 让配置生效。需要 python3。
 #
 # 用法: unitao_vds.sh [--service <服务>] [--no-restart] [<目标目录>] [<命令> ...]
 #   不给命令时进入交互菜单。目标目录默认当前目录。
 #   list
 #   add shared [<name>] [--repo <url> | --dir <path>] [--channel-dir <宿主机目录>] [--branch <b>] [--folder <f>] [--workdir <path>]
 #       [--publish-interval <秒>] [--subscriber-timeout <小时>] [--compact-interval <小时>] [--history-reuse <小时>]
-#   add mirrored [<name>] [--fingerprint <SHA256:...>] [--repo <url> | --dir <path>] [--channel-dir <宿主机目录>] [--alias <a>]
+#   add mirrored [<name>] [--repo <url> | --dir <path>] [--channel-dir <宿主机目录>] [--alias <a>]
 #       [--branch <b>] [--folder <f>] [--workdir <path>] [--pull-interval <秒>]
-#   show shared|mirrored <name>      打印要交给其它 site 的东西
 #   remove shared|mirrored <name>    mirrored 有 alias 时用 alias
-#   recipient list <name>                               列出 shared/<name> 的 subscriber 白名单（recipient 和 subscriber id）
-#   recipient add <name> [<recipient>] [--note <说明>]   把一个 mirror 的 recipient（它 add / show 时打印的）加进白名单
-#   recipient remove <name> [<recipient|subscriber id>]  从白名单删除
-#   缺少的值（名字、通道、指纹）交互询问；非交互时必须在命令行给出。
+#   缺少的值（名字、通道）交互询问；非交互时必须在命令行给出。
+#   shared 和它的 mirror 配同一个通道地址（仓库、分支、folder）就连上了，不需要交换密钥：
+#   通道不加密、不签名，谁能读写由仓库（目录）的权限决定。
 #
 #   --branch      git 通道的分支，两边要相同；默认是仓库的默认分支（经 Data Service 的 ssh 密钥 / 凭据读远端 HEAD），读不到时 main
 #   --channel-dir 通道在本机上时（file:///opt/UniTAO/channel/... 或 --dir /opt/UniTAO/channel...）挂到 /opt/UniTAO/channel 的
@@ -46,15 +44,12 @@
 #   --service     compose 里不止一个 Data Service 时指定是哪个
 #   --no-restart  add / remove 后不重启 Data Service（配置在启动时生效，默认在它运行时重启它）
 #
-# add 在 config/vds/<kind>/<name>/ 下生成该 vDS 的文件：
-#   shared:   signing.pem（签名私钥，不离开本实例）、fingerprint（交给 mirror 作 --fingerprint），
-#             recipients（subscriber 白名单，Data Service 启动时建；把每个 mirror 的 recipient 追加进去再重启）
-#   mirrored: identity（解密私钥，不离开本实例）、recipient（公钥，交给 shared 追加进它的 recipients）
-#   git 通道的克隆默认在 data/vds/<kind>/<name>/channel。仓库是 /opt/UniTAO/channel 下的 file:// 且不存在时，建一个空的裸仓库。
-# recipient add / remove 改 shared 的 recipients 文件，然后重启 Data Service（白名单在启动时读取）。
-# remove 从 config.json 删掉这一项，删除它的文件和克隆（其它 vDS 还在用的除外）。重启后 Data Service 删除该 vDS 的表
-#   并从 Inventory 注销。之后清理它留在通道上的东西：shared 删 folder 下自己的 manifest、queue、history、subscribers
-#   （manifest 是别的密钥签的就不动），mirrored 删来源 folder 下自己的进度文件；--no-restart 而 Data Service 在运行时不清理。
+# add 把这一项写进 config.json。git 通道的克隆默认在 data/vds/<kind>/<name>/channel。
+#   仓库是 /opt/UniTAO/channel 下的 file:// 且不存在时，建一个空的裸仓库。
+# remove 从 config.json 删掉这一项，删除它的克隆（其它 vDS 还在用的除外）和旧版本留下的密钥文件。重启后 Data Service
+#   删除该 vDS 的表并从 Inventory 注销。之后清理它留在通道上的东西：shared 删 folder 下自己的 manifest、queue、history、
+#   subscribers（manifest 是别的 Data Service 实例写的就不动），mirrored 删来源 folder 下自己的进度文件；
+#   --no-restart 而 Data Service 在运行时不清理。
 
 set -euo pipefail
 SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
@@ -86,7 +81,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 case ${1:-} in
-    ""|list|add|show|remove|recipient) target=$PWD ;;
+    ""|list|add|remove) target=$PWD ;;
     *) target=$1; shift ;;
 esac
 [ -f "$target/docker-compose.yml" ] || die "no docker-compose.yml in $target: give the directory of a Data Service deployed with unitao_deploy.sh"
@@ -143,13 +138,13 @@ resolve() {
 host_of() { local h; IFS=$'\t' read -r h _ _ < <(resolve "$1") || return 1; echo "$h"; }
 rel() { realpath -m --relative-to=. "$1"; }
 mounted() { local src tgt; IFS=$'\t' read -r _ src tgt < <(resolve "$1"); echo "$src:$tgt"; }
-admin() { local m; m=$(mounted "$1"); shift; docker run --rm --user "$RUN_AS" -v "$m" "$IMAGE" DataServiceAdmin "$@"; }
 
 cfg=$(fact C | awk -F'\t' -v s="$svc" '$1 == s { print $2 }')
 [ -n "$cfg" ] || die "$svc has no -config argument"
 cfg_host=$(host_of "$cfg") || die "$svc: $cfg is not in a bind mount"
 [ -f "$cfg_host" ] || die "$(rel "$cfg_host") does not exist"
-KEYROOT="$(dirname "$cfg")/vds"
+KEYROOT="$(dirname "$cfg")/vds"   # 旧版本在这里放每个 vDS 的密钥，remove 时清掉
+STATE_HOST="$(dirname "$cfg_host")/state.json"
 DATAROOT=/opt/UniTAO/data/vds
 CHANNEL=/opt/UniTAO/channel
 
@@ -269,32 +264,6 @@ do_list() {
     if [ -z "$out" ]; then echo "no shared / mirrored vDS in $(rel "$cfg_host")"; else echo "$out" | sed 's|\t|/|' | column -t -s $'\t'; fi
 }
 
-do_show() {
-    local kind=$1 name=$2 key list host fp r n
-    exists "$kind" "$name" || die "$kind/$name is not in $(rel "$cfg_host")"
-    if [ "$kind" = shared ]; then
-        key=$(cfgpy field shared "$name" signingKeyFile)
-        host=$(host_of "$key") || die "$key is not in a bind mount"
-        fp="$(dirname "$host")/fingerprint"
-        [ -s "$fp" ] || admin "$key" fingerprint -key "$key" > "$fp"
-        echo "-> shared/$name: fingerprint (in $(rel "$fp")), every mirror needs it (add mirrored $name --fingerprint ...):"
-        echo "   $(cat "$fp")"
-        list=$(cfgpy field shared "$name" channel.encrypt.recipientsFile)
-        host=$(host_of "$list") || return 0
-        n=0; [ -f "$host" ] && n=$(grep -cv '^[[:space:]]*\(#\|$\)' "$host" || true)
-        echo "-> shared/$name: subscriber whitelist $(rel "$host") has $n recipient(s); add each mirror's recipient with: recipient add $name <recipient>"
-    else
-        key=$(cfgpy field mirrored "$name" channel.decrypt.identityFile)
-        host=$(host_of "$key") || die "$key is not in a bind mount"
-        r="$(dirname "$host")/recipient"
-        [ -s "$r" ] || die "$(rel "$r") is missing"
-        echo "-> mirrored/$name: recipient (in $(rel "$r")), add it to the whitelist of the shared vDS on the publishing site:"
-        echo "   $(cat "$r")"
-        echo "   unitao_vds.sh <its directory> recipient add $(cfgpy field mirrored "$name" name) $(cat "$r")"
-        echo "   subscriber id: $(base64 -d <"$r" | sha256sum | cut -d' ' -f1)"
-    fi
-}
-
 # 通道是否在本机的通道目录里：file:///opt/UniTAO/channel/... 的仓库，或 /opt/UniTAO/channel 下的 dir 通道
 local_channel() { [[ $1 == file://$CHANNEL/* || $1 == "$CHANNEL" || $1 == "$CHANNEL"/* ]]; }
 
@@ -378,7 +347,7 @@ init_local_repo() {
 
 do_add() {
     local kind=$1; shift
-    local name= repo= dir= chdir= branch= folder= workdir= fingerprint= alias= pairs=() opt val asked=0
+    local name= repo= dir= chdir= branch= folder= workdir= alias= pairs=() opt val asked=0
     check_kind "$kind"
     # 以 root（sudo）add 时建出的目录和文件归 root，以 UNITAO_UID 运行的 Data Service 和密钥工具都写不进、读不到。
     # remove 只删除，用 root 正好能清理这种残留
@@ -399,7 +368,6 @@ do_add() {
             shared:--subscriber-timeout) pairs+=("subscriberTimeoutHours=$val") ;;
             shared:--compact-interval) pairs+=("compactIntervalHours=$val") ;;
             shared:--history-reuse) pairs+=("historyReuseHours=$val") ;;
-            mirrored:--fingerprint) fingerprint=$val ;;
             mirrored:--alias) check_name "$val"; alias=$val ;;
             mirrored:--pull-interval) pairs+=("pullIntervalSec=$val") ;;
             *) die "unknown option [$opt] for add $kind (-h)" ;;
@@ -443,22 +411,13 @@ do_add() {
             echo "== branch $branch${def:+ (the default branch of the repository)}" >&2
         fi
     fi
-    if [ "$kind" = mirrored ] && [ -z "$fingerprint" ]; then
-        fingerprint=$(ask "fingerprint of shared/$name (its fingerprint file on the publishing site, SHA256:...)" "")
-    fi
-    [ "$kind" = shared ] || [[ $fingerprint =~ ^SHA256:[0-9a-f]{64}$ ]] || die "fingerprint must be SHA256: and 64 hex digits, got [$fingerprint]"
     if local_channel "${repo:-$dir}"; then
         choose_channel_dir "$chdir"
     else
         [ -z "$chdir" ] || die "--channel-dir is for a channel on this host (file://$CHANNEL/... or --dir $CHANNEL...)"
     fi
 
-    local keydir="$KEYROOT/$kind/$lname" keyhost
-    if [ "$kind" = shared ]; then
-        pairs=("name=$name" "signingKeyFile=$keydir/signing.pem" "${pairs[@]}")
-    else
-        pairs=("name=$name" ${alias:+"alias=$alias"} "trustedFingerprint=$fingerprint" "${pairs[@]}")
-    fi
+    pairs=("name=$name" ${alias:+"alias=$alias"} "${pairs[@]}")
     if [ -n "$repo" ]; then
         workdir=${workdir:-$DATAROOT/$kind/$lname/channel}
         pairs+=("channel.type=git" "channel.repo=$repo")
@@ -473,25 +432,15 @@ do_add() {
         host_of "$dir" >/dev/null || echo "!! $dir is not in a bind mount of $svc: mount the channel directory into the container" >&2
     fi
 
-    keyhost=$(host_of "$keydir") || die "$keydir is not in a bind mount"
-    mkdir -p "$keyhost"
-    if [ "$kind" = shared ]; then
-        [ -e "$keyhost/signing.pem" ] || admin "$keydir" keygen -out "$keydir/signing.pem" >/dev/null
-        admin "$keydir" fingerprint -key "$keydir/signing.pem" > "$keyhost/fingerprint"
-        pairs+=("channel.encrypt.recipientsFile=$keydir/recipients")
-    else
-        [ -e "$keyhost/identity" ] || admin "$keydir" enckey -identity "$keydir/identity" -recipient "$keydir/recipient" >/dev/null
-        pairs+=("channel.decrypt.identityFile=$keydir/identity")
-    fi
     [ -z "$repo" ] || init_local_repo "$repo" "$branch"
     cfgpy add "$kind" "${pairs[@]}"
-    echo "== added $kind/$lname to $(rel "$cfg_host"); its files are in $(rel "$keyhost")"
-    do_show "$kind" "$lname"
+    echo "== added $kind/$lname to $(rel "$cfg_host"): ${repo:-$dir}${branch:+ branch $branch} folder ${folder:-$name}"
     restart_ds
 }
 
-# 在通道容器里删除一个 vDS 留在通道上的东西，stdout 输出一行结果：deleted、none、foreign <指纹>。
-# shared：folder 下自己的 manifest、queue、history、subscribers（manifest 不是自己的密钥签的就不动；不碰下级 folder）。
+# 在通道容器里删除一个 vDS 留在通道上的东西，stdout 输出一行结果：deleted、none、foreign <实例>。
+# shared：folder 下自己的 manifest、queue、history、subscribers（manifest 不是本 Data Service 实例写的就不动，
+#   包括旧格式的；不碰下级 folder）。
 # mirrored：来源 folder 下自己的进度文件 subscribers/<id>.json。
 # git 通道在临时克隆里改、提交、push，被拒或连接断了就从头重做。
 CHANNEL_CLEAN='
@@ -500,8 +449,8 @@ del() {
     r=$1/$FOLDER
     if [ "$KIND" = shared ]; then
         [ -f "$r/manifest.json" ] || { echo none; return 0; }
-        fp=$(sed -n "s/^ *\"fingerprint\": *\"\\([^\"]*\\)\".*/\\1/p" "$r/manifest.json" | head -n 1)
-        [ "$fp" = "$FP" ] || { echo "foreign ${fp:-unknown}"; return 0; }
+        owner=$(sed -n "s/^ *\"instance\": *\"\\([^\"]*\\)\".*/\\1/p" "$r/manifest.json" | head -n 1)
+        [ "$owner" = "$OWNER" ] || { echo "foreign ${owner:-unknown}"; return 0; }
         set -- manifest.json manifest.sig queue history subscribers
     else
         [ -f "$r/subscribers/$SUBID.json" ] || { echo none; return 0; }
@@ -530,22 +479,24 @@ while :; do
 done
 '
 
-# remove 之后清理该 vDS 留在通道上的东西。$2 是 cfgpy channel 的输出，$3 是 shared 的指纹或 mirrored 的 subscriber id
+# remove 之后清理该 vDS 留在通道上的东西。$2 是 cfgpy channel 的输出，$3 是 shared 的 Data Service 实例 id
+# 或 mirrored 的 subscriber id（都来自 state.json）
 clean_channel() {
     local kind=$1 type repo branch folder id=$3 what h out err
     IFS=$'\t' read -r type repo branch folder <<<"$2"
     if [ "$kind" = shared ]; then what="manifest of shared/$name in $folder"; else what="progress file of mirrored/$name in $folder"; fi
-    [ -n "$id" ] || { echo "!! the channel is left as it is: cannot tell the $what (its key file is missing)" >&2; return 1; }
+    [ -n "$id" ] || { echo "-> the channel is left as it is: $(rel "$STATE_HOST") does not say which $what is ours (never started?)"; return 0; }
     if [[ $repo == file://* ]]; then h=$(host_of "${repo#file://}") && [ -e "$h" ] || { echo "-> no $what on the channel"; return 0; }; fi
     git_env
     err=$(mktemp)
     out=$(docker compose run --rm --no-deps -T "${GIT_ENV[@]}" -e KIND="$kind" -e TYPE="$type" -e REPO="$repo" -e BRANCH="$branch" \
-        -e FOLDER="$folder" -e FP="$id" -e SUBID="$id" -e MSG="remove $kind vDS $name: drop its files in $folder" \
+        -e FOLDER="$folder" -e OWNER="$id" -e SUBID="$id" -e MSG="remove $kind vDS $name: drop its files in $folder" \
         "$svc" sh -c "$CHANNEL_CLEAN" 2>"$err") || out=
     case $out in
         deleted) echo "== deleted the $what from the channel" ;;
         none) echo "-> no $what on the channel" ;;
-        foreign*) echo "-> left the manifest in $folder as it is: it is signed by another key (${out#foreign })" ;;
+        "foreign unknown") echo "-> left the old-format manifest in $folder as it is: the next publisher there resets it" ;;
+        foreign*) echo "-> left the manifest in $folder as it is: it was written by another Data Service instance (${out#foreign })" ;;
         *) echo "!! could not clean the $what: $(grep -v '^[[:space:]]*$' "$err" | grep -vi '^\(warning:\|remote:\)' | tail -n 1)" >&2
            rm -f "$err"; return 1 ;;
     esac
@@ -553,20 +504,22 @@ clean_channel() {
 }
 
 do_remove() {
-    local kind=$1 name=$2 line field path host others failed=0 d chan id= f
+    local kind=$1 name=$2 line field path host others failed=0 d chan id=
     exists "$kind" "$name" || die "$kind/$name is not in $(rel "$cfg_host")"
     local -a mine; mapfile -t mine < <(cfgpy files "$kind" "$name")
     others=$(cfgpy otherfiles "$kind" "$name" | cut -f2)
-    # 删密钥之前记下在通道上认自己的东西：shared 的指纹，mirrored 的 subscriber id（recipient 的 sha256）
+    # 重启前记下在通道上认自己的东西（重启后 Data Service 会从 state.json 删掉这个 vDS 的状态）：
+    # shared 是 Data Service 实例 id（写在 manifest 的 instance），mirrored 是它的 subscriber id（进度文件名）
     chan=$(cfgpy channel "$kind" "$name")
-    if [ "$kind" = shared ]; then
-        f=$(cfgpy field shared "$name" signingKeyFile)
-        if host=$(host_of "$f") && [ -s "$(dirname "$host")/fingerprint" ]; then id=$(cat "$(dirname "$host")/fingerprint")
-        elif [ -s "${host:-}" ]; then id=$(admin "$f" fingerprint -key "$f" 2>/dev/null || true); fi
-    else
-        f=$(cfgpy field mirrored "$name" channel.decrypt.identityFile)
-        host=$(host_of "$f") && [ -s "$(dirname "$host")/recipient" ] && id=$(base64 -d <"$(dirname "$host")/recipient" | sha256sum | cut -d' ' -f1)
-    fi
+    id=$(python3 - "$STATE_HOST" "$kind" "$name" <<'PY2' 2>/dev/null || true
+import json, sys
+state = json.load(open(sys.argv[1]))
+if sys.argv[2] == "shared":
+    print(state.get("instanceId") or "")
+else:
+    print(((state.get("vds") or {}).get("mirrored/" + sys.argv[3]) or {}).get("subscriberId") or "")
+PY2
+)
     cfgpy remove "$kind" "$name"
     echo "== removed $kind/$name from $(rel "$cfg_host")"
     for line in "${mine[@]}" "keydir"$'\t'"$KEYROOT/$kind/$name"; do
@@ -588,140 +541,6 @@ do_remove() {
     fi
     echo "-> the Data Service drops the table of $kind/$name and unregisters it from Inventory when it starts"
     [ "$failed" = 0 ]
-}
-
-# ---- shared 的 subscriber 白名单（recipients 文件：每行一个 base64 X25519 公钥，# 开头是注释） ----
-recpy() {
-    python3 - "$@" <<'PY2'
-import base64, hashlib, os, sys
-op, path, *args = sys.argv[1:]
-HEADER = ("# subscriber whitelist of this shared vDS: one recipient (base64 X25519 public key from\n"
-          "# `DataServiceAdmin enckey`) per line, # starts a comment. restart the Data Service after editing.\n")
-
-def subid(r):
-    try:
-        raw = base64.b64decode(r, validate=True)
-    except Exception:
-        return None
-    return hashlib.sha256(raw).hexdigest() if len(raw) == 32 else None
-
-lines = open(path).read().splitlines() if os.path.exists(path) else []
-
-def entries():
-    for i, l in enumerate(lines):
-        t = l.strip()
-        if t and not t.startswith("#"):
-            yield i, t
-
-def save():
-    with open(path, "w") as f:
-        f.write("\n".join(lines) + "\n" if lines else HEADER)
-
-if op == "list":
-    for i, r in entries():
-        prev = lines[i - 1].strip() if i > 0 else ""
-        note = prev[len("# note:"):].strip() if prev.startswith("# note:") else ""
-        print("%s\t%s\t%s" % (subid(r) or "(invalid)", r, note))
-elif op == "add":
-    r, note = args[0].strip(), args[1] if len(args) > 1 else ""
-    sid = subid(r)
-    if sid is None:
-        sys.exit("[%s] is not a recipient (base64 of a 32-byte X25519 public key)" % r)
-    if any(t == r for _, t in entries()):
-        print("exists\t" + sid)
-        sys.exit(0)
-    if not lines:
-        lines = HEADER.rstrip("\n").split("\n")
-    if note:
-        lines.append("# note: " + note.replace("\n", " "))
-    lines.append(r)
-    save()
-    print("added\t" + sid)
-elif op == "remove":
-    key = args[0].strip()
-    hit = [i for i, t in entries() if t == key or subid(t) == key.lower()]
-    if not hit:
-        sys.exit("[%s] is not in %s" % (key, path))
-    drop = set(hit)
-    for i in hit:  # 连同 add 时写在它上面的说明一起删
-        if i > 0 and lines[i - 1].strip().startswith("# note:"):
-            drop.add(i - 1)
-    removed = [subid(lines[i].strip()) for i in hit]
-    lines = [l for i, l in enumerate(lines) if i not in drop]
-    save()
-    print("\n".join("removed\t" + x for x in removed))
-PY2
-}
-
-# 输出 shared/<name> 的 recipients 文件在宿主机上的路径
-recipients_host() {
-    local name=$1 list
-    check_name "$name"
-    exists shared "$name" || die "shared/$name is not in $(rel "$cfg_host")"
-    list=$(cfgpy field shared "$name" channel.encrypt.recipientsFile)
-    [ -n "$list" ] || die "shared/$name has no channel.encrypt.recipientsFile"
-    host_of "$list" || die "$list is not in a bind mount"
-}
-
-do_recipient() {
-    local op=${1:-} name=${2:-} host key= note= out n
-    [ -n "$name" ] || die "recipient list|add|remove <name> ..."
-    shift 2
-    host=$(recipients_host "$name")
-    case $op in
-        list)
-            [ $# -eq 0 ] || die "recipient list <name>"
-            out=$(recpy list "$host")
-            if [ -z "$out" ]; then echo "shared/$name: no recipients in $(rel "$host")"; return 0; fi
-            echo "shared/$name: recipients in $(rel "$host")"
-            { printf 'SUBSCRIBER ID\tRECIPIENT\tNOTE\n'; echo "$out"; } | column -t -s $'\t'
-            ;;
-        add|remove)
-            if [ $# -gt 0 ] && [[ $1 != --* ]]; then key=$1; shift; fi
-            while [ $# -gt 0 ]; do
-                [ $# -ge 2 ] || die "$1 needs a value"
-                case $op:$1 in
-                    add:--note) note=$2 ;;
-                    *) die "unknown option [$1] for recipient $op (-h)" ;;
-                esac
-                shift 2
-            done
-            if [ "$op" = add ]; then
-                if [ "$(id -u)" = 0 ] && [ "${RUN_AS%%:*}" != 0 ] && [ ! -e "$host" ]; then
-                    die "do not add a recipient as root (sudo) before the file exists: the Data Service runs as UID ${RUN_AS%%:*}"
-                fi
-                [ -n "$key" ] || key=$(ask "recipient of the mirror (printed by its add / show)" "")
-                [ -n "$note" ] || [ "$interactive" = 0 ] || read -rp "note (which site / mirror, optional): " note
-                out=$(recpy add "$host" "$key" "$note")
-                if [ "${out%%$'\t'*}" = exists ]; then echo "-> already in $(rel "$host"): subscriber ${out#*$'\t'}"; return 0; fi
-                echo "== added subscriber ${out#*$'\t'} to $(rel "$host")"
-            else
-                if [ -z "$key" ]; then
-                    [ "$interactive" = 1 ] || die "recipient remove <name> <recipient|subscriber id>"
-                    local -a items; mapfile -t items < <(recpy list "$host" | awk -F'\t' '{ print $1 ($3 == "" ? "" : "  (" $3 ")") }')
-                    [ ${#items[@]} -gt 0 ] || die "shared/$name has no recipients"
-                    local PS3="which subscriber: " item
-                    select item in "${items[@]}"; do [ -n "$item" ] && break; done
-                    key=${item%% *}
-                fi
-                out=$(recpy remove "$host" "$key")
-                echo "$out" | while IFS=$'\t' read -r _ id; do echo "== removed subscriber $id from $(rel "$host")"; done
-            fi
-            n=$(recpy list "$host" | grep -c . || true)
-            echo "-> shared/$name: $n recipient(s)"
-            restart_ds
-            ;;
-        *) die "recipient list|add|remove <name> ..." ;;
-    esac
-}
-
-# 交互菜单里选一个已有的 shared vDS，输出名字
-pick_shared() {
-    local -a items; mapfile -t items < <(cfgpy list | awk -F'\t' '$1 == "shared" { print $2 }')
-    [ ${#items[@]} -gt 0 ] || die "no shared vDS yet"
-    local PS3="which shared vDS: " item
-    select item in "${items[@]}"; do [ -n "$item" ] && break; done
-    echo "$item"
 }
 
 # 交互菜单里选一个已有的 vDS，输出 "kind name"
@@ -746,20 +565,12 @@ menu() {
     echo "vDS of $svc in $target"
     while :; do
         local PS3="action: " action kn
-        select action in list "add shared" "add mirrored" show recipients remove quit; do [ -n "$action" ] && break; done
+        select action in list "add shared" "add mirrored" remove quit; do [ -n "$action" ] && break; done
         case $action in
             list) sub list || true ;;
             "add shared") sub add shared || true ;;
             "add mirrored") sub add mirrored || true ;;
-            show) kn=$(pick) && sub show $kn || true ;;
-            recipients)
-                if kn=$(pick_shared) && sub recipient list "$kn"; then
-                    local PS3="recipients of shared/$kn: " ra
-                    select ra in add remove back; do [ -n "$ra" ] && break; done
-                    [ "$ra" = back ] || sub recipient "$ra" "$kn" || true
-                fi
-                ;;
-            remove) kn=$(pick) && read -rp "remove ${kn/ //}, its keys and its table? [y/N] " a && [[ $a == [yY]* ]] && sub remove $kn || true ;;
+            remove) kn=$(pick) && read -rp "remove ${kn/ //} and its table? [y/N] " a && [[ $a == [yY]* ]] && sub remove $kn || true ;;
             quit) break ;;
         esac
         echo
@@ -770,9 +581,7 @@ menu() {
 cmd=$1; shift
 case $cmd in
     list) do_list ;;
-    show) check_kind "${1:-}"; check_name "${2:-}"; do_show "$1" "$2" ;;
     add) [ $# -gt 0 ] || die "add shared|mirrored ..."; do_add "$@" ;;
     remove) check_kind "${1:-}"; check_name "${2:-}"; do_remove "$1" "$2" ;;
-    recipient) do_recipient "$@" ;;
     *) usage >&2; exit 1 ;;
 esac

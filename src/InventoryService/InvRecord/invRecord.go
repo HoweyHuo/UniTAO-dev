@@ -52,7 +52,7 @@ const (
 				},
 				"instanceId": {
 					"type": "string",
-					"description": "identity of the registered vDS: the DS instance UUID for a local vDS, the public key fingerprint of the source for a shared or mirrored vDS; distinguishes a re-registration or replica of the same vDS from another one using the same dsId"
+					"description": "identity of the registered vDS: the DS instance UUID for a local vDS, the source id (sha256 of the channel address, the same for a shared vDS and all its mirrors) for a shared or mirrored vDS; distinguishes a re-registration or replica of the same vDS from another one using the same dsId"
 				},
 				"kind": {
 					"type": "string",
@@ -91,7 +91,7 @@ type DataServiceInfo struct {
 	goodUrl      string
 }
 
-// Signed 判断该 vDS 是否以签名指纹为身份（shared / mirrored）。
+// Signed 判断该 vDS 是否以来源身份（SourceId）为身份（shared / mirrored）。
 func (ds *DataServiceInfo) Signed() bool {
 	return ds.Kind == KindShared || ds.Kind == KindMirrored
 }

@@ -1,9 +1,6 @@
 package VdsTest
 
 import (
-	"crypto/ecdh"
-	"crypto/ed25519"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
@@ -17,14 +14,20 @@ import (
 	"DataService/Channel"
 )
 
-func signer(t *testing.T) (ed25519.PrivateKey, string) {
+const testInstance = "instance-1"
+
+func newPub(t *testing.T, cfg Channel.Config, source string, instance string) Channel.Publisher {
 	t.Helper()
-	path, fingerprint := newSigningKey(t)
-	key, err := Channel.LoadSigningKey(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return key, fingerprint
+	pub, err := Channel.NewPublisher(cfg, source, instance, nil)
+	mustNoErr(t, err, "new publisher "+source)
+	return pub
+}
+
+func newSub(t *testing.T, cfg Channel.Config, source string, id string) Channel.Subscriber {
+	t.Helper()
+	sub, err := Channel.NewSubscriber(cfg, source, id, nil)
+	mustNoErr(t, err, "new subscriber "+id)
+	return sub
 }
 
 func changes(source string, from uint64, to uint64) []Channel.Change {
@@ -46,56 +49,6 @@ func mustNoErr(t *testing.T, err error, what string) {
 	}
 }
 
-// subKey 是一个 subscriber 的加密身份：私钥文件、公钥（recipient）和 subscriber id。
-type subKey struct {
-	IdentityFile string
-	Recipient    string
-	Id           string
-}
-
-func newSubKey(t *testing.T) subKey {
-	t.Helper()
-	identity, recipient, err := Channel.GenerateEncryptionKey()
-	mustNoErr(t, err, "generate encryption key")
-	path := filepath.Join(t.TempDir(), "identity")
-	mustNoErr(t, os.WriteFile(path, []byte(identity+"\n"), 0o600), "write identity")
-	id, err := Channel.RecipientSubscriberId(recipient)
-	mustNoErr(t, err, "subscriber id")
-	return subKey{IdentityFile: path, Recipient: recipient, Id: id}
-}
-
-func (k subKey) private(t *testing.T) *ecdh.PrivateKey {
-	t.Helper()
-	data, err := os.ReadFile(k.IdentityFile)
-	mustNoErr(t, err, "read identity")
-	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(data)))
-	mustNoErr(t, err, "decode identity")
-	priv, err := ecdh.X25519().NewPrivateKey(raw)
-	mustNoErr(t, err, "parse identity")
-	return priv
-}
-
-func recipientsFile(t *testing.T, keys ...subKey) string {
-	t.Helper()
-	lines := []string{"# subscriber whitelist"}
-	for _, k := range keys {
-		lines = append(lines, k.Recipient)
-	}
-	path := filepath.Join(t.TempDir(), "recipients")
-	mustNoErr(t, os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644), "write recipients")
-	return path
-}
-
-func pubConfig(base Channel.Config, recipients string) Channel.Config {
-	base.Encrypt = &Channel.EncryptConfig{RecipientsFile: recipients}
-	return base
-}
-
-func subConfig(base Channel.Config, key subKey) Channel.Config {
-	base.Decrypt = &Channel.DecryptConfig{IdentityFile: key.IdentityFile}
-	return base
-}
-
 func channelFiles(t *testing.T, dir string) []string {
 	t.Helper()
 	entries, err := os.ReadDir(dir)
@@ -110,28 +63,23 @@ func channelFiles(t *testing.T, dir string) []string {
 	return names
 }
 
-// TestQueueChannel 覆盖队列通道（dir）：订阅登记、history 只给被授权者、queue 消费、清理、Reset、
-// 旧格式、folder 隔离与签名 / 摘要校验。
+// TestQueueChannel 覆盖队列通道（dir）：订阅登记、history 只给分到的订阅请求、queue 消费、清理、Reset 与 epoch、
+// 别的实例接管 folder、旧格式、folder 隔离与摘要校验。
 func TestQueueChannel(t *testing.T) {
-	key, fingerprint := signer(t)
-	keyA, keyB, outsider := newSubKey(t), newSubKey(t), newSubKey(t)
 	root := t.TempDir()
 	base := Channel.Config{Type: Channel.TypeDir, Path: root, Folder: "apps/prod"}
 
-	if _, err := Channel.NewPublisher(base, "prod", key, nil); err == nil {
-		t.Fatal("expect publisher without recipients rejected")
+	if _, err := Channel.NewPublisher(base, "prod", "", nil); err == nil {
+		t.Fatal("expect publisher without instance id rejected")
 	}
-	if _, err := Channel.NewSubscriber(base, "prod", fingerprint, nil); err == nil {
-		t.Fatal("expect subscriber without identity rejected")
+	if _, err := Channel.NewSubscriber(base, "prod", "../x", nil); err == nil {
+		t.Fatal("expect invalid subscriber id rejected")
 	}
-	pub, err := Channel.NewPublisher(pubConfig(base, recipientsFile(t, keyA, keyB)), "prod", key, nil)
-	mustNoErr(t, err, "new publisher")
-	subA, err := Channel.NewSubscriber(subConfig(base, keyA), "prod", fingerprint, nil)
-	mustNoErr(t, err, "new subscriber A")
-	subB, err := Channel.NewSubscriber(subConfig(base, keyB), "prod", fingerprint, nil)
-	mustNoErr(t, err, "new subscriber B")
-	if subA.Id() != keyA.Id || !pub.Trusted(keyA.Id) || pub.Trusted(outsider.Id) {
-		t.Fatalf("unexpected subscriber identity / whitelist")
+	pub := newPub(t, base, "prod", testInstance)
+	subA := newSub(t, base, "prod", "subA")
+	subB := newSub(t, base, "prod", "subB")
+	if subA.Id() != "subA" {
+		t.Fatalf("unexpected subscriber id %s", subA.Id())
 	}
 
 	// 来源还没发布时也能登记订阅
@@ -141,31 +89,39 @@ func TestQueueChannel(t *testing.T) {
 	mustNoErr(t, subA.WriteProgress(Channel.Progress{Request: "reqA", State: Channel.StateSubscribe}), "subscribe A")
 	view, err := pub.View()
 	mustNoErr(t, err, "view")
-	if view.Published || len(view.Subscribers) != 1 || view.Subscribers[0].Id != keyA.Id || view.Subscribers[0].Request != "reqA" {
+	if view.Published || len(view.Subscribers) != 1 || view.Subscribers[0].Id != "subA" || view.Subscribers[0].Request != "reqA" {
 		t.Fatalf("unexpected view before publish: %+v", view)
 	}
+	if err := pub.Publish(changes("prod", 1, 3)); err == nil {
+		t.Fatal("expect publish before the manifest exists refused (reset first)")
+	}
+	mustNoErr(t, pub.Reset(0), "init manifest")
 
 	mustNoErr(t, pub.Publish(changes("prod", 1, 3)), "publish 1-3")
 	if err := pub.Publish(changes("prod", 5, 5)); err == nil {
 		t.Fatal("expect non-continuous publish rejected")
 	}
 	history := &Channel.History{Seq: 3, Source: "prod", Records: Channel.RecordList([]map[string]interface{}{dataRecord("rack", "r1", map[string]interface{}{"name": "r1"})})}
-	published, err := pub.PublishHistory(history, []Channel.HistoryGrant{{Subscriber: keyA.Id, Request: "reqA"}})
+	published, err := pub.PublishHistory(history, []Channel.HistoryGrant{{Subscriber: "subA", Request: "reqA"}})
 	mustNoErr(t, err, "history for A")
 	historyId := published.Id
 	if published.Seq != 3 || published.Records != 1 || len(published.Parts) != 1 || len(published.Grants) != 1 {
 		t.Fatalf("unexpected history entry %+v", published)
 	}
-	if _, err := pub.PublishHistory(history, []Channel.HistoryGrant{{Subscriber: outsider.Id, Request: "x"}}); err == nil {
-		t.Fatal("expect history for a subscriber outside the whitelist rejected")
+	if _, err := pub.PublishHistory(history, []Channel.HistoryGrant{{Subscriber: "subB"}}); err == nil {
+		t.Fatal("expect a grant without request id rejected")
 	}
-	if _, err := os.Stat(filepath.Join(root, "apps", "prod", "manifest.json")); err != nil {
-		t.Fatalf("expect manifest under folder apps/prod: %s", err)
+	manifestPath := filepath.Join(root, "apps", "prod", "manifest.json")
+	raw, err := os.ReadFile(manifestPath)
+	mustNoErr(t, err, "manifest under folder apps/prod")
+	if !strings.Contains(string(raw), `"instance": "`+testInstance+`"`) || !strings.Contains(string(raw), `"version": 4`) {
+		t.Fatalf("expect manifest v4 owned by %s, got %s", testInstance, raw)
 	}
 
 	mustNoErr(t, subA.Refresh(), "refresh A")
-	if subA.LastSeq() != 3 || subA.SourceFingerprint() != fingerprint {
-		t.Fatalf("unexpected lastSeq %d / fingerprint %s", subA.LastSeq(), subA.SourceFingerprint())
+	epoch := subA.Epoch()
+	if subA.LastSeq() != 3 || epoch == "" {
+		t.Fatalf("unexpected lastSeq %d / epoch %q", subA.LastSeq(), epoch)
 	}
 	if p := subA.Progress(); p == nil || p.State != Channel.StateSubscribe {
 		t.Fatalf("expect own progress, got %+v", p)
@@ -178,29 +134,24 @@ func TestQueueChannel(t *testing.T) {
 	if _, err := subA.History("other"); !errors.Is(err, Channel.ErrNoHistory) {
 		t.Fatalf("expect ErrNoHistory for another request, got %v", err)
 	}
-	// 没有授权给 B：B 看不到
+	// 没有分给 B：B 看不到
 	mustNoErr(t, subB.Refresh(), "refresh B")
 	if _, err := subB.History("reqB"); !errors.Is(err, Channel.ErrNoHistory) {
 		t.Fatalf("expect B has no history, got %v", err)
 	}
 	historyDir := filepath.Join(root, "apps", "prod", "history", historyId)
 	partsBefore := channelFiles(t, historyDir)
-	if len(partsBefore) != 1 {
-		t.Fatalf("expect one history part, got %v", partsBefore)
+	if len(partsBefore) != 1 || !strings.HasSuffix(partsBefore[0], ".jsonl.gz") {
+		t.Fatalf("expect one plain gzip history part, got %v", partsBefore)
 	}
 	partBefore, _ := os.ReadFile(filepath.Join(historyDir, partsBefore[0]))
 
-	// 把同一份 history 授权给 B：只改 manifest，分片不变；B 能读到同样的记录
-	if !pub.CanGrant(historyId) {
-		t.Fatal("expect the publisher to keep the content key of its history")
-	}
-	granted, err := pub.GrantHistory(historyId, []Channel.HistoryGrant{{Subscriber: keyB.Id, Request: "reqB"}})
+	// 重启后的 publisher（同一个实例）把同一份 history 分给 B：只改 manifest，分片不变；B 能读到同样的记录
+	restarted := newPub(t, base, "prod", testInstance)
+	granted, err := restarted.GrantHistory(historyId, []Channel.HistoryGrant{{Subscriber: "subB", Request: "reqB"}})
 	mustNoErr(t, err, "grant B")
 	if len(granted.Grants) != 2 {
 		t.Fatalf("expect two grants after granting B, got %+v", granted.Grants)
-	}
-	if _, err := pub.GrantHistory(historyId, []Channel.HistoryGrant{{Subscriber: outsider.Id, Request: "x"}}); err == nil {
-		t.Fatal("expect a grant for a subscriber outside the whitelist rejected")
 	}
 	mustNoErr(t, subB.Refresh(), "refresh B")
 	gotB, err := subB.History("reqB")
@@ -212,19 +163,10 @@ func TestQueueChannel(t *testing.T) {
 	if files := channelFiles(t, historyDir); len(files) != 1 || string(partAfter) != string(partBefore) {
 		t.Fatalf("expect the parts untouched by a grant, got %v", files)
 	}
-	// A 的授权仍在
+	// A 的分配仍在
 	mustNoErr(t, subA.Refresh(), "refresh A")
 	if _, err := subA.History("reqA"); err != nil {
 		t.Fatalf("expect A's grant kept after granting B: %s", err)
-	}
-	// 另一个进程（重启后的 publisher）没有内容密钥，不能再授权
-	restarted, err := Channel.NewPublisher(pubConfig(base, recipientsFile(t, keyA, keyB)), "prod", key, nil)
-	mustNoErr(t, err, "restarted publisher")
-	if restarted.CanGrant(historyId) {
-		t.Fatal("expect a restarted publisher without the content key")
-	}
-	if _, err := restarted.GrantHistory(historyId, []Channel.HistoryGrant{{Subscriber: keyB.Id, Request: "reqB2"}}); !errors.Is(err, Channel.ErrHistoryKeyUnknown) {
-		t.Fatalf("expect ErrHistoryKeyUnknown, got %v", err)
 	}
 
 	// 消费 queue
@@ -245,10 +187,10 @@ func TestQueueChannel(t *testing.T) {
 	if len(all) != 3 {
 		t.Fatalf("expect seq 1-3 from B's cached manifest, got %d", len(all))
 	}
-	mustNoErr(t, subA.WriteProgress(Channel.Progress{Request: "reqA", State: Channel.StateActive, Cursor: 5}), "progress A")
+	mustNoErr(t, subA.WriteProgress(Channel.Progress{Request: "reqA", State: Channel.StateActive, Cursor: 5, Epoch: epoch}), "progress A")
 	view, err = pub.View()
 	mustNoErr(t, err, "view")
-	if !view.Published || view.LastSeq != 5 || len(view.Queue) != 2 || view.Subscribers[0].Cursor != 5 {
+	if !view.Published || view.Foreign || view.Epoch != epoch || view.LastSeq != 5 || len(view.Queue) != 2 || view.Subscribers[0].Cursor != 5 || view.Subscribers[0].Epoch != epoch {
 		t.Fatalf("unexpected view: %+v", view)
 	}
 
@@ -260,9 +202,6 @@ func TestQueueChannel(t *testing.T) {
 	if _, err := os.Stat(historyDir); !os.IsNotExist(err) {
 		t.Fatalf("expect the history directory removed, got %v", err)
 	}
-	if pub.CanGrant(historyId) {
-		t.Fatal("expect the content key forgotten after pruning")
-	}
 	mustNoErr(t, subA.Refresh(), "refresh A")
 	if _, err := subA.Fetch(0, 100); !errors.Is(err, Channel.ErrGap) {
 		t.Fatalf("expect ErrGap after pruning, got %v", err)
@@ -273,7 +212,7 @@ func TestQueueChannel(t *testing.T) {
 	if files := channelFiles(t, filepath.Join(root, "apps", "prod", "queue")); len(files) != 1 {
 		t.Fatalf("expect one queue file left, got %v", files)
 	}
-	mustNoErr(t, pub.Prune(Channel.Prune{Subscribers: []string{keyA.Id}}), "remove subscriber A")
+	mustNoErr(t, pub.Prune(Channel.Prune{Subscribers: []string{"subA"}}), "remove subscriber A")
 	mustNoErr(t, subA.Refresh(), "refresh A")
 	if p := subA.Progress(); p != nil {
 		t.Fatalf("expect A's progress file removed, got %+v", p)
@@ -287,86 +226,107 @@ func TestQueueChannel(t *testing.T) {
 		t.Fatalf("expect digest mismatch, got %v", err)
 	}
 	mustNoErr(t, os.WriteFile(queueFile, original, 0o644), "restore")
-	// 不可信的来源
-	_, otherFp := signer(t)
-	untrusted, err := Channel.NewSubscriber(subConfig(base, keyA), "prod", otherFp, nil)
-	mustNoErr(t, err, "new untrusted subscriber")
-	if err := untrusted.Refresh(); err == nil || !strings.Contains(err.Error(), "trusted fingerprint") {
-		t.Fatalf("expect untrusted source rejected, got %v", err)
-	}
-	// 另一把签名密钥不能接管同一个 folder
-	otherKey, _ := signer(t)
-	intruder, err := Channel.NewPublisher(pubConfig(base, recipientsFile(t, keyA)), "prod", otherKey, nil)
-	mustNoErr(t, err, "new intruder")
-	if err := intruder.Publish(changes("prod", 6, 6)); err == nil || !strings.Contains(err.Error(), "another key") {
-		t.Fatalf("expect another key refused, got %v", err)
-	}
 
-	// Reset：通道从 seq 9 重新开始
+	// Reset：通道从 seq 9 重新开始，epoch 更换
 	mustNoErr(t, pub.Reset(9), "reset")
 	mustNoErr(t, subA.Refresh(), "refresh A")
-	if subA.LastSeq() != 9 {
-		t.Fatalf("expect lastSeq 9 after reset, got %d", subA.LastSeq())
+	if subA.LastSeq() != 9 || subA.Epoch() == epoch || subA.Epoch() == "" {
+		t.Fatalf("expect lastSeq 9 and a new epoch after reset, got %d / %s", subA.LastSeq(), subA.Epoch())
 	}
 	if _, err := subA.Fetch(5, 100); !errors.Is(err, Channel.ErrGap) {
 		t.Fatalf("expect ErrGap after reset, got %v", err)
 	}
 	mustNoErr(t, pub.Publish(changes("prod", 10, 10)), "publish after reset")
 
-	// 同一个根目录下的另一个 folder 互不影响；旧格式的 manifest 被识别并可 Reset
+	// 另一个实例（重建的 DS）：看到 folder 属于别的实例，Reset 前不能写；Reset 后接管，原来的实例反过来看到 Foreign
+	other := newPub(t, base, "prod", "instance-2")
+	otherView, err := other.View()
+	mustNoErr(t, err, "view of another instance")
+	if !otherView.Published || !otherView.Foreign || otherView.Owner != testInstance {
+		t.Fatalf("expect the folder seen as foreign (owner %s), got %+v", testInstance, otherView)
+	}
+	if err := other.Publish(changes("prod", 11, 11)); err == nil || !strings.Contains(err.Error(), "reset it first") {
+		t.Fatalf("expect publish on another instance's manifest refused, got %v", err)
+	}
+	beforeTakeover := subA.Epoch()
+	mustNoErr(t, other.Reset(0), "take over")
+	mustNoErr(t, other.Publish(changes("prod", 1, 1)), "publish after take over")
+	mustNoErr(t, subA.Refresh(), "refresh A after take over")
+	if subA.Epoch() == beforeTakeover || subA.LastSeq() != 1 {
+		t.Fatalf("expect a new epoch at seq 1 after take over, got %s / %d", subA.Epoch(), subA.LastSeq())
+	}
+	if v, err := pub.View(); err != nil || !v.Foreign || v.Owner != "instance-2" {
+		t.Fatalf("expect the first instance to see the folder taken over, got %+v %v", v, err)
+	}
+	if err := pub.Publish(changes("prod", 2, 2)); err == nil {
+		t.Fatal("expect the first instance refused after take over")
+	}
+
+	// 同一个根目录下的另一个 folder 互不影响；旧格式（version 1 的 segments、version 3 的签名）被识别，Reset 时清掉
 	legacy := filepath.Join(root, "apps", "lab")
 	mustNoErr(t, os.MkdirAll(filepath.Join(legacy, "segments"), 0o755), "mkdir legacy")
-	mustNoErr(t, os.WriteFile(filepath.Join(legacy, "manifest.json"), []byte(`{"version":1,"source":"lab"}`), 0o644), "legacy manifest")
-	lab, err := Channel.NewPublisher(pubConfig(Channel.Config{Type: Channel.TypeDir, Path: root, Folder: "apps/lab"}, recipientsFile(t, keyA)), "lab", key, nil)
-	mustNoErr(t, err, "new lab publisher")
+	mustNoErr(t, os.WriteFile(filepath.Join(legacy, "manifest.json"), []byte(`{"version":3,"source":"lab","publicKey":"x","lastSeq":7}`), 0o644), "legacy manifest")
+	mustNoErr(t, os.WriteFile(filepath.Join(legacy, "manifest.sig"), []byte("sig"), 0o644), "legacy signature")
+	labCfg := Channel.Config{Type: Channel.TypeDir, Path: root, Folder: "apps/lab"}
+	lab := newPub(t, labCfg, "lab", testInstance)
 	labView, err := lab.View()
 	mustNoErr(t, err, "lab view")
 	if !labView.OldFormat {
 		t.Fatalf("expect old format detected, got %+v", labView)
 	}
+	labSub := newSub(t, labCfg, "lab", "subA")
+	if err := labSub.Refresh(); !errors.Is(err, Channel.ErrNotPublished) {
+		t.Fatalf("expect an old-format folder seen as not published by a subscriber, got %v", err)
+	}
 	if err := lab.Publish(changes("lab", 1, 1)); err == nil {
 		t.Fatal("expect publish on old format refused before reset")
 	}
 	mustNoErr(t, lab.Reset(0), "reset legacy")
-	if _, err := os.Stat(filepath.Join(legacy, "segments")); !os.IsNotExist(err) {
-		t.Fatalf("expect old-format directories removed, got %v", err)
+	for _, name := range []string{"segments", "manifest.sig"} {
+		if _, err := os.Stat(filepath.Join(legacy, name)); !os.IsNotExist(err) {
+			t.Fatalf("expect old-format %s removed, got %v", name, err)
+		}
 	}
 	mustNoErr(t, lab.Publish(changes("lab", 1, 1)), "publish lab")
 	mustNoErr(t, subA.Refresh(), "refresh prod after lab publish")
-	if subA.LastSeq() != 10 {
+	if subA.LastSeq() != 1 {
 		t.Fatalf("expect prod untouched by lab, got lastSeq %d", subA.LastSeq())
 	}
+}
 
-	// 旧格式（version 2）的 manifest：是别的公钥签的就是冲突，不能当旧格式 Reset 掉；是自己的公钥才可以
-	oldManifest := func(folder string, signer ed25519.PrivateKey) string {
-		dir := filepath.Join(root, "apps", folder)
-		mustNoErr(t, os.MkdirAll(dir, 0o755), "mkdir "+folder)
-		pub := base64.StdEncoding.EncodeToString(signer.Public().(ed25519.PublicKey))
-		file := filepath.Join(dir, "manifest.json")
-		mustNoErr(t, os.WriteFile(file, []byte(`{"version":2,"source":"`+folder+`","publicKey":"`+pub+`","lastSeq":7}`), 0o644), "old manifest "+folder)
-		return file
+// TestSourceId：同一个仓库的不同写法得到同一个身份；分支、folder、仓库不同则不同。
+func TestSourceId(t *testing.T) {
+	git := func(repo string, branch string) Channel.Config {
+		return Channel.Config{Type: Channel.TypeGit, Repo: repo, Branch: branch, WorkDir: "/w"}
 	}
-	foreignFile := oldManifest("foreign", otherKey)
-	foreign, err := Channel.NewPublisher(pubConfig(Channel.Config{Type: Channel.TypeDir, Path: root, Folder: "apps/foreign"}, recipientsFile(t, keyA)), "foreign", key, nil)
-	mustNoErr(t, err, "new publisher on a foreign old-format folder")
-	if _, err := foreign.View(); err == nil || !strings.Contains(err.Error(), "another key") {
-		t.Fatalf("expect an old-format manifest of another key reported as a conflict, got %v", err)
+	same := []string{
+		"git@gitee.com:howey/exchange.git",
+		"ssh://git@gitee.com/howey/exchange",
+		"ssh://git@Gitee.com:22/howey/exchange.git/",
+		"https://user:token@gitee.com/howey/exchange.git",
 	}
-	if err := foreign.Reset(0); err == nil || !strings.Contains(err.Error(), "another key") {
-		t.Fatalf("expect reset of another key's old-format manifest refused, got %v", err)
+	want := Channel.SourceId(git(same[0], "master"), "net/modeling")
+	if !strings.HasPrefix(want, "SHA256:") || len(want) != len("SHA256:")+64 {
+		t.Fatalf("unexpected source id format %s", want)
 	}
-	if raw, _ := os.ReadFile(foreignFile); !strings.Contains(string(raw), `"version":2`) {
-		t.Fatalf("expect the foreign manifest untouched, got %s", raw)
+	for _, repo := range same[1:] {
+		if got := Channel.SourceId(git(repo, "master"), "net/modeling/"); got != want {
+			t.Fatalf("expect %s to give the same source id as %s", repo, same[0])
+		}
 	}
-	oldManifest("mine", key)
-	mine, err := Channel.NewPublisher(pubConfig(Channel.Config{Type: Channel.TypeDir, Path: root, Folder: "apps/mine"}, recipientsFile(t, keyA)), "mine", key, nil)
-	mustNoErr(t, err, "new publisher on its own old-format folder")
-	mineView, err := mine.View()
-	mustNoErr(t, err, "view own old-format folder")
-	if !mineView.OldFormat {
-		t.Fatalf("expect own old-format manifest detected, got %+v", mineView)
+	for what, got := range map[string]string{
+		"branch": Channel.SourceId(git(same[0], "main"), "net/modeling"),
+		"folder": Channel.SourceId(git(same[0], "master"), "net/site"),
+		"repo":   Channel.SourceId(git("git@gitee.com:howey/other.git", "master"), "net/modeling"),
+		"dir":    Channel.SourceId(Channel.Config{Type: Channel.TypeDir, Path: "/opt/UniTAO/channel"}, "net/modeling"),
+	} {
+		if got == want {
+			t.Fatalf("expect a different %s to give another source id", what)
+		}
 	}
-	mustNoErr(t, mine.Reset(7), "reset own old-format manifest")
+	if Channel.SourceId(git("file:///opt/UniTAO/channel/x.git", ""), "a") != Channel.SourceId(git("/opt/UniTAO/channel/x.git/", "main"), "a") {
+		t.Fatal("expect file:// and a plain path to the same repository, and the default branch main, to give the same source id")
+	}
 }
 
 func gitCmd(t *testing.T, dir string, args ...string) string {
@@ -393,9 +353,6 @@ func TestGitQueueChannel(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")
 	}
-	key, fingerprint := signer(t)
-	keyA, keyB := newSubKey(t), newSubKey(t)
-	recipients := recipientsFile(t, keyA, keyB)
 	remote := filepath.Join(t.TempDir(), "remote.git")
 	mustNoErr(t, os.MkdirAll(remote, 0o755), "mkdir remote")
 	gitCmd(t, remote, "init", "-q", "--bare", "--initial-branch=main")
@@ -404,20 +361,18 @@ func TestGitQueueChannel(t *testing.T) {
 	}
 
 	pubDir := filepath.Join(t.TempDir(), "pub")
-	pub, err := Channel.NewPublisher(pubConfig(gitBase(pubDir, "infra/prod"), recipients), "prod", key, nil)
-	mustNoErr(t, err, "new git publisher")
-	subA, err := Channel.NewSubscriber(subConfig(gitBase(filepath.Join(t.TempDir(), "a"), "infra/prod"), keyA), "prod", fingerprint, nil)
-	mustNoErr(t, err, "new git subscriber A")
-	subB, err := Channel.NewSubscriber(subConfig(gitBase(filepath.Join(t.TempDir(), "b"), "infra/prod"), keyB), "prod", fingerprint, nil)
-	mustNoErr(t, err, "new git subscriber B")
+	pub := newPub(t, gitBase(pubDir, "infra/prod"), "prod", testInstance)
+	subA := newSub(t, gitBase(filepath.Join(t.TempDir(), "a"), "infra/prod"), "prod", "subA")
+	subB := newSub(t, gitBase(filepath.Join(t.TempDir(), "b"), "infra/prod"), "prod", "subB")
 
 	// 远端还是空仓库时 subscriber 就能登记
 	if err := subA.Refresh(); !errors.Is(err, Channel.ErrNotPublished) {
 		t.Fatalf("expect ErrNotPublished on empty remote, got %v", err)
 	}
 	mustNoErr(t, subA.WriteProgress(Channel.Progress{Request: "reqA", State: Channel.StateSubscribe}), "subscribe A on empty remote")
+	mustNoErr(t, pub.Reset(0), "git init manifest")
 	mustNoErr(t, pub.Publish(changes("prod", 1, 2)), "git publish 1-2")
-	_, err = pub.PublishHistory(&Channel.History{Seq: 2, Source: "prod", Records: Channel.RecordList(nil)}, []Channel.HistoryGrant{{Subscriber: keyA.Id, Request: "reqA"}})
+	_, err := pub.PublishHistory(&Channel.History{Seq: 2, Source: "prod", Records: Channel.RecordList(nil)}, []Channel.HistoryGrant{{Subscriber: "subA", Request: "reqA"}})
 	mustNoErr(t, err, "git history")
 	mustNoErr(t, subA.Refresh(), "git refresh A")
 	if got, err := subA.History("reqA"); err != nil || got.Parts != 1 || len(readHistory(t, got)) != 0 {
@@ -493,17 +448,17 @@ func TestGitQueueChannel(t *testing.T) {
 	}
 
 	// 同一个工作目录上的另一个 vDS（同 repo + branch，不同 folder）共用克隆；换 branch 则拒绝
-	lab, err := Channel.NewPublisher(pubConfig(gitBase(pubDir, "infra/lab"), recipients), "lab", key, nil)
-	mustNoErr(t, err, "publisher sharing the work dir")
+	lab := newPub(t, gitBase(pubDir, "infra/lab"), "lab", testInstance)
+	mustNoErr(t, lab.Reset(0), "init lab on shared work dir")
 	mustNoErr(t, lab.Publish(changes("lab", 1, 1)), "publish lab on shared work dir")
 	mustNoErr(t, pub.Publish(changes("prod", 8, 8)), "publish prod on shared work dir")
 	other := gitBase(pubDir, "x")
 	other.Branch = "other"
-	if _, err := Channel.NewPublisher(pubConfig(other, recipients), "x", key, nil); err == nil || !strings.Contains(err.Error(), "already used") {
+	if _, err := Channel.NewPublisher(other, "x", testInstance, nil); err == nil || !strings.Contains(err.Error(), "already used") {
 		t.Fatalf("expect work dir reused for another branch rejected, got %v", err)
 	}
 	files := gitCmd(t, remote, "ls-tree", "-r", "--name-only", "main")
-	for _, expect := range []string{"infra/prod/manifest.json", "infra/lab/manifest.json", "infra/prod/subscribers/" + keyA.Id + ".json"} {
+	for _, expect := range []string{"infra/prod/manifest.json", "infra/lab/manifest.json", "infra/prod/subscribers/subA.json"} {
 		if !strings.Contains(files, expect) {
 			t.Fatalf("expect %s in remote, got:\n%s", expect, files)
 		}
@@ -521,24 +476,21 @@ func readHistory(t *testing.T, h *Channel.HistoryReader) []map[string]interface{
 }
 
 // TestHistoryParts：history 按压缩后的大小切片，按顺序读回；分片被篡改时摘要校验失败；
-// 只授权给 A 时 B 没有 history，授权的内容密钥 B 也解不开。
+// 只分给 A 时 B 没有 history。
 func TestHistoryParts(t *testing.T) {
 	defer Channel.SetHistoryPartBytes(1)() // 每条记录一个分片
 	spoolDir := t.TempDir()
 	t.Setenv("TMPDIR", spoolDir) // 打包时的临时目录
-	key, fingerprint := signer(t)
-	keyA, keyB := newSubKey(t), newSubKey(t)
 	root := t.TempDir()
 	base := Channel.Config{Type: Channel.TypeDir, Path: root}
-	pub, err := Channel.NewPublisher(pubConfig(base, recipientsFile(t, keyA, keyB)), "prod", key, nil)
-	mustNoErr(t, err, "new publisher")
+	pub := newPub(t, base, "prod", testInstance)
 	mustNoErr(t, pub.Reset(0), "init manifest")
 	mustNoErr(t, pub.Publish(changes("prod", 1, 5)), "publish 1-5")
 	records := []map[string]interface{}{}
 	for _, change := range changes("prod", 1, 5) {
 		records = append(records, change.Record)
 	}
-	ref, err := pub.PublishHistory(&Channel.History{Seq: 5, Source: "prod", Records: Channel.RecordList(records)}, []Channel.HistoryGrant{{Subscriber: keyA.Id, Request: "reqA"}})
+	ref, err := pub.PublishHistory(&Channel.History{Seq: 5, Source: "prod", Records: Channel.RecordList(records)}, []Channel.HistoryGrant{{Subscriber: "subA", Request: "reqA"}})
 	mustNoErr(t, err, "publish history")
 	partDir := filepath.Join(root, "prod", "history", ref.Id)
 	parts := channelFiles(t, partDir)
@@ -546,8 +498,7 @@ func TestHistoryParts(t *testing.T) {
 		t.Fatalf("expect 5 parts, got %v", parts)
 	}
 
-	subA, err := Channel.NewSubscriber(subConfig(base, keyA), "prod", fingerprint, nil)
-	mustNoErr(t, err, "new subscriber A")
+	subA := newSub(t, base, "prod", "subA")
 	mustNoErr(t, subA.Refresh(), "refresh A")
 	h, err := subA.History("reqA")
 	mustNoErr(t, err, "history A")
@@ -561,8 +512,7 @@ func TestHistoryParts(t *testing.T) {
 		}
 	}
 
-	subB, err := Channel.NewSubscriber(subConfig(base, keyB), "prod", fingerprint, nil)
-	mustNoErr(t, err, "new subscriber B")
+	subB := newSub(t, base, "prod", "subB")
 	mustNoErr(t, subB.Refresh(), "refresh B")
 	if _, err := subB.History("reqA"); !errors.Is(err, Channel.ErrNoHistory) {
 		t.Fatalf("expect B without a grant to get ErrNoHistory, got %v", err)
@@ -575,7 +525,7 @@ func TestHistoryParts(t *testing.T) {
 		}
 		return errors.New("db read failed")
 	}
-	if _, err := pub.PublishHistory(&Channel.History{Seq: 5, Source: "prod", Records: failing}, []Channel.HistoryGrant{{Subscriber: keyA.Id, Request: "reqA2"}}); err == nil || !strings.Contains(err.Error(), "db read failed") {
+	if _, err := pub.PublishHistory(&Channel.History{Seq: 5, Source: "prod", Records: failing}, []Channel.HistoryGrant{{Subscriber: "subA", Request: "reqA2"}}); err == nil || !strings.Contains(err.Error(), "db read failed") {
 		t.Fatalf("expect the read error returned, got %v", err)
 	}
 	view, err := pub.View()

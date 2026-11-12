@@ -135,11 +135,13 @@ type VdsState struct {
 	// 请求名字（config 中的名字）改变后 AssignedId 作废。
 	AssignedId   string `json:"assignedId,omitempty"`
 	AssignedFrom string `json:"assignedFrom,omitempty"`
-	// mirrored：当前订阅请求 id、该请求的 history 是否已加载、已应用到的最大 seq、同步到的来源公钥指纹
-	Request           string `json:"request,omitempty"`
-	Loaded            bool   `json:"loaded,omitempty"`
-	Cursor            uint64 `json:"cursor,omitempty"`
-	SourceFingerprint string `json:"sourceFingerprint,omitempty"`
+	// mirrored：本 mirror 在通道上的 subscriber id（第一次启动时生成）、当前订阅请求 id、该请求的 history
+	// 是否已加载、已应用到的最大 seq 及其所属的通道 epoch
+	SubscriberId string `json:"subscriberId,omitempty"`
+	Request      string `json:"request,omitempty"`
+	Loaded       bool   `json:"loaded,omitempty"`
+	Cursor       uint64 `json:"cursor,omitempty"`
+	Epoch        string `json:"epoch,omitempty"`
 }
 
 // VdsState 返回指定 vDS 的状态，不存在时创建。

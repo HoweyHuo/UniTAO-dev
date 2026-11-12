@@ -27,17 +27,17 @@ const (
 // MirrorState 是 mirrored vDS 需要持久化的同步进度（保存在 state.json）。
 // 本地状态是真实进度，通道上的进度文件只是汇报。
 type MirrorState struct {
-	Request           string // 当前订阅请求 id，空表示还没订阅
-	Loaded            bool   // 当前请求的 history 已加载
-	Cursor            uint64 // 已应用到的最大 seq
-	SourceFingerprint string
+	Request string // 当前订阅请求 id，空表示还没订阅
+	Loaded  bool   // 当前请求的 history 已加载
+	Cursor  uint64 // 已应用到的最大 seq
+	Epoch   string // Cursor 所属的通道 epoch（加载 history 时记下）；通道 Reset 后 epoch 变化，需要重新订阅
 }
 
 // Mirror 是 mirrored vDS 的后台同步器（subscriber）：订阅、加载 history、按顺序消费 queue、汇报进度。
 type Mirror struct {
 	Source       string // 来源共享名
 	LocalName    string // 本网使用的名字
-	Trusted      string // 可信指纹
+	SourceId     string // 来源的身份（Channel.SourceId），只用于展示
 	handler      *DataHandler.Handler
 	channel      Channel.Subscriber
 	pullInterval time.Duration
@@ -52,7 +52,7 @@ type Mirror struct {
 	stop         chan struct{}
 }
 
-func NewMirror(source string, localName string, trusted string, handler *DataHandler.Handler, channel Channel.Subscriber, pullIntervalSec int, loadState func() MirrorState, saveState func(MirrorState) error, logger *log.Logger) *Mirror {
+func NewMirror(source string, localName string, sourceId string, handler *DataHandler.Handler, channel Channel.Subscriber, pullIntervalSec int, loadState func() MirrorState, saveState func(MirrorState) error, logger *log.Logger) *Mirror {
 	if logger == nil {
 		logger = log.Default()
 	}
@@ -62,7 +62,7 @@ func NewMirror(source string, localName string, trusted string, handler *DataHan
 	return &Mirror{
 		Source:       source,
 		LocalName:    localName,
-		Trusted:      trusted,
+		SourceId:     sourceId,
 		handler:      handler,
 		channel:      channel,
 		pullInterval: time.Duration(pullIntervalSec) * time.Second,
@@ -124,6 +124,7 @@ func (m *Mirror) subscribe(state MirrorState, why string) error {
 	state.Request = Channel.NewRequestId()
 	state.Loaded = false
 	state.Cursor = 0
+	state.Epoch = ""
 	if err := m.saveState(state); err != nil {
 		return err
 	}
@@ -148,13 +149,8 @@ func (m *Mirror) syncOnce() error {
 		}
 		return nil
 	}
-	if fingerprint := m.channel.SourceFingerprint(); state.SourceFingerprint != fingerprint {
-		state.SourceFingerprint = fingerprint
-		if err := m.saveState(state); err != nil {
-			return err
-		}
-	}
 	lastSeq := m.channel.LastSeq()
+	epoch := m.channel.Epoch()
 	switch {
 	case state.Request == "":
 		return m.subscribe(state, "first subscription")
@@ -166,6 +162,8 @@ func (m *Mirror) syncOnce() error {
 		return m.subscribe(state, fmt.Sprintf("reported cursor %d is ahead of local cursor %d (local state lost)", own.Cursor, state.Cursor))
 	case !state.Loaded && own != nil && own.State == Channel.StateActive:
 		return m.subscribe(state, "progress file is active but the history was not loaded locally (local state lost)")
+	case state.Loaded && state.Epoch != epoch:
+		return m.subscribe(state, fmt.Sprintf("channel was reset (epoch %s, local data from epoch %s)", shortId(epoch), shortId(state.Epoch)))
 	case state.Loaded && state.Cursor > lastSeq:
 		return m.subscribe(state, fmt.Sprintf("local cursor %d is beyond published seq %d (channel was reset)", state.Cursor, lastSeq))
 	}
@@ -215,8 +213,8 @@ func (m *Mirror) syncOnce() error {
 	}
 	// 只有进度变化时才写，空闲时不产生提交
 	own = m.channel.Progress()
-	if own == nil || own.State != Channel.StateActive || own.Cursor != state.Cursor || own.Request != state.Request {
-		return m.channel.WriteProgress(Channel.Progress{Request: state.Request, State: Channel.StateActive, Cursor: state.Cursor})
+	if own == nil || own.State != Channel.StateActive || own.Cursor != state.Cursor || own.Request != state.Request || own.Epoch != state.Epoch {
+		return m.channel.WriteProgress(Channel.Progress{Request: state.Request, State: Channel.StateActive, Cursor: state.Cursor, Epoch: state.Epoch})
 	}
 	return nil
 }
@@ -264,6 +262,7 @@ func (m *Mirror) load(history *Channel.HistoryReader) error {
 	state := m.loadState()
 	state.Loaded = true
 	state.Cursor = history.Seq
+	state.Epoch = m.channel.Epoch() // history 在最近一次 Refresh 读到的 manifest 里，属于它的 epoch
 	if err := m.saveState(state); err != nil {
 		return err
 	}
@@ -303,16 +302,16 @@ func (m *Mirror) Status() map[string]interface{} {
 		phase = PhaseWaiting
 	}
 	result := map[string]interface{}{
-		"source":             m.Source,
-		"subscriberId":       m.channel.Id(),
-		"trustedFingerprint": m.Trusted,
-		"sourceFingerprint":  state.SourceFingerprint,
-		"subscription":       phase,
-		"request":            state.Request,
-		"loaded":             state.Loaded,
-		"cursor":             state.Cursor,
-		"status":             status,
-		"lastSyncTime":       m.lastSync,
+		"source":       m.Source,
+		"subscriberId": m.channel.Id(),
+		"sourceId":     m.SourceId,
+		"subscription": phase,
+		"request":      state.Request,
+		"loaded":       state.Loaded,
+		"cursor":       state.Cursor,
+		"epoch":        state.Epoch,
+		"status":       status,
+		"lastSyncTime": m.lastSync,
 	}
 	if m.paused {
 		result["reason"] = m.reason

@@ -53,7 +53,7 @@ type Handler struct {
 	log      *log.Logger
 	Db       DbIface.Database
 	SyncChan chan string // 非空时，inventory 记录写入成功后非阻塞投递 dsId 事件
-	// PinnedSources 把共享名固定给某个公钥指纹：该名字只给这个指纹使用（见 allocateSignedDsId）。
+	// PinnedSources 把共享名固定给某个来源（SourceId）：该名字只给这个来源使用（见 allocateSignedDsId）。
 	PinnedSources map[string]string
 }
 
@@ -681,7 +681,7 @@ func (h *Handler) allocateDsId(record *Record.Record) *Http.HttpError {
 	return nil
 }
 
-// fingerprintShort 返回指纹的前 8 位十六进制。
+// fingerprintShort 返回来源身份（SHA256:<hex>）的前 8 位十六进制。
 func fingerprintShort(fingerprint string) string {
 	hexPart := strings.TrimPrefix(fingerprint, "SHA256:")
 	if len(hexPart) > 8 {
@@ -690,7 +690,7 @@ func fingerprintShort(fingerprint string) string {
 	return hexPart
 }
 
-// DerivedDsId 返回撞名时由指纹派生的名字：{name}-{指纹前 8 位}。
+// DerivedDsId 返回撞名时由来源身份派生的名字：{name}-{SourceId 前 8 位}。
 func DerivedDsId(name string, fingerprint string) string {
 	return fmt.Sprintf("%s-%s", name, fingerprintShort(fingerprint))
 }
@@ -706,16 +706,17 @@ func (h *Handler) getDsInfoOrNil(dsId string) (*InvRecord.DataServiceInfo, *Http
 	return info, nil
 }
 
-// allocateSignedDsId 处理 shared / mirrored vDS 的注册。身份是公钥指纹（instanceId）：
-//   - 同一个指纹已经以别的名字注册过：合并进已有记录，作为副本（同一个来源不会被计入两次）；
+// allocateSignedDsId 处理 shared / mirrored vDS 的注册。身份是来源的 SourceId（instanceId，通道地址的 sha256，
+// shared 与它的各个 mirror 相同）：
+//   - 同一个来源已经以别的名字注册过：合并进已有记录，作为副本（同一个来源不会被计入两次）；
 //     shared vDS 和它自己的镜像在同一个 Inventory 里也合并，kind 保持 shared
-//   - 名字空闲，或被同一指纹占用：使用这个名字；同指纹时合并 URL（副本）
-//   - 名字被别的指纹（或 local vDS）占用：改用 {name}-{指纹前 8 位}；
-//     若该名字被 PinnedSources 固定给当前指纹，则挤掉占用者（删除其记录，占用者重新注册时会得到派生名字）
+//   - 名字空闲，或被同一来源占用：使用这个名字；同来源时合并 URL（副本）
+//   - 名字被别的来源（或 local vDS）占用：改用 {name}-{SourceId 前 8 位}；
+//     若该名字被 PinnedSources 固定给当前来源，则挤掉占用者（删除其记录，占用者重新注册时会得到派生名字）
 func (h *Handler) allocateSignedDsId(record *Record.Record, dsInfo *InvRecord.DataServiceInfo) *Http.HttpError {
-	fingerprint := dsInfo.InstanceId
-	if fingerprint == "" {
-		return Http.NewHttpError(fmt.Sprintf("%s vDS registration requires instanceId (public key fingerprint)", dsInfo.Kind), http.StatusBadRequest)
+	source := dsInfo.InstanceId
+	if source == "" {
+		return Http.NewHttpError(fmt.Sprintf("%s vDS registration requires instanceId (the source id)", dsInfo.Kind), http.StatusBadRequest)
 	}
 	requested := record.Id
 	target := ""
@@ -728,8 +729,8 @@ func (h *Handler) allocateSignedDsId(record *Record.Record, dsInfo *InvRecord.Da
 		if e != nil || !info.Signed() {
 			continue
 		}
-		if info.InstanceId == fingerprint && info.Id != requested {
-			h.Log(fmt.Sprintf("WARNING: vDS with fingerprint [%s] is already registered as [%s], merge registration of [%s] into it as a replica; check the alias configuration", fingerprint, info.Id, requested))
+		if info.InstanceId == source && info.Id != requested {
+			h.Log(fmt.Sprintf("WARNING: vDS of source [%s] is already registered as [%s], merge registration of [%s] into it as a replica; check the alias configuration", source, info.Id, requested))
 			target = info.Id
 			break
 		}
@@ -741,22 +742,22 @@ func (h *Handler) allocateSignedDsId(record *Record.Record, dsInfo *InvRecord.Da
 			return err
 		}
 		switch {
-		case isPinned && pinned != fingerprint:
-			target = DerivedDsId(requested, fingerprint)
-			h.Log(fmt.Sprintf("WARNING: name [%s] is pinned to [%s], register fingerprint [%s] as [%s]", requested, pinned, fingerprint, target))
+		case isPinned && pinned != source:
+			target = DerivedDsId(requested, source)
+			h.Log(fmt.Sprintf("WARNING: name [%s] is pinned to [%s], register source [%s] as [%s]", requested, pinned, source, target))
 		case existing == nil:
 			target = requested
-		case existing.Signed() && existing.InstanceId == fingerprint:
+		case existing.Signed() && existing.InstanceId == source:
 			target = requested
-		case isPinned && pinned == fingerprint:
-			h.Log(fmt.Sprintf("WARNING: name [%s] is pinned to [%s], evict current holder [%s]", requested, fingerprint, existing.InstanceId))
+		case isPinned && pinned == source:
+			h.Log(fmt.Sprintf("WARNING: name [%s] is pinned to [%s], evict current holder [%s]", requested, source, existing.InstanceId))
 			if e := h.Db.Delete(Schema.Inventory, map[string]interface{}{Record.DataType: Schema.Inventory, Record.DataId: requested}); e != nil {
 				return Http.WrapError(e, fmt.Sprintf("failed to evict inventory record [%s]", requested), http.StatusInternalServerError)
 			}
 			target = requested
 		default:
-			target = DerivedDsId(requested, fingerprint)
-			h.Log(fmt.Sprintf("WARNING: name [%s] is taken by [%s], register fingerprint [%s] as [%s]", requested, existing.InstanceId, fingerprint, target))
+			target = DerivedDsId(requested, source)
+			h.Log(fmt.Sprintf("WARNING: name [%s] is taken by [%s], register source [%s] as [%s]", requested, existing.InstanceId, source, target))
 		}
 	}
 	current, err := h.getDsInfoOrNil(target)
@@ -765,8 +766,8 @@ func (h *Handler) allocateSignedDsId(record *Record.Record, dsInfo *InvRecord.Da
 	}
 	urls := dsInfo.URL
 	if current != nil {
-		if !current.Signed() || current.InstanceId != fingerprint {
-			return Http.NewHttpError(fmt.Sprintf("dsId [%s] is taken by another vDS, cannot register fingerprint [%s]", target, fingerprint), http.StatusConflict)
+		if !current.Signed() || current.InstanceId != source {
+			return Http.NewHttpError(fmt.Sprintf("dsId [%s] is taken by another vDS, cannot register source [%s]", target, source), http.StatusConflict)
 		}
 		urls = mergeUrls(current.URL, dsInfo.URL)
 		// shared vDS 与它的镜像在同一个 Inventory 里合并成一条记录；有源头时 kind 保持 shared

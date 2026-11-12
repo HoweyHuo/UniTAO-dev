@@ -150,26 +150,20 @@ everything lives in the Data Service `config.json`:
     "local": {},
     "shared": [{
         "name": "prod",
-        "signingKeyFile": "/opt/UniTAO/keys/prod.pem",
         "publishIntervalSec": 10,
         "subscriberTimeoutHours": 24,
         "compactIntervalHours": 24,
         "historyReuseHours": 24,
         "channel": {
             "type": "git", "repo": "git@git.internal:unitao/exchange.git", "branch": "infra", "folder": "dc1/prod",
-            "workDir": "/opt/UniTAO/channel/exchange-infra",
-            "encrypt": { "recipientsFile": "/opt/UniTAO/keys/prod.recipients" }
+            "workDir": "/opt/UniTAO/channel/exchange-infra"
         }
     }],
     "mirrored": [{
         "name": "lab",
         "alias": "lab-west",
-        "trustedFingerprint": "SHA256:6690a72a...",
         "pullIntervalSec": 60,
-        "channel": {
-            "type": "dir", "path": "/mnt/exchange",
-            "decrypt": { "identityFile": "/opt/UniTAO/keys/lab.identity" }
-        }
+        "channel": { "type": "dir", "path": "/mnt/exchange" }
     }]
 }
 ```
@@ -178,52 +172,49 @@ everything lives in the Data Service `config.json`:
  - removing a `mirrored` entry from the config and restarting **drops its table** and removes its URL from the Inventory. a removed `local` is only logged, its table is kept.
  - channel types: `dir` (a directory, e.g. a shared mount) and `git` (the `git` CLI must be installed). both sides write to the channel: the publisher its batches, every mirror its own progress file, so the mirror needs write access too.
  - a vDS's address on the channel is `repo + branch + folder` (`path + folder` for `dir`); `folder` defaults to the vDS name and may have several levels (`dc1/prod`). one repository can hold many vDS; putting related vDS on one branch lets a site pull them together. vDS in one Data Service that use the same `workDir` share one clone, so they must name the same repo and branch.
- - `subscriberTimeoutHours` (default 24): a mirror whose oldest unprocessed batch has been on the channel this long is considered dead, see below. `compactIntervalHours` (default 24): how often the publisher squashes the git branch history. `historyReuseHours` (default 24): how long after a history is published new subscribers are granted it instead of getting a freshly packaged one, see below.
+ - `subscriberTimeoutHours` (default 24): a mirror whose oldest unprocessed batch has been on the channel this long is considered dead, see below. `compactIntervalHours` (default 24): how often the publisher squashes the git branch history. `historyReuseHours` (default 24): how long after a history is published new subscribers are given it instead of a freshly packaged one, see below.
  - git authentication is left to git itself: the Data Service runs `git` non-interactively (`GIT_TERMINAL_PROMPT=0`) with its own environment, so use SSH or an HTTPS credential helper. for SSH the Data Service generates its own ed25519 key on first start (`id_ed25519` in `ssh.dir` of its config, default `ssh/` next to the config; in containers point it at a Docker named volume such as `/opt/UniTAO/ssh` so the private key stays out of bind-mounted host directories) and publishes the public key in `state.json` (`ssh.publicKey`) and `GET /{vDS}/config` (`instance.ssh`); add it to the git server. a `GIT_SSH_COMMAND` in the environment overrides it. every git command has a 10-minute timeout (the whole process group, ssh included, is killed), and the generated ssh command drops a stalled connection after about a minute (`ServerAliveInterval=15`, `ServerAliveCountMax=4`). the publisher additionally needs to force-push (history compaction); if the server forbids it, compaction fails and is logged, everything else keeps working. ssh needs an `/etc/passwd` entry for the UID the Data Service runs as; the image's entrypoint adds one for a non-root UID when the container starts. avoid credentials in `channel.repo`: they are redacted from `GET /{vDS}/config` and from git errors in the log, but stay in the config file and the clone's `.git/config`. see `docker-compose/README.md` for examples.
 
-step-by-step onboarding of a shared vDS and its mirrors (keys, git access, config, how to watch a subscription come up, troubleshooting): [`documentation/vds/README.md`](documentation/vds/README.md) (Chinese).
+step-by-step onboarding of a shared vDS and its mirrors (git access, config, how to watch a subscription come up, troubleshooting): [`documentation/vds/README.md`](documentation/vds/README.md) (Chinese).
 
-### Keys and trust
+### Identity, access and rebuilds
 
-each shared vDS signs what it publishes with its own ed25519 key; the public key fingerprint is the identity of the source. a mirror only accepts a source whose fingerprint equals its `trustedFingerprint`, and verifies the signed manifest and the sha256 of every file before applying anything.
+the channel is neither encrypted nor signed: who can read and write it is up to the platform it lives on (access to the git repository, file permissions of a `dir` channel). keep the repository private; anyone who can read it can read the data.
 
-```
-DataServiceAdmin keygen -out prod.pem             # prints the fingerprint for the mirror side
-DataServiceAdmin fingerprint -key prod.pem
-DataServiceAdmin enckey -identity lab.id -recipient lab.pub   # also prints the subscriber id
-```
-
-encryption is mandatory (X25519 + AES-256-GCM). each mirror is a subscriber with its own X25519 key: it sets `channel.decrypt.identityFile`, and its public key goes into the shared side's `channel.encrypt.recipientsFile` (one recipient per line, `#` comments allowed). the recipients file is the subscriber whitelist: the subscriber id is the sha256 of the public key, and the publisher ignores progress files of ids that are not on the list. queue batches are encrypted to all recipients. a history has its own random content key, wrapped in the signed manifest for each subscriber it is granted to. adding a subscriber means appending its recipient and restarting the shared Data Service. the file must exist but may be empty (no subscribers yet): the publisher still starts and writes its manifest, and changes only advance `lastSeq` without writing queue batches nobody could decrypt; a subscriber added later starts from a history that holds all current records.
+ - **identity of a source**: its channel address. `SHA256:` + the sha256 of the normalized repository (`git@host:a/b.git`, `ssh://git@host/a/b` and `https://user@host/a/b.git` are the same), the branch and the folder; `dir:` + path + folder for a `dir` channel. a shared vDS and every mirror configured with the same address compute the same id (`instanceId` in `GET /{vDS}/config`), which is how the Inventory merges them.
+ - **subscriber id**: a random id a mirror generates on first start and keeps in `state.json` (`vds.mirrored/{name}.subscriberId`); it names its progress file. there is no whitelist: the publisher serves every progress file in the folder.
+ - **owner of a folder**: the manifest names the Data Service instance that writes it (`instance`, the instance id in `state.json`). a Data Service rebuilt from scratch (new `state.json`, empty database) with the same config finds another instance's manifest, logs `take it over` and restarts the folder in a new **epoch** from its own data; the same happens when a database restored from an older backup is behind what the channel already has. mirrors keep their config: they see the new epoch, subscribe again and replace their copy, serving the old one until then. if two running instances are configured with the same folder by mistake, they keep taking it from each other, logged on every round.
+ - older configs still start: `signingKeyFile`, `trustedFingerprint`, `channel.encrypt` and `channel.decrypt` are ignored and listed in the log and in `ignoredConfig` of `GET /{vDS}/config`. the `keygen`, `fingerprint` and `enckey` commands of `DataServiceAdmin` are gone.
 
 ### How changes travel
 
 the channel works like a low-frequency Kafka topic with one producer. each vDS folder holds:
 
 ```
-<folder>/manifest.json, manifest.sig      # signed by the publisher (version 3): lastSeq, queue batches and history parts
-                                          # with their sha256, history grants
-<folder>/queue/<from>-<to>.jsonl.gz.enc   # incremental batches, encrypted to all recipients
-<folder>/history/<id>/<n>.jsonl.gz.aes    # part n of a full history, encrypted with the history's content key
-<folder>/subscribers/<subscriber>.json    # written by each mirror: request, state (subscribe | active), cursor
+<folder>/manifest.json                    # written by the publisher (version 4): instance, epoch, lastSeq, queue batches and
+                                          # history parts with their sha256, which requests each history serves
+<folder>/queue/<from>-<to>.jsonl.gz       # incremental batches
+<folder>/history/<id>/<n>.jsonl.gz        # part n of a full history
+<folder>/subscribers/<subscriber>.json    # written by each mirror: request, state (subscribe | active), cursor, epoch
 ```
 
  - **publish**: every write in a shared vDS goes through the journal into an outbox with a gap-free sequence number; the publisher pushes contiguous runs as queue batches. a change is always a full record upsert or a delete, so replaying is idempotent.
- - **subscribe**: a new mirror writes `state: subscribe` with a fresh request id. the publisher grants it a history: the newest one published within `historyReuseHours` if there is one (a grant only adds the wrapped content key to the manifest, no data is rewritten), otherwise a new one with all current records at the published seq, shared by every request seen in that round. the mirror replaces its whole table with the history, reading it part by part, then consumes the queue from the history's seq and reports `state: active` with its cursor (kept locally in `state.json`, the progress file is only a report). the content key lives only in the publisher's memory: after a restart the next request gets a new history.
- - **history parts**: a history is split into parts of about 32 MB after gzip, well below the per-file limits of git hosts, and each part is encrypted on its own (the part number is bound into the encryption, parts cannot be swapped). both sides stream it: the publisher reads the records type by type (MongoDB cursor, DynamoDB page by page), compresses and encrypts as it goes and spools finished parts in the system temp directory (`TMPDIR`), so it holds at most one part in memory; the mirror loads it part by part.
- - **prune**: a batch is deleted once every live subscriber's cursor has passed it; a history is deleted once none of its grants is still waiting (every grantee is active, re-subscribed, dead or gone). with no subscribers the queue is emptied, new subscribers always start from a history.
- - **death**: if a subscriber's oldest unprocessed batch (or a history granted to it and not loaded) is older than `subscriberTimeoutHours`, the publisher deletes its progress file and stops keeping batches for it. when the mirror comes back and finds its progress file gone (or its cursor no longer on the channel), it subscribes again and replaces its data from a new history; it keeps serving the old data until then.
+ - **subscribe**: a new mirror writes `state: subscribe` with a fresh request id. the publisher gives it a history: the newest one published within `historyReuseHours` if there is one (only the manifest records the new request, no data is rewritten), otherwise a new one with all current records at the published seq, shared by every request seen in that round. the mirror replaces its whole table with the history, reading it part by part, then consumes the queue from the history's seq and reports `state: active` with its cursor and epoch (kept locally in `state.json`, the progress file is only a report).
+ - **history parts**: a history is split into parts of about 32 MB after gzip, well below the per-file limits of git hosts. both sides stream it: the publisher reads the records type by type (MongoDB cursor, DynamoDB page by page), compresses as it goes and spools finished parts in the system temp directory (`TMPDIR`), so it holds at most one part in memory; the mirror loads it part by part.
+ - **prune**: a batch is deleted once every live subscriber's cursor has passed it; a history is deleted once none of the requests it serves is still waiting (every one is active, re-subscribed, dead or gone). with no subscribers the queue is emptied, new subscribers always start from a history.
+ - **death**: if a subscriber's oldest unprocessed batch (or a history given to it and not loaded) is older than `subscriberTimeoutHours`, the publisher deletes its progress file and stops keeping batches for it. when the mirror comes back and finds its progress file gone (or its cursor no longer on the channel, or a new epoch), it subscribes again and replaces its data from a new history; it keeps serving the old data until then.
  - **git**: every write fetches the branch, resets to it, writes only its own files, commits and pushes; a rejected push is redone from the start. the publisher squashes the branch to one commit every `compactIntervalHours` (`--force-with-lease`, so a concurrent push is never lost) and garbage-collects its clone.
- - if the channel is reset or still in the old format, the publisher restarts it at its current seq; mirrors notice and resubscribe. a folder whose manifest (of any format) names another signing key is never taken over: the publisher logs `signed by another key` and stops. if that key is your own old one (e.g. the key volume was recreated), delete the folder's `manifest.json` in the channel to hand it to the new key; mirrors then need the new fingerprint.
- - upgrading from manifest version 2 (one history file per subscriber): upgrade the shared side and every mirror. the new publisher resets the channel at its current seq and mirrors resubscribe; a mirror still on the old version sees an unknown format and waits.
+ - **epoch**: every restart of a folder (the channel was emptied or reset, an old-format manifest, another instance's manifest, a channel ahead of or behind the local outbox) writes a new manifest with a new random epoch at the publisher's current seq. a mirror's cursor only counts within its epoch, so a restarted folder whose seq happens to pass the old cursor is still noticed; the mirror subscribes again.
+ - upgrading from manifest version 3 (encrypted and signed) or older: upgrade the shared side and every mirror. the new publisher restarts the folder (removing `manifest.sig` and the old queue and history files) and mirrors subscribe again; a mirror still on the old version sees an unknown format and waits.
 
 a shared vDS may only reference records inside the **same** shared vDS (checked when the schema is registered and on every write), otherwise the reference would dangle on the mirror side. `local` may reference any shared vDS. `indexTemplate` cannot target a type that is only available from a mirror.
 
 ### Registration in the Inventory
 
  - `local` registers as `ds.id` with the instance UUID, as before.
- - `shared` and `mirrored` register with their name and the source fingerprint. instances mirroring the same source (same fingerprint) are merged into **one** record with several URLs (replicas); a shared vDS and its own mirror in the same Inventory merge the same way and stay `kind: shared`. the URL list is ordered by mirror cursor, newest first, and refreshed on every sync.
- - the same name with a different fingerprint: the later one is renamed `{name}-{first 8 hex of the fingerprint}` and a warning is logged. the same fingerprint under another name (inconsistent `alias`) is merged into the existing record.
- - `pinnedSources` in the Inventory config (`{"prod": "SHA256:..."}`) reserves a name for one fingerprint.
+ - `shared` and `mirrored` register with their name and the source id (the channel address, see above). instances mirroring the same source (same source id) are merged into **one** record with several URLs (replicas); a shared vDS and its own mirror in the same Inventory merge the same way and stay `kind: shared`. the URL list is ordered by mirror cursor, newest first, and refreshed on every sync.
+ - the same name with a different source: the later one is renamed `{name}-{first 8 hex of the source id}` and a warning is logged. the same source under another name (inconsistent `alias`) is merged into the existing record.
+ - `pinnedSources` in the Inventory config (`{"prod": "SHA256:..."}`, the `instanceId` from `GET /{vDS}/config`) reserves a name for one source.
  - `DELETE /inventory/{dsId}?url={url}` removes one replica URL; the record is deleted when no URL is left.
  - the same type with the same schema version but different content on two DS is a conflict: the later DS is left out of that type's referral and a warning is logged.
 
