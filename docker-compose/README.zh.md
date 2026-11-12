@@ -111,7 +111,7 @@ git 通道克隆在 `data/vds/<kind>/<name>/channel`。`file:///opt/UniTAO/chann
 
 本机上的通道（`file:///opt/UniTAO/channel/<repo>.git` 或 `--dir /opt/UniTAO/channel…`）放在挂到 `/opt/UniTAO/channel` 的宿主机目录里，默认是实例目录里的 `channel/`。加第一个这样的 vDS 时会询问这个目录（`--channel-dir <宿主机路径>`）；同一台主机上两个 site 用这种方式交换数据时，两边给同一个目录。它写进 `.env` 的 `UNITAO_CHANNEL_DIR`，并重建容器；一旦有 vDS 在用，就不能再改。用 git 服务器时这些都不需要。
 
-`remove` 删除这一项、它的文件和克隆（其它 vDS 还在用的除外）；Data Service 再次启动时删除该 vDS 的表，并从 Inventory 注销。该 vDS 留在通道上的内容不动。
+`remove` 删除这一项、它的文件和克隆（其它 vDS 还在用的除外）；Data Service 再次启动时删除该 vDS 的表，并从 Inventory 注销。重启后用 Data Service 的 ssh 密钥在临时克隆里清理该 vDS 留在通道上的东西：shared 删除自己 folder 下的 `manifest.json`、`manifest.sig`、`queue/`、`history/`、`subscribers/`（manifest 是别的密钥签的就不动，也不碰下级 folder），这样以同名重新 add（新密钥）的 shared 才能在那里发布；mirrored 删除来源 folder 下自己的进度文件 `subscribers/<id>.json`。`--no-restart` 而 Data Service 在运行时不清理通道（运行中的 Data Service 会把文件写回去）。
 
 **两边之间的交接**由你来做：
 

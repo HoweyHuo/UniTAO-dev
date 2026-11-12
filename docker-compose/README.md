@@ -111,7 +111,7 @@ a git channel is cloned into `data/vds/<kind>/<name>/channel`. a `file:///opt/Un
 
 a channel on this host (`file:///opt/UniTAO/channel/<repo>.git` or `--dir /opt/UniTAO/channel…`) lives in the host directory mounted at `/opt/UniTAO/channel`, by default `channel/` in the instance directory. the first such vDS asks for that directory (`--channel-dir <host path>`); when two sites on one host exchange data this way, give both the same directory. it is written to `UNITAO_CHANNEL_DIR` in `.env` and the container is recreated; once a vDS uses it, it stays. a git server needs none of this.
 
-`remove` deletes the entry, its files and its clone (except what another vDS still uses); when the Data Service starts again it drops the table of that vDS and unregisters it from Inventory. what the vDS left on the channel is not touched.
+`remove` deletes the entry, its files and its clone (except what another vDS still uses); when the Data Service starts again it drops the table of that vDS and unregisters it from Inventory. after the restart it cleans up what the vDS left on the channel, through a temporary clone with the ssh key of the Data Service: a shared vDS deletes its `manifest.json`, `manifest.sig`, `queue/`, `history/` and `subscribers/` in its folder (not when the manifest is signed by another key, and never the folders below it), so a shared vDS added again under the same name, with a new key, can publish there; a mirrored vDS deletes its progress file `subscribers/<id>.json` in the folder of its source. with `--no-restart` while the Data Service runs, the channel is left as it is (the running Data Service would write the files back).
 
 **the hand-over** between the two sides stays with you:
 
