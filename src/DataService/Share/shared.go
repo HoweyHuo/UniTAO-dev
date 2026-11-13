@@ -19,7 +19,7 @@ const (
 
 	// subscriber 在 /config 中显示的状态（除了 Channel.StateSubscribe / StateActive）
 	SubscriberDead    = "dead"    // 本轮被判定死亡，进度文件已删除
-	SubscriberGap     = "gap"     // 进度落在已删除的 batch 之前或属于旧 epoch，等它重新订阅
+	SubscriberGap     = "gap"     // 进度落在已删除的 batch 之前或属于旧 epoch，等它重新订阅；进度文件超时未更新则判死
 	SubscriberInvalid = "invalid" // 进度文件内容不合法，忽略
 )
 
@@ -399,11 +399,16 @@ func (p *Publisher) Maintain() error {
 			status.State = SubscriberInvalid
 			status.Reason = fmt.Sprintf("unknown state [%s]", sub.State)
 		}
+		// 活着的 mirror 遇到 gap 会立即重新订阅、改写进度文件；gap 的进度文件超时未变，说明它已经不在了。
+		// 已追平的 active 进度不能按 updated 判死：mirror 只在进度变化时写，空闲时 updated 本来就不动。
+		if status.State == SubscriberGap && p.expired(sub.Updated, now) {
+			dead = fmt.Sprintf("%s, and its progress was not updated since %s (%s)", status.Reason, sub.Updated, p.timeout)
+		}
 		if dead != "" {
 			p.Log(fmt.Sprintf("subscriber %s is dead: %s", sub.Id, dead))
 			status.State = SubscriberDead
 			status.Reason = dead
-			prune.Subscribers = append(prune.Subscribers, sub.Id)
+			prune.Subscribers = append(prune.Subscribers, sub)
 		}
 		if live && cursor < minCursor {
 			minCursor = cursor

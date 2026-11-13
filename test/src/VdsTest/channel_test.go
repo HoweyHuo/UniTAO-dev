@@ -212,7 +212,20 @@ func TestQueueChannel(t *testing.T) {
 	if files := channelFiles(t, filepath.Join(root, "apps", "prod", "queue")); len(files) != 1 {
 		t.Fatalf("expect one queue file left, got %v", files)
 	}
-	mustNoErr(t, pub.Prune(Channel.Prune{Subscribers: []string{"subA"}}), "remove subscriber A")
+	// 判死之后 A 又写了进度（重新订阅）：按判死时的内容删除不能删掉它的新进度
+	seenA := view.Subscribers[0]
+	if seenA.Id != "subA" {
+		t.Fatalf("expect subA first in view, got %+v", view.Subscribers)
+	}
+	mustNoErr(t, subA.WriteProgress(Channel.Progress{Request: "reqA2", State: Channel.StateSubscribe}), "A re-subscribes")
+	mustNoErr(t, pub.Prune(Channel.Prune{Subscribers: []Channel.Progress{seenA}}), "prune A with stale progress")
+	mustNoErr(t, subA.Refresh(), "refresh A")
+	if p := subA.Progress(); p == nil || p.Request != "reqA2" {
+		t.Fatalf("expect A's new progress kept, got %+v", p)
+	}
+	view, err = pub.View()
+	mustNoErr(t, err, "view")
+	mustNoErr(t, pub.Prune(Channel.Prune{Subscribers: []Channel.Progress{view.Subscribers[0]}}), "remove subscriber A")
 	mustNoErr(t, subA.Refresh(), "refresh A")
 	if p := subA.Progress(); p != nil {
 		t.Fatalf("expect A's progress file removed, got %+v", p)
