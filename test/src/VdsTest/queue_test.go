@@ -161,6 +161,51 @@ func TestDeadSubscriberResubscribe(t *testing.T) {
 	}
 }
 
+// TestStaleGapSubscriberDead：进度停在旧 epoch 的 subscriber（如旧版本 mirror 留下、已不再运行）先判为 gap，
+// 进度文件超时未更新后判死并删除；同样很久没写进度、但已追平的 active subscriber 不受影响。
+func TestStaleGapSubscriberDead(t *testing.T) {
+	channelDir := filepath.Join(t.TempDir(), "channel")
+	q := newQueueSetup(t, dirChannel(channelDir), 1)
+	clock := time.Now()
+	q.pub.SetClock(func() time.Time { return clock })
+	q.pub.SetSubscriberTimeout(time.Hour)
+
+	q.post(t, schemaRecord("rack", "0.0.1", rackSchema), 1)
+	syncAll(t, q.pub, q.mirror(0))
+
+	// 旧版本留下的进度文件：没有 epoch，cursor 停在 0
+	staleId := "stale-subscriber"
+	staleFile := filepath.Join(channelDir, "prod", "subscribers", staleId+".json")
+	stale, _ := json.Marshal(map[string]interface{}{
+		"id": staleId, "request": "old-request", "state": Channel.StateActive, "cursor": 0,
+		"updated": clock.UTC().Format(time.RFC3339),
+	})
+	mustNoErr(t, os.WriteFile(staleFile, stale, 0644), "write stale progress file")
+
+	mustNoErr(t, q.pub.RunOnce(), "publisher run")
+	states := subscriberStates(t, q.pub)
+	if states[staleId].State != Share.SubscriberGap {
+		t.Fatalf("expect the stale subscriber in gap, got %+v", states)
+	}
+	if _, err := os.Stat(staleFile); err != nil {
+		t.Fatalf("expect the gap progress file kept before timeout, got %v", err)
+	}
+
+	// 超时：gap 判死、文件删除；B 已追平、进度同样超过一小时没写，仍然 active
+	clock = clock.Add(2 * time.Hour)
+	mustNoErr(t, q.pub.RunOnce(), "publisher run after timeout")
+	states = subscriberStates(t, q.pub)
+	if states[staleId].State != Share.SubscriberDead || states[q.subscriberId(0)].State != Channel.StateActive {
+		t.Fatalf("expect the stale subscriber dead and B active, got %+v", states)
+	}
+	if _, err := os.Stat(staleFile); !os.IsNotExist(err) {
+		t.Fatalf("expect the stale progress file removed, got %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(channelDir, "prod", "subscribers", q.subscriberId(0)+".json")); err != nil {
+		t.Fatalf("expect B's progress file kept, got %v", err)
+	}
+}
+
 // TestSubscribeBeforePublish：publisher 启动后立即在通道上建出自己的 manifest（还没有数据，lastSeq 0），
 // subscriber 在第一条数据之前就能订阅；没有白名单，所有 subscriber 都会被服务。
 // （来源完全没有 manifest 时订阅的情形见 TestGitQueueChannel 的 ErrNotPublished。）
