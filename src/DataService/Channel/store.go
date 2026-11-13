@@ -692,14 +692,19 @@ func (s *fileStore) Prune(p Prune) error {
 			}
 			keptHistories = append(keptHistories, ref)
 		}
-		for _, id := range p.Subscribers {
-			file := s.path(subscriberDir + "/" + id + ".json")
-			if _, err := os.Stat(file); err == nil {
-				if err := removeFile(file); err != nil {
-					return false, err
-				}
-				changed = true
+		for _, seen := range p.Subscribers {
+			current, err := s.readProgress(seen.Id)
+			if err != nil || current == nil {
+				continue // 已经没了，或被改写成无法解析的内容：都不是判死时那份
 			}
+			if *current != seen {
+				s.log.Printf("Channel[%s]: keep subscriber %s, its progress changed after it was judged dead (now %s, request %s, updated %s)", s.folder, seen.Id, current.State, current.Request, current.Updated)
+				continue
+			}
+			if err := removeFile(s.path(subscriberDir + "/" + seen.Id + ".json")); err != nil {
+				return false, err
+			}
+			changed = true
 		}
 		if !changed {
 			return false, nil

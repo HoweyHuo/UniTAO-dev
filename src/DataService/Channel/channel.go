@@ -130,9 +130,11 @@ type View struct {
 
 // Prune 描述一次清理。
 type Prune struct {
-	QueueUpTo   uint64   // 删除 To <= QueueUpTo 的 queue batch
-	Histories   []string // 要删除的 history（HistoryRef.Id），连同它的全部分片
-	Subscribers []string // 要删除进度文件的 subscriber id
+	QueueUpTo uint64   // 删除 To <= QueueUpTo 的 queue batch
+	Histories []string // 要删除的 history（HistoryRef.Id），连同它的全部分片
+	// 要删除的进度文件，是判死时读到的内容。删除前再读一次，内容变了（subscriber 在判死之后
+	// 又写了进度，例如推送被拒重做时看到它刚重新订阅）就保留，不能删掉它的新进度。
+	Subscribers []Progress
 }
 
 // Config 是 vDS 配置中的 channel 段。vDS 在通道上的地址是 repo（dir 为 path）+ branch + folder。

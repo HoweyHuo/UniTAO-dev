@@ -408,7 +408,7 @@ func (p *Publisher) Maintain() error {
 			p.Log(fmt.Sprintf("subscriber %s is dead: %s", sub.Id, dead))
 			status.State = SubscriberDead
 			status.Reason = dead
-			prune.Subscribers = append(prune.Subscribers, sub.Id)
+			prune.Subscribers = append(prune.Subscribers, sub)
 		}
 		if live && cursor < minCursor {
 			minCursor = cursor
