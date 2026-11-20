@@ -208,8 +208,9 @@ test/                          # 集成测试与单元测试
     SchemaTest/                # Schema 引擎单元测试
     SchemaPathTest/            # 路径查询引擎测试
     UtilTest/                  # 工具函数测试
-    DataServiceTest/           # 集成测试（需要运行中的服务）
-    VdsTest/                   # vDS / Channel 测试：进程内起 DS + Inventory（内存库 MemDb），含 git 通道
+    DataServiceTest/           # 集成测试（需要运行中的服务）；子目录 InvReportTest/ 记录变化订阅的 DS 侧上报进程单测（转换矩阵、503 重试、journal 集成）
+    InventoryServiceTest/      # 记录变化订阅的 Inventory 侧协议单测（change log seq、pull/ack 游标、过滤、410 gap、判死清理）
+    VdsTest/                   # vDS / Channel 测试：进程内起 DS + Inventory（内存库 MemDb），含 git 通道；subscription_test.go 是订阅系统端到端（上报→订阅→拉取→ack→宕机补收→判死）
 ```
 
 ### 辅助目录
@@ -323,6 +324,17 @@ go test ./test/src/UtilTest/...
 
 # DataService 集成测试（需要运行中的 DynamoDB + 服务）
 go test ./test/src/DataServiceTest/...
+
+# 记录变化订阅系统（全部无外部依赖，MemDb / httptest）
+# DS 侧上报进程单测：HandleType 矩阵、entry→change 转换、失败重试、journal 集成（成功归档 / 失败保留）
+go test ./test/src/DataServiceTest/InvReportTest/...
+# Inventory 侧 Manager 协议单测：seq 分配与连续性、pull/ack 游标语义（next 扫描水位、回退 no-op）、
+# 过滤（types/ds）、410 gap、注册默认值与钳位、判死清理与保留期兜底
+go test ./test/src/InventoryServiceTest/...
+# 端到端（进程内 DS + Inventory，走真实 HTTP 路由）：
+# TestReportSubscribePullAck（上报→订阅→拉取→ack→注销）、TestSubscriptionFilteredWatermark（过滤订阅逐条推进）、
+# TestReportRetryWhenInventoryDownAndRestart（Inventory 宕机 + DS 重启补收）、TestStaleSubscriberReaping（判死清理）
+go test ./test/src/VdsTest/... -run 'TestReport|TestSubscription|TestStaleSubscriber'
 
 # 运行单个测试函数
 go test ./test/src/SchemaTest/... -run TestSchemaOps
