@@ -413,11 +413,11 @@ func (m *Manager) Prune() error {
 	retainFrom := now.Add(-m.retention)
 	removed := 0
 	for _, change := range changes {
+		// 时间无法解析时不按保留期删除（只在被所有活跃订阅者消费后随 cursor 清理）：
+		// 坏元数据不该销毁数据。
 		ts, err := time.Parse(time.RFC3339, change.Ts)
-		if err != nil {
-			ts = time.Time{} // 无法解析的时间视为最老，交由保留期清理
-		}
-		if change.Seq <= minCursor || ts.Before(retainFrom) {
+		stale := err == nil && ts.Before(retainFrom)
+		if change.Seq <= minCursor || stale {
 			if err := deleteChange(m.db, seqId(change.Seq)); err != nil {
 				return fmt.Errorf("failed to delete change [%d]. Error: %s", change.Seq, err)
 			}

@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	"DataService/DataJournal"
 	"DataService/DataJournal/ProcessIface"
@@ -165,6 +166,41 @@ func TestProcessEntryConversion(t *testing.T) {
 	}
 	if c.count() != 3 {
 		t.Fatalf("expected 3 reports, got %d", c.count())
+	}
+}
+
+// TestNormalizeTs 验证 journal 的时间格式（Go 默认 String()）被归一化为 RFC3339。
+func TestNormalizeTs(t *testing.T) {
+	c := newCaptureServer(http.StatusOK)
+	defer c.srv.Close()
+	r := newReporter(c.srv.URL)
+
+	// journal 的 Go 默认格式（含单调时钟读数）→ RFC3339 UTC
+	body := mustReport(t, c, r, &ProcessIface.JournalEntry{
+		Time:  "2026-01-01 08:09:10.123456789 +0000 UTC m=+131.568673789",
+		After: recordMap("server", "s1", "0.0.1"),
+	})
+	if change := firstChange(t, body); change["ts"] != "2026-01-01T08:09:10Z" {
+		t.Fatalf("go-format time not normalized: %v", change["ts"])
+	}
+
+	// 已是 RFC3339 → 换算为 UTC
+	body = mustReport(t, c, r, &ProcessIface.JournalEntry{
+		Time:  "2026-01-02T10:11:12+02:00",
+		After: recordMap("server", "s1", "0.0.1"),
+	})
+	if change := firstChange(t, body); change["ts"] != "2026-01-02T08:11:12Z" {
+		t.Fatalf("rfc3339 time not converted to UTC: %v", change["ts"])
+	}
+
+	// 空时间 → 回退为当前时刻（仍是合法 RFC3339）
+	body = mustReport(t, c, r, &ProcessIface.JournalEntry{
+		After: recordMap("server", "s1", "0.0.1"),
+	})
+	change := firstChange(t, body)
+	ts, _ := change["ts"].(string)
+	if _, err := time.Parse(time.RFC3339, ts); err != nil {
+		t.Fatalf("fallback ts is not RFC3339: %q (%s)", ts, err)
 	}
 }
 
