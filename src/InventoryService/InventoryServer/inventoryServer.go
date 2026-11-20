@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -40,6 +41,7 @@ import (
 	"InventoryService/DataHandler"
 	"InventoryService/DataSync"
 	"InventoryService/RefRecord"
+	"InventoryService/Subscription"
 
 	"github.com/salesforce/UniTAO/lib/Schema"
 	"github.com/salesforce/UniTAO/lib/Util"
@@ -59,10 +61,11 @@ type Server struct {
 	config   Config.ServerConfig
 	data     *DataHandler.Handler
 	log      *log.Logger
-	syncChan chan string      // DS 注册/更新事件
-	typeChan chan TypeEvent   // DS 新增/删除 data type 事件（单类型，按 DS 上实际状态合并或移除，不扫描）
-	syncer   *DataSync.Syncer // referral + schema 同步器
-	syncLock *sync.Mutex      // 串行化各种同步；在 Start 中创建（New 按值返回 Server，不能内嵌锁）
+	syncChan chan string           // DS 注册/更新事件
+	typeChan chan TypeEvent        // DS 新增/删除 data type 事件（单类型，按 DS 上实际状态合并或移除，不扫描）
+	syncer   *DataSync.Syncer      // referral + schema 同步器
+	syncLock *sync.Mutex           // 串行化各种同步；在 Start 中创建（New 按值返回 Server，不能内嵌锁）
+	subs     *Subscription.Manager // 记录变化订阅：change log + 订阅登记 + 游标推进（Start 中创建）
 	// ConnectDb 建立数据库连接，测试时可替换；为 nil 时按配置连接。
 	ConnectDb func(config DbConfig.DatabaseConfig, logger *log.Logger) (DbIface.Database, error)
 }
@@ -79,6 +82,8 @@ const (
 	PORT_DEFAULT           = "8003"
 	DefaultSyncIntervalSec = 300 // 后台全量对账默认间隔（秒）
 	SyncChanCap            = 16  // DS 注册事件缓冲大小
+	// DefaultPruneIntervalSec 订阅清理循环默认间隔（秒）。
+	DefaultPruneIntervalSec = 60
 )
 
 func argHandler() ServerArgs {
@@ -207,10 +212,40 @@ func (srv *Server) Start(logger *log.Logger) error {
 	srv.typeChan = make(chan TypeEvent, SyncChanCap)
 	srv.syncer = DataSync.New(srv.data, srv.log)
 	go srv.syncLoop(interval)
+	// 记录变化订阅：change log 管理器 + 清理循环
+	srv.subs = Subscription.NewManager(srv.data.Db, Subscription.Options{
+		RetentionHours:         srv.config.Subscription.RetentionHours,
+		SubscriberTimeoutHours: srv.config.Subscription.SubscriberTimeoutHours,
+	}, srv.log)
+	pruneSec := srv.config.Subscription.PruneIntervalSec
+	if pruneSec <= 0 {
+		pruneSec = DefaultPruneIntervalSec
+	}
+	go srv.subscriptionLoop(time.Duration(pruneSec) * time.Second)
 	return nil
 }
 
+// SubscriptionManager 返回记录变化订阅管理器（测试与运维检查用）。
+func (srv *Server) SubscriptionManager() *Subscription.Manager {
+	return srv.subs
+}
+
+// subscriptionLoop 周期清理：删除已被所有活跃订阅者消费或超过保留期的变更行，
+// 判死清理无活动的订阅者。错误仅记日志，循环不中断。
+func (srv *Server) subscriptionLoop(interval time.Duration) {
+	srv.log.Printf("start subscription prune loop, interval=%s", interval)
+	for {
+		time.Sleep(interval)
+		if err := srv.subs.Prune(); err != nil {
+			srv.log.Printf("subscription prune failed, Error: %s", err)
+		}
+	}
+}
+
 func (srv *Server) handler(w http.ResponseWriter, r *http.Request) {
+	if srv.handleSubscriptionRoute(w, r) {
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		srv.handleGet(w, r)
@@ -357,6 +392,176 @@ func (srv *Server) handleTypeEvent(w http.ResponseWriter, r *http.Request) {
 		srv.log.Printf("type event channel full, drop event for DS=[%s] type=[%s]", ev.DsId, ev.DataType)
 	}
 	Http.ResponseText(w, []byte("accepted"), http.StatusAccepted, srv.config.Http)
+}
+
+// handleSubscriptionRoute 处理记录变化订阅路由（/report 与 /subscription[/...]）。
+// 在通用 method 分发之前调用：GET /{type} 是 catch-all、POST 只认 /referral，
+// 新路由必须先于两者拦截。返回 false 表示不归本组路由管，走原有分发。
+func (srv *Server) handleSubscriptionRoute(w http.ResponseWriter, r *http.Request) bool {
+	if srv.subs == nil {
+		return false
+	}
+	urlPath, err := Http.GetUrl(r)
+	if err != nil {
+		Http.ResponseJson(w, err, err.Status, srv.config.Http)
+		return true
+	}
+	if idx := strings.Index(urlPath, "?"); idx >= 0 {
+		urlPath = urlPath[:idx]
+	}
+	first, rest := Util.ParsePath(urlPath)
+	id, subPath := Util.ParsePath(rest)
+	switch {
+	case first == Subscription.ReportPath && r.Method == http.MethodPost && rest == "":
+		srv.handleReport(w, r)
+	case first == Subscription.SubPath && r.Method == http.MethodPost && rest == "":
+		srv.handleSubscribe(w, r)
+	case first == Subscription.SubPath && r.Method == http.MethodGet && rest == "":
+		srv.handleListSubs(w, r)
+	case first == Subscription.SubPath && r.Method == http.MethodGet && id != "" && subPath == "":
+		srv.handleSubStatus(w, r, id)
+	case first == Subscription.SubPath && r.Method == http.MethodGet && id != "" && subPath == "changes":
+		srv.handlePull(w, r, id)
+	case first == Subscription.SubPath && r.Method == http.MethodPost && id != "" && subPath == "ack":
+		srv.handleAck(w, r, id)
+	case first == Subscription.SubPath && r.Method == http.MethodDelete && id != "" && subPath == "":
+		srv.handleUnsubscribe(w, r, id)
+	default:
+		return false
+	}
+	return true
+}
+
+// handleReport 接收 DS 的变更上报：POST /report，body={"dsId","vds","changes":[...]}。
+// 同步落库后 202（2xx 才会让 DS 的 journal 归档条目），不走 handleTypeEvent 的异步 channel。
+func (srv *Server) handleReport(w http.ResponseWriter, r *http.Request) {
+	reqBody, e := Http.LoadRequest(r)
+	if e != nil {
+		Http.ResponseJson(w, e, e.Status, srv.config.Http)
+		return
+	}
+	payload, ok := reqBody.(map[string]interface{})
+	if !ok {
+		Http.ResponseJson(w, "failed to parse request into JSON object", http.StatusBadRequest, srv.config.Http)
+		return
+	}
+	req := &Subscription.ReportRequest{}
+	if ex := Json.CopyTo(payload, req); ex != nil {
+		Http.ResponseJson(w, ex.Error(), http.StatusBadRequest, srv.config.Http)
+		return
+	}
+	resp, hx := srv.subs.Ingest(req)
+	if hx != nil {
+		Http.ResponseJson(w, hx, hx.Status, srv.config.Http)
+		return
+	}
+	Http.ResponseJson(w, resp, http.StatusAccepted, srv.config.Http)
+}
+
+// handleSubscribe 登记订阅：POST /subscription，body={"name","types","ds","from"}。
+func (srv *Server) handleSubscribe(w http.ResponseWriter, r *http.Request) {
+	reqBody, e := Http.LoadRequest(r)
+	if e != nil {
+		Http.ResponseJson(w, e, e.Status, srv.config.Http)
+		return
+	}
+	req := &Subscription.RegisterRequest{}
+	if payload, ok := reqBody.(map[string]interface{}); ok {
+		if ex := Json.CopyTo(payload, req); ex != nil {
+			Http.ResponseJson(w, ex.Error(), http.StatusBadRequest, srv.config.Http)
+			return
+		}
+	}
+	resp, hx := srv.subs.Register(req)
+	if hx != nil {
+		Http.ResponseJson(w, hx, hx.Status, srv.config.Http)
+		return
+	}
+	Http.ResponseJson(w, resp, http.StatusOK, srv.config.Http)
+}
+
+// handleListSubs 列出所有订阅：GET /subscription。
+func (srv *Server) handleListSubs(w http.ResponseWriter, r *http.Request) {
+	subs, hx := srv.subs.List()
+	if hx != nil {
+		Http.ResponseJson(w, hx, hx.Status, srv.config.Http)
+		return
+	}
+	Http.ResponseJson(w, subs, http.StatusOK, srv.config.Http)
+}
+
+// handleSubStatus 查询订阅状态：GET /subscription/{id}。
+func (srv *Server) handleSubStatus(w http.ResponseWriter, r *http.Request, id string) {
+	resp, hx := srv.subs.Get(id)
+	if hx != nil {
+		Http.ResponseJson(w, hx, hx.Status, srv.config.Http)
+		return
+	}
+	Http.ResponseJson(w, resp, http.StatusOK, srv.config.Http)
+}
+
+// handlePull 拉取变更：GET /subscription/{id}/changes?after={seq}&limit={n}。
+// after 缺省用登记的 cursor；读无副作用，订阅者应 ack 应答里的 next。
+func (srv *Server) handlePull(w http.ResponseWriter, r *http.Request, id string) {
+	query := r.URL.Query()
+	var after *uint64
+	if v := query.Get("after"); v != "" {
+		parsed, err := strconv.ParseUint(v, 10, 64)
+		if err != nil {
+			Http.ResponseJson(w, fmt.Sprintf("invalid after=[%s], expect uint64", v), http.StatusBadRequest, srv.config.Http)
+			return
+		}
+		after = &parsed
+	}
+	limit := 0
+	if v := query.Get("limit"); v != "" {
+		parsed, err := strconv.Atoi(v)
+		if err != nil || parsed < 0 {
+			Http.ResponseJson(w, fmt.Sprintf("invalid limit=[%s], expect non-negative int", v), http.StatusBadRequest, srv.config.Http)
+			return
+		}
+		limit = parsed
+	}
+	resp, hx := srv.subs.Pull(id, after, limit)
+	if hx != nil {
+		Http.ResponseJson(w, hx, hx.Status, srv.config.Http)
+		return
+	}
+	Http.ResponseJson(w, resp, http.StatusOK, srv.config.Http)
+}
+
+// handleAck 推进订阅游标：POST /subscription/{id}/ack，body={"cursor": N}。
+func (srv *Server) handleAck(w http.ResponseWriter, r *http.Request, id string) {
+	reqBody, e := Http.LoadRequest(r)
+	if e != nil {
+		Http.ResponseJson(w, e, e.Status, srv.config.Http)
+		return
+	}
+	payload, ok := reqBody.(map[string]interface{})
+	if !ok {
+		Http.ResponseJson(w, "failed to parse request into JSON object", http.StatusBadRequest, srv.config.Http)
+		return
+	}
+	req := &Subscription.AckRequest{}
+	if ex := Json.CopyTo(payload, req); ex != nil {
+		Http.ResponseJson(w, ex.Error(), http.StatusBadRequest, srv.config.Http)
+		return
+	}
+	resp, hx := srv.subs.Ack(id, req.Cursor)
+	if hx != nil {
+		Http.ResponseJson(w, hx, hx.Status, srv.config.Http)
+		return
+	}
+	Http.ResponseJson(w, resp, http.StatusOK, srv.config.Http)
+}
+
+// handleUnsubscribe 注销订阅：DELETE /subscription/{id}，幂等。
+func (srv *Server) handleUnsubscribe(w http.ResponseWriter, r *http.Request, id string) {
+	if hx := srv.subs.Delete(id); hx != nil {
+		Http.ResponseJson(w, hx, hx.Status, srv.config.Http)
+		return
+	}
+	Http.ResponseText(w, []byte(fmt.Sprintf("subscription [%s] deleted", id)), http.StatusOK, srv.config.Http)
 }
 
 // syncLoop 单 goroutine 串行执行同步，天然避免并发写 referral。

@@ -42,6 +42,16 @@ type SyncConfig struct {
 	IntervalSec int `json:"intervalSec"`
 }
 
+// SubscriptionConfig 记录变化订阅的清理参数，<=0 时使用默认值（见 Subscription 包的 Default* 常量）。
+type SubscriptionConfig struct {
+	// RetentionHours 变更保留时长（小时），即使订阅者未消费，超期也会被清理（默认 168 = 7 天）。
+	RetentionHours int `json:"retentionHours"`
+	// SubscriberTimeoutHours 订阅者无活动判死时长（小时），判死后删除订阅记录（默认 24）。
+	SubscriberTimeoutHours int `json:"subscriberTimeoutHours"`
+	// PruneIntervalSec 清理循环间隔（秒），默认 60。
+	PruneIntervalSec int `json:"pruneIntervalSec"`
+}
+
 type ServerConfig struct {
 	Database DbConfig.DatabaseConfig `json:"database"`
 	Http     Http.Config             `json:"http"`
@@ -49,6 +59,8 @@ type ServerConfig struct {
 	// PinnedSources 把 shared / mirrored vDS 的名字固定给某个来源（SourceId，/{vDS}/config 的 instanceId）：{"prod": "SHA256:..."}。
 	// 被固定的名字只给这个来源使用，不受注册先后影响。
 	PinnedSources map[string]string `json:"pinnedSources"`
+	// Subscription 记录变化订阅的清理参数。
+	Subscription SubscriptionConfig `json:"subscription"`
 }
 
 func Read(configPath string, config *ServerConfig) error {

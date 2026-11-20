@@ -89,7 +89,7 @@ UniTAO 由两类服务组成：
    - `DataHandler` 每次增 / 删 / 改 / PATCH 成功后调用 `AddJournal(type, id, before, after)`，按 `(type, id)` 分页存进 DS 自己的库。
    - `JournalHandler` 为每个 `(type, id)` 起一个 `JournalWorker`，按顺序把 entry 交给 `LoadProcesses` 注册的 `JournalProcess`。顺序只在单条记录内保证，没有全局序号。
    - 一页 entry 全部处理完、head 前移时，这一页会被删除（`JournalHeadForward` → `removeJournal`），不保留历史。
-   - 内置两个 process，都服务于 `indexTemplate`：`SchemaChanges` 在 schema 注册或删除时，经 Inventory 在被引用类型的 `cmtIdx` 里登记或撤销订阅；`CmtIndexChanges` 在数据变化时回填或清理被引用记录上的反向索引，可能跨 DS PATCH。shared vDS 另外注册 `Share.ChannelPublish`（排在内置 process 之后），把变更写进 outbox 供发布。mirrored vDS 没有 Journal。
+   - 内置两个 process，都服务于 `indexTemplate`：`SchemaChanges` 在 schema 注册或删除时，经 Inventory 在被引用类型的 `cmtIdx` 里登记或撤销订阅；`CmtIndexChanges` 在数据变化时回填或清理被引用记录上的反向索引，可能跨 DS PATCH。shared vDS 另外注册 `Share.ChannelPublish`（排在内置 process 之后），把变更写进 outbox 供发布。链接了 Inventory 的 DS（config 有 `inventory.url`）还会在每个有 Journal 的 vDS 上注册 `InvReport.Reporter`（也在 extra 位置，`setupJournal` 挂载），把每条变更的元数据上报给记录变化订阅系统（见第 8 条）。mirrored vDS 没有 Journal。
    - 要给写入加新的后续处理（如向外推送变更），就实现一个 `JournalProcess` 并在 `LoadProcesses` 里注册。不过 Journal 处理完就删，不能用来回放或审计。
 
 7. **虚拟 Data Service（vDS）**：一个 DS 实例上承载多个 vDS，每个 vDS 有独立的表、schema、Journal、锁，在 Inventory 中各自注册为一个 DS。
@@ -108,6 +108,13 @@ UniTAO 由两类服务组成：
    - git 写入：fetch → reset 到远端 → 只写自己的文件 → commit → push，被拒（`errRetry`）就从头重做（`fileStore.write`），不做 rebase。mirror 也要写通道（进度），所以要有写权限。
    - 运行时状态在 `state.json` 的 `vds` 下（每个 vDS 的 `initialized`、`table`、Inventory 分配的 id、镜像 cursor）。从 config 删除 mirrored 并重启会删表并从 Inventory 注销其 URL：待注销的 URL 先记进 `state.json` 的 `unregister`，启动时注销完才开始注册当前的 vDS（否则改 alias 后的新名字会因来源身份相同被合并进旧记录）。撞名被改名的镜像，给它配 `alias` 即可让 DS 路径和 Inventory 的 dsId 一致，但同一来源的所有副本要用同一个 alias。
    - 备份与重建：通道不需要备份。用同样配置从零重建的 shared 自动接管 folder（新 epoch），mirror 不改配置、重新订阅后整体替换；重建的 mirror 用新 subscriber id 重新订阅，旧进度文件超时后被删。两个运行中的实例配同一 folder 会每轮互相接管。
+
+8. **记录变化订阅（report / subscription）**：DS 把每条记录变更以**元数据**（不含记录内容）上报给 Inventory，客户端在 Inventory 上订阅并**拉取**。代码：`DataService/InvReport/`（DS 侧上报进程）、`InventoryService/Subscription/`（change log、订阅登记、pull/ack、清理），路由在 `InventoryServer`（在通用 method 分发之前拦截）。
+   - **上报**：每个有 Journal 的 vDS（local + shared；mirrored 没有 Journal，其副本变更从 shared 源头侧上报）经 `InvReport.Reporter` 把 journal entry 转成 `{ds, vds, type, id, op: upsert|delete, ver, ts}` 并 `POST {inventory.url}/report`。投递保证来自 journal 的重试语义：**至少一次**、单条记录内有序、失败条目留在 head 约 5 秒重投、DS 重启不丢（重复的变更幂等，最后写入生效）。schema 等 DS 内部类型不上报；未链接 Inventory（config 无 `inventory.url`）的 DS 不挂载。Inventory 地址在注册前未知时（dsId 为空）同样 503 重试。
+   - **change log**：Inventory 收到上报**同步落库**（202 = 已持久；不走 `/referral` 的异步 channel），在 Inventory 自己库的 `change` 表为每条变更分配**全局递增 seq**——行 id 为 20 位补零，计数器 `changeState/seq`，先写行再推进计数器，seq 永无空洞（与 Share 的 outbox 同构）；并发上报由 Manager 的进程内锁串行。
+   - **订阅**：`POST /subscription` 登记（`{name?, types?, ds?, from?}`，`types`/`ds` 为空 = 不过滤；缺省从当前 head 开始只收今后的，`from: 0` 回放保留期内全部），返回 `subscriberId`。`GET /subscription/{id}/changes?after={seq}&limit={n}` **读无副作用**（`after` 缺省用登记的 cursor），返回 `{changes, next, head, floor}`：`limit` 计**扫描数**而非匹配数，过滤型订阅靠 `next`（扫描水位）推进过不匹配的行；`POST /subscription/{id}/ack {"cursor": next}` 推进游标并刷新活跃时间（只前进，回退是 no-op）。游标落在已清理区间（`after+1 < floor`）返回 **410**，需重新订阅，绝不静默跳过。另有 `GET /subscription`（列表）、`GET /subscription/{id}`（状态）、`DELETE /subscription/{id}`（注销，幂等）。
+   - **清理**（`subscriptionLoop`，`subscription.pruneIntervalSec` 默认 60 秒）：删除所有活跃订阅者都已消费（`seq <= min(cursor)`）或超过保留期（`subscription.retentionHours` 默认 168 = 7 天）的变更行；`updated` 超过 `subscription.subscriberTimeoutHours`（默认 24 小时）无活动的订阅者判死删除（pull/ack 都算活动）。慢订阅者先撞保留期、得到显式 410，不会拿到丢失数据的假象。
+   - 语义：全局按 seq 有序、单记录内有序、跨记录无序；变更只含元数据，订阅者按需经 `GET /{type}/{ds}/{id}` 回查记录内容（delete 后查不到，正好由 op 表达）。
 
 ### REST API 概览
 
@@ -135,6 +142,13 @@ Data Service 的 URL 是 `/{vDS}/{type}[/{id}]`（`{vDS}` 为 `local`、`shared/
 | Inventory Service | `POST` | `/referral` | Data Service 上报类型变更事件，触发同步 |
 | Inventory Service | `DELETE` | `/{type}/{id}` | 删除 Inventory 本地记录（如 `inventory/{ds-id}`） |
 | Inventory Service | `DELETE` | `/inventory/{dsId}?url={url}` | 只移除一个副本 URL，没有剩余 URL 时删除整条记录 |
+| Inventory Service | `POST` | `/report` | DS 上报记录变更（元数据，见「记录变化订阅」），同步落库后 202 `{accepted, head}` |
+| Inventory Service | `POST` | `/subscription` | 登记订阅（`{name?, types?, ds?, from?}`），返回 `{subscriberId, cursor, head}` |
+| Inventory Service | `GET` | `/subscription` | 列出所有订阅 |
+| Inventory Service | `GET` | `/subscription/{id}` | 订阅状态（cursor、过滤条件、活跃时间） |
+| Inventory Service | `GET` | `/subscription/{id}/changes?after={seq}&limit={n}` | 拉取变更（读无副作用），返回 `{changes, next, head, floor}`；游标落在已清理区间返回 410 |
+| Inventory Service | `POST` | `/subscription/{id}/ack` | 推进游标（`{"cursor": N}`，只前进）并刷新活跃时间 |
+| Inventory Service | `DELETE` | `/subscription/{id}` | 注销订阅（幂等） |
 
 **Inventory 中 shared / mirrored vDS 的注册**（`allocateSignedDsId`）：以名字 + 来源身份（`instanceId` = `SourceId`，即通道地址）注册。同名同来源（镜像副本、shared 与它自己的镜像）合并 URL 成一条记录，有 shared 时 kind 保持 shared；同名不同来源的后来者改名为 `{name}-{来源 id 前 8 位}`；同来源不同名合并进已有记录；`pinnedSources` 把名字固定给某个来源 id。sync 时按各副本 `/config` 的 cursor 给 URL 排序（shared 源头最前）。同一类型同版本的 schema 在不同 DS 上内容不同时，后来的 DS 不进入该类型的 referral（D6）。
 
