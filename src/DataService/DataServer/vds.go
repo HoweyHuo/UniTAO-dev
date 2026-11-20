@@ -12,6 +12,7 @@ import (
 	"DataService/DataInit"
 	"DataService/DataJournal"
 	"DataService/DataJournal/ProcessIface"
+	"DataService/InvReport"
 	"DataService/Share"
 
 	"github.com/google/uuid"
@@ -264,6 +265,11 @@ func (srv *Server) initVds(vds *Vds, journalLogger *log.Logger) error {
 }
 
 func (srv *Server) setupJournal(vds *Vds, journalLogger *log.Logger, extra ...ProcessIface.JournalProcess) error {
+	if srv.invLinked() {
+		// 记录变化上报：注册为 extra process，local 与 shared vDS 都生效（mirrored 没有 Journal，
+		// 其副本变更从 shared 源头侧上报）。上报失败由 journal 自带的重试兜底（条目留在 head）。
+		extra = append(extra, InvReport.NewReporter(vds.Path, vds.InvId, srv.config.Inv.Url, journalLogger))
+	}
 	journal, err := DataJournal.NewJournalLib(srv.db, vds.Table, journalLogger)
 	if err != nil {
 		return fmt.Errorf("failed to create Journal Library. Error: %s", err)

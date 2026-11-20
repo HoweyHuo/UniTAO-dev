@@ -218,6 +218,48 @@ a shared vDS may only reference records inside the **same** shared vDS (checked 
  - `DELETE /inventory/{dsId}?url={url}` removes one replica URL; the record is deleted when no URL is left.
  - the same type with the same schema version but different content on two DS is a conflict: the later DS is left out of that type's referral and a warning is logged.
 
+## Record Change Subscription
+
+every Data Service that links an Inventory (`inventory.url` in its config) reports the **metadata** of each record change (create / update / delete - never the record content) to the Inventory:
+
+```
+DS write → journal → InvReport reporter → POST {inventory.url}/report
+```
+
+delivery is at-least-once and ordered per record: the reporter runs as a journal process, so a failed report keeps the journal entry and retries every ~5 s, across DS restarts. `schema` and other DS-internal types are not reported; mirrored vDS have no journal, their changes come from the shared source side.
+
+the Inventory appends every change to its own `change` log with a global, gap-free sequence number, and clients **subscribe and pull**:
+
+```
+POST http://localhost:8003/subscription                        # register, optional filters
+     {"name": "ui", "types": ["Server"], "ds": "DataService01"}
+# → {"subscriberId": "sub-…", "cursor": 42, "head": 42}        # from "now"; "from": 0 replays the retained log
+
+GET  http://localhost:8003/subscription/sub-…/changes?limit=100
+# → {"changes": [{"seq": 43, "ds": "DataService01", "vds": "local", "type": "Server",
+#               "id": "srv-1", "op": "upsert", "ver": "0.0.1", "ts": "…"}],
+#    "next": 43, "head": 43, "floor": 1}
+# side-effect free: "after" defaults to the stored cursor, "limit" counts scanned rows
+# so a filtered subscription advances past non-matching rows via "next"
+
+POST http://localhost:8003/subscription/sub-…/ack              # advance the cursor, refresh liveness
+     {"cursor": 43}
+```
+
+`GET /subscription/{id}` shows the status, `DELETE /subscription/{id}` unsubscribes (idempotent), `GET /subscription` lists all. a cursor that has fallen into the pruned region answers **410** - re-subscribe, data is never silently skipped.
+
+the Inventory prunes the log every minute: changes are deleted once every live subscriber has consumed them (`seq <= min(cursor)`) or when they exceed the retention period; subscriptions with no activity (no pull, no ack) for 24 h are reaped. all three values are configurable in the Inventory config:
+
+```json
+"subscription": {
+    "retentionHours": 168,            # keep changes for 7 days even if unconsumed
+    "subscriberTimeoutHours": 24,     # reap subscriptions silent for a day
+    "pruneIntervalSec": 60
+}
+```
+
+changes carry no record content on purpose - after receiving a change, fetch the record itself through the Inventory query API (`GET /{type}/{ds}/{id}`); a `delete` change tells you why the record is gone. duplicates are possible (at-least-once) and harmless: every change is a full upsert/delete of one record, the last write wins.
+
 ## Network Security Model
 
 the Inventory system (Inventory Service + every Data Service) is meant to live **entirely inside a protected internal network**. it must **never be reachable from the public internet**.

@@ -37,6 +37,7 @@ import (
 	"Data/DbIface"
 	"InventoryService/InvRecord"
 	"InventoryService/RefRecord"
+	"InventoryService/Subscription"
 
 	"github.com/salesforce/UniTAO/lib/Schema"
 	"github.com/salesforce/UniTAO/lib/Schema/JsonKey"
@@ -105,7 +106,7 @@ func (h *Handler) init() error {
 	if err != nil {
 		return err
 	}
-	for _, name := range []string{Schema.Inventory, RefRecord.Referral} {
+	for _, name := range []string{Schema.Inventory, RefRecord.Referral, Subscription.KeyChange, Subscription.KeySubscription} {
 		tblExists := false
 		for _, tbl := range tbList {
 			if tbl == name {
