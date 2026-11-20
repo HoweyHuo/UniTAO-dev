@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"DataService/Common"
@@ -88,10 +89,7 @@ func (r *Reporter) ProcessEntry(dataType string, dataId string, entry *ProcessIf
 	if entry == nil {
 		return Http.NewHttpError(fmt.Sprintf("journal entry of [%s/%s] is nil", dataType, dataId), http.StatusNotModified)
 	}
-	change := Change{Type: dataType, Id: dataId, Ts: entry.Time}
-	if change.Ts == "" {
-		change.Ts = time.Now().UTC().Format(time.RFC3339)
-	}
+	change := Change{Type: dataType, Id: dataId, Ts: normalizeTs(entry.Time)}
 	if entry.After == nil {
 		change.Op = OpDelete
 		if entry.Before != nil {
@@ -102,6 +100,32 @@ func (r *Reporter) ProcessEntry(dataType string, dataId string, entry *ProcessIf
 		change.Ver, _ = entry.After[Record.Version].(string)
 	}
 	return r.ProcessChanges([]Change{change})
+}
+
+// goTimeLayout 与 time.Time.String() 的格式一致；journal 的 entry.Time 用它写入
+// （DataJournal/journalLib.go：time.Now().String()），带 UTC 时区时形如
+// "2026-11-20 07:29:57.240172258 +0000 UTC m=+131.568673789"。
+const goTimeLayout = "2006-01-02 15:04:05.999999999 -0700 MST"
+
+// normalizeTs 把 journal entry 时间归一化为 RFC3339 UTC。
+// entry.Time 是 Go 默认 String() 格式（含单调时钟读数，截断 " m=" 之后解析）；
+// 已是 RFC3339 则原样换算；解析不了（或为空）退回报送时刻，误差为 journal 处理延迟（秒级）。
+func normalizeTs(entryTime string) string {
+	now := func() string { return time.Now().UTC().Format(time.RFC3339) }
+	if entryTime == "" {
+		return now()
+	}
+	if t, err := time.Parse(time.RFC3339, entryTime); err == nil {
+		return t.UTC().Format(time.RFC3339)
+	}
+	raw := entryTime
+	if idx := strings.Index(raw, " m="); idx >= 0 {
+		raw = raw[:idx]
+	}
+	if t, err := time.Parse(goTimeLayout, raw); err == nil {
+		return t.UTC().Format(time.RFC3339)
+	}
+	return now()
 }
 
 // ProcessChanges 把一组变更元数据 POST 给 Inventory。任何失败（传输错误或非 2xx）

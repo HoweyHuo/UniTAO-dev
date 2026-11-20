@@ -306,6 +306,44 @@ func TestRegisterDefaults(t *testing.T) {
 	}
 }
 
+// TestPruneKeepsUnparseableTs 时间无法解析的行（如旧版 DS 上报的 Go 默认格式时间）
+// 不按保留期删除，只随 cursor 消费清理——坏元数据不销毁数据。
+func TestPruneKeepsUnparseableTs(t *testing.T) {
+	mgr, clock := newMgr(t)
+	clock.apply(mgr)
+
+	ingest(t, mgr, "ds1", Subscription.Change{Type: "a", Id: "1", Op: Subscription.OpUpsert, Ts: "2026-11-20 07:29:57.240172258 +0000 UTC m=+131.568673789"})
+	ingest(t, mgr, "ds1", Subscription.Change{Type: "a", Id: "2", Op: Subscription.OpUpsert, Ts: tsAt(clock, time.Second)})
+	sub := mustRegister(t, mgr, &Subscription.RegisterRequest{From: u64(0)})
+
+	// 快进超过保留期，先 ack 刷新活跃（cursor 不动）：
+	// 可解析的行（ts 在快进前 ingest，已超保留期）被保留期删除；解析不了的行保留
+	clock.now = clock.now.Add(200 * time.Hour)
+	mgr.SetRetention(time.Hour)
+	if _, hx := mgr.Ack(sub.SubscriberId, 0); hx != nil {
+		t.Fatalf("ack failed: %s", hx.Message)
+	}
+	if err := mgr.Prune(); err != nil {
+		t.Fatalf("prune failed: %s", err)
+	}
+	resp := mustPull(t, mgr, sub.SubscriberId, nil, 10)
+	if len(resp.Changes) != 1 || resp.Changes[0].Id != "1" {
+		t.Fatalf("only the unparseable-ts row must survive retention, got %d changes: %+v", len(resp.Changes), resp.Changes)
+	}
+
+	// 消费后随 cursor 清理
+	if _, hx := mgr.Ack(sub.SubscriberId, 2); hx != nil {
+		t.Fatalf("ack failed: %s", hx.Message)
+	}
+	if err := mgr.Prune(); err != nil {
+		t.Fatalf("prune failed: %s", err)
+	}
+	resp = mustPull(t, mgr, sub.SubscriberId, nil, 10)
+	if len(resp.Changes) != 0 {
+		t.Fatalf("consumed rows must be pruned, got %d", len(resp.Changes))
+	}
+}
+
 func TestPruneCursorVsRetention(t *testing.T) {
 	mgr, clock := newMgr(t)
 	clock.apply(mgr)
