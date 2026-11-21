@@ -101,9 +101,14 @@ func subscriptionList(t *testing.T, inv *invNode) []map[string]interface{} {
 	if !ok {
 		t.Fatalf("subscription list is not an array: %s", resp.Body)
 	}
+	// 每项是记录信封 {__id, __type, __ver, data}，返回其 data（订阅字段）
 	result := []map[string]interface{}{}
 	for _, item := range list {
-		sub, _ := item.(map[string]interface{})
+		envelope, _ := item.(map[string]interface{})
+		if envelope["__type"] != "subscription" {
+			t.Fatalf("subscription list item is not a subscription record envelope: %v", item)
+		}
+		sub, _ := envelope["data"].(map[string]interface{})
 		result = append(result, sub)
 	}
 	return result

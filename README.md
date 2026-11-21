@@ -244,6 +244,8 @@ POST http://ui.internal:9000/events
 
 a failed push is never retried and reports to no one - it only marks the subscription `unreachable` with the latest error (visible in `GET /subscription`, throttled writes); a later successful push clears the mark. a subscription whose heartbeat stops for longer than its declared lease is swept (`subscription.sweepIntervalSec`, default 60 s; default lease 24 h). the registry lives in the Inventory database, so an Inventory restart resumes pushing with no wait - heartbeats exist only for garbage collection.
 
+a subscription is a schema-described Inventory type: `GET /schema/subscription` returns its schema, and the registration payload is validated against it. `GET /subscription` lists the records as envelopes (`{__id, __type, __ver, data}`, the subscription fields in `data`); the record id is a hash of the endpoint (`sub-` + 16 hex digits). records left by older versions are migrated by the sweep (also once at Inventory start): records without an endpoint (pull-model era) are removed, records keyed by the raw endpoint are moved to the hashed id.
+
 **correctness is the subscriber's own job**: events only accelerate convergence. a subscriber must periodically reconcile - `GET /{type}?ver=1` returns `[{ds, id, ver}]`, so the diff finds adds/removes by id and updates by ver without re-fetching unchanged records. bootstrap in this order: register -> full query -> then rely on pushes (the overlap is idempotent); after downtime or a restart, reconcile once. `DELETE /subscription?url={endpoint}` unsubscribes (idempotent).
 
 ## Network Security Model

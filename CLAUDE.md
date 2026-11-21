@@ -112,8 +112,8 @@ UniTAO 由两类服务组成：
 8. **记录变化订阅（report / subscription，推送模型）**：DS 把记录变更以**记录位置**（`{ds, type, id}`，不含内容、不含操作）通知给 Inventory，Inventory 推送到订阅者提供的 endpoint。事件是 **best-effort 的脏标记**：「推送加速收敛，对账保证正确」——Inventory 是 source of truth，订阅者收到位置后回查（`GET /{type}/{ds}/{id}`，404 = 删除），漏掉的事件由订阅者自己的周期对账弥补。代码：`DataService/InvReport/`（DS 侧通知进程）、`InventoryService/Subscription/`（注册表 + 推送扇出 + 租约清扫），路由在 `InventoryServer`（在通用 method 分发之前拦截）。
    - **上报**：每个有 Journal 的 vDS（local + shared；mirrored 没有 Journal，其副本变更从 shared 源头侧上报）经 `InvReport.Reporter` 把 journal entry 转成 `{dsId, changes: [{type, id}]}` 并 `POST {inventory.url}/report`（单次 5 秒超时）。**失败即弃**：dsId 未分配、Inventory 不可达、非 2xx 都只记日志、返回 nil——journal 条目照常归档，**不重试、不滞留 head**（上报是通知不是写后处理，Inventory 宕机不拖慢其它 JournalProcess）。schema 等 DS 内部类型不上报；未链接 Inventory（config 无 `inventory.url`）的 DS 不挂载。op/ver/ts 一律不带：op 由回查推导（在 = 当前态，404 = 删除），ver/时间由对账替代（DS 侧不再有 `normalizeTs`）。
    - **推送**：Inventory 收到上报 → 校验、以 dsId 盖章 `ds` → 进有界分发队列（容量 1024，满则整批丢弃并记日志——best-effort 通道里丢弃是显式设计）→ 即返 202 `{accepted}`（受理 ≠ 送达）。分发 goroutine 按注册表过滤（`types`/`ds` 空 = 不过滤）后**每订阅者一个 goroutine、带 5 秒超时** POST `{"changes": [{ds, type, id}]}` 到其 endpoint；转发完即忘，不记录已推送什么。推送失败**不重试、不向任何人报错**，只在订阅者记录上标注 `unreachable` + `lastError`（节流写回，最小间隔 60 秒）；成功的推送清除标注（一次写）。失败不导致停用：下一条事件照推。
-   - **注册表**：Inventory 自己库的 `subscription` 表，`endpoint`（http(s) URL）为主键，`POST /subscription` 登记/心跳是**幂等 upsert**（刷新 `registered`、更新 `types`/`ds`/`ttlSec`，保留 `created` 与健康标注——心跳只证明订阅者活着，不证明 endpoint 可达）。订阅者声明租约 `ttlSec`（默认 86400，下限 60）。**Inventory 重启推流零等待恢复**（注册表持久化，心跳只是 GC 信号）。
-   - **清理**（`sweepLoop`，`subscription.sweepIntervalSec` 默认 60 秒）：删除超过 TTL 未心跳的订阅——纯垃圾回收，判据是订阅者自己声明的租约，判错的代价只是下次心跳重新注册。**判死只看心跳缺席，不看推送失败**：活着但 endpoint 坏的订阅者留在表里，`unreachable` 标注给运维看（`GET /subscription`）。`Registered` 解析不了的记录跳过不删（坏元数据不销毁注册，等下次心跳重写修复）。
+   - **注册表**：Inventory 自己库的 `subscription` 表。subscription 是 **schema 描述的 Inventory 内部类型**（与 inventory / referral 同批，`DataHandler.InvTypes`）：结构由 `Subscription.SchemaRecord` 定义，经 `GET /schema/subscription` 自文档，注册载荷先经 `lib/Schema` 校验（结构、类型、未知字段），http(s) URL 与 `ttlSec` 下限这类 schema 方言表达不了的语义约束留在 Go 里；加字段 = 提一版新 schema。记录 `__id` 是 endpoint 的哈希（`subId`：`sub-` + sha256 前 16 位十六进制，记录 id 不允许含 `/`），endpoint 本体在 `data` 里，`POST /subscription` 登记/心跳是**幂等 upsert**（刷新 `registered`、更新 `types`/`ds`/`ttlSec`，保留 `created` 与健康标注——心跳只证明订阅者活着，不证明 endpoint 可达）。订阅者声明租约 `ttlSec`（默认 86400，下限 60）。**Inventory 重启推流零等待恢复**（注册表持久化，心跳只是 GC 信号）。
+   - **清理**（`sweepLoop`，`subscription.sweepIntervalSec` 默认 60 秒）：删除超过 TTL 未心跳的订阅——纯垃圾回收，判据是订阅者自己声明的租约，判错的代价只是下次心跳重新注册。**判死只看心跳缺席，不看推送失败**：活着但 endpoint 坏的订阅者留在表里，`unreachable` 标注给运维看（`GET /subscription`）。`Registered` 解析不了的记录跳过不删（坏元数据不销毁注册，等下次心跳重写修复）。删除一律按记录的真实 `__id`（运行时视图带 `recordId`），不按 `subId(endpoint)` 重算。**旧版本记录的迁移**（`Sweep` 每轮执行、Inventory 启动时先执行一次，幂等）：没有 endpoint 的记录（拉取模式 PR #70 每次注册都新建、没有 endpoint 与 `registered`，既不能心跳也不能注销）直接删除；`__id` 不是 `subId(endpoint)` 的记录（推送模式初版 PR #75 以 endpoint 原文为 `__id`）改存到哈希 id（已有同 endpoint 的新记录时保留新的）再删旧记录。迁移前这些旧记录不参与推送，避免同一 endpoint 重复推送。
    - **订阅者契约**（正确性完全由这一条承担，staleness 上界 = 对账周期）：① 周期对账——`GET /{type}?ver=1` 拿 `{ds, id, ver}` 列表与本地 diff：id 对不上 = 新增/删除，ver 对不上 = 更新，其余跳过（DS 侧 `GET /{vDS}/{type}?ver=1` 提供版本；不带 `?ver=1` 的列表仍是 `{ds}/{id}` 字符串数组，旧消费者不受影响）。② bootstrap 顺序：先注册 → 全量查询 → 收推送；推送与查询快照的重叠天然幂等（位置触发回查，回查返回当前态）。③ 重启/离线回来 → 对账一次（没有任何 gap 信号，纯靠自律）；推送不可区分「安静」与「停流」，心跳自愈 Inventory 重启。
 
 ### REST API 概览
@@ -144,7 +144,8 @@ Data Service 的 URL 是 `/{vDS}/{type}[/{id}]`（`{vDS}` 为 `local`、`shared/
 | Inventory Service | `DELETE` | `/inventory/{dsId}?url={url}` | 只移除一个副本 URL，没有剩余 URL 时删除整条记录 |
 | Inventory Service | `POST` | `/report` | DS 上报记录位置（`{dsId, changes: [{type, id}]}`，见「记录变化订阅」），进分发队列即 202 `{accepted}`；受理 ≠ 送达 |
 | Inventory Service | `POST` | `/subscription` | 登记/心跳订阅（`{endpoint, name?, types?, ds?, ttlSec?}`，同一 endpoint 幂等 upsert），Inventory 向 endpoint 推送变更位置 |
-| Inventory Service | `GET` | `/subscription` | 列出所有订阅（含 `unreachable`/`lastError` 健康标注） |
+| Inventory Service | `GET` | `/subscription` | 列出所有订阅：每项是记录信封 `{__id, __type, __ver, data}`，订阅字段（含 `unreachable`/`lastError` 健康标注）在 `data` 里 |
+| Inventory Service | `GET` | `/schema/subscription` | 订阅记录的 schema |
 | Inventory Service | `DELETE` | `/subscription?url={endpoint}` | 注销订阅（幂等） |
 
 **Inventory 中 shared / mirrored vDS 的注册**（`allocateSignedDsId`）：以名字 + 来源身份（`instanceId` = `SourceId`，即通道地址）注册。同名同来源（镜像副本、shared 与它自己的镜像）合并 URL 成一条记录，有 shared 时 kind 保持 shared；同名不同来源的后来者改名为 `{name}-{来源 id 前 8 位}`；同来源不同名合并进已有记录；`pinnedSources` 把名字固定给某个来源 id。sync 时按各副本 `/config` 的 cursor 给 URL 排序（shared 源头最前）。同一类型同版本的 schema 在不同 DS 上内容不同时，后来的 DS 不进入该类型的 referral（D6）。
@@ -206,7 +207,7 @@ test/                          # 集成测试与单元测试
     SchemaPathTest/            # 路径查询引擎测试
     UtilTest/                  # 工具函数测试
     DataServiceTest/           # 集成测试（需要运行中的服务）；子目录 InvReportTest/ 记录变化订阅的 DS 侧通知进程单测（载荷形状、失败不阻塞 journal、journal 集成）
-    InventoryServiceTest/      # 记录变化订阅的 Inventory 侧单测（注册校验与幂等心跳、推送扇出与过滤、失败标注不重试、租约清扫）
+    InventoryServiceTest/      # 记录变化订阅的 Inventory 侧单测（注册校验与幂等心跳、推送扇出与过滤、失败标注不重试、租约清扫、旧版本记录迁移、subscription schema）
     VdsTest/                   # vDS / Channel 测试：进程内起 DS + Inventory（内存库 MemDb），含 git 通道；subscription_test.go 是订阅系统端到端（上报→推送→失败标注/恢复→宕机不回填→对账列表?ver=1）
 ```
 

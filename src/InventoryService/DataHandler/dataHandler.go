@@ -59,9 +59,10 @@ type Handler struct {
 }
 
 var InvTypes = map[string]bool{
-	Schema.Inventory:    true,
-	RefRecord.Referral:  true,
-	SchemaPath.PathName: true,
+	Schema.Inventory:             true,
+	RefRecord.Referral:           true,
+	SchemaPath.PathName:          true,
+	Subscription.KeySubscription: true,
 }
 
 var EditableTypes = map[string]bool{
@@ -362,6 +363,8 @@ func (h *Handler) GetSchemaRecord(dataType string) (*Record.Record, *Http.HttpEr
 			record, _ = Record.LoadStr(InvRecord.SchemaRecord)
 		case SchemaPath.PathName:
 			record, _ = Record.LoadStr(SchemaPath.PathDataSchema)
+		case Subscription.KeySubscription:
+			record, _ = Record.LoadStr(Subscription.SchemaRecord)
 		default:
 			return nil, Http.NewHttpError(fmt.Sprintf("don't know how to get schema for Inventory Type[%s]", dataType), http.StatusInternalServerError)
 		}
