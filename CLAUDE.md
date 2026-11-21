@@ -89,7 +89,7 @@ UniTAO 由两类服务组成：
    - `DataHandler` 每次增 / 删 / 改 / PATCH 成功后调用 `AddJournal(type, id, before, after)`，按 `(type, id)` 分页存进 DS 自己的库。
    - `JournalHandler` 为每个 `(type, id)` 起一个 `JournalWorker`，按顺序把 entry 交给 `LoadProcesses` 注册的 `JournalProcess`。顺序只在单条记录内保证，没有全局序号。
    - 一页 entry 全部处理完、head 前移时，这一页会被删除（`JournalHeadForward` → `removeJournal`），不保留历史。
-   - 内置两个 process，都服务于 `indexTemplate`：`SchemaChanges` 在 schema 注册或删除时，经 Inventory 在被引用类型的 `cmtIdx` 里登记或撤销订阅；`CmtIndexChanges` 在数据变化时回填或清理被引用记录上的反向索引，可能跨 DS PATCH。shared vDS 另外注册 `Share.ChannelPublish`（排在内置 process 之后），把变更写进 outbox 供发布。链接了 Inventory 的 DS（config 有 `inventory.url`）还会在每个有 Journal 的 vDS 上注册 `InvReport.Reporter`（也在 extra 位置，`setupJournal` 挂载），把每条变更的元数据上报给记录变化订阅系统（见第 8 条）。mirrored vDS 没有 Journal。
+   - 内置两个 process，都服务于 `indexTemplate`：`SchemaChanges` 在 schema 注册或删除时，经 Inventory 在被引用类型的 `cmtIdx` 里登记或撤销订阅；`CmtIndexChanges` 在数据变化时回填或清理被引用记录上的反向索引，可能跨 DS PATCH。shared vDS 另外注册 `Share.ChannelPublish`（排在内置 process 之后），把变更写进 outbox 供发布。链接了 Inventory 的 DS（config 有 `inventory.url`）还会在每个有 Journal 的 vDS 上注册 `InvReport.Reporter`（也在 extra 位置，`setupJournal` 挂载），把每条变更的记录位置通知给记录变化订阅系统（best-effort，失败只记日志、见第 8 条）。mirrored vDS 没有 Journal。
    - 要给写入加新的后续处理（如向外推送变更），就实现一个 `JournalProcess` 并在 `LoadProcesses` 里注册。不过 Journal 处理完就删，不能用来回放或审计。
 
 7. **虚拟 Data Service（vDS）**：一个 DS 实例上承载多个 vDS，每个 vDS 有独立的表、schema、Journal、锁，在 Inventory 中各自注册为一个 DS。
@@ -109,12 +109,12 @@ UniTAO 由两类服务组成：
    - 运行时状态在 `state.json` 的 `vds` 下（每个 vDS 的 `initialized`、`table`、Inventory 分配的 id、镜像 cursor）。从 config 删除 mirrored 并重启会删表并从 Inventory 注销其 URL：待注销的 URL 先记进 `state.json` 的 `unregister`，启动时注销完才开始注册当前的 vDS（否则改 alias 后的新名字会因来源身份相同被合并进旧记录）。撞名被改名的镜像，给它配 `alias` 即可让 DS 路径和 Inventory 的 dsId 一致，但同一来源的所有副本要用同一个 alias。
    - 备份与重建：通道不需要备份。用同样配置从零重建的 shared 自动接管 folder（新 epoch），mirror 不改配置、重新订阅后整体替换；重建的 mirror 用新 subscriber id 重新订阅，旧进度文件超时后被删。两个运行中的实例配同一 folder 会每轮互相接管。
 
-8. **记录变化订阅（report / subscription）**：DS 把每条记录变更以**元数据**（不含记录内容）上报给 Inventory，客户端在 Inventory 上订阅并**拉取**。代码：`DataService/InvReport/`（DS 侧上报进程）、`InventoryService/Subscription/`（change log、订阅登记、pull/ack、清理），路由在 `InventoryServer`（在通用 method 分发之前拦截）。
-   - **上报**：每个有 Journal 的 vDS（local + shared；mirrored 没有 Journal，其副本变更从 shared 源头侧上报）经 `InvReport.Reporter` 把 journal entry 转成 `{ds, vds, type, id, op: upsert|delete, ver, ts}` 并 `POST {inventory.url}/report`。`ts` 经 `normalizeTs` 归一化为 **RFC3339 UTC** 后才上报，不是 journal 的原始 `entry.Time`——那是 Go 默认 `String()` 格式，含单调时钟读数（`... +0000 UTC m=+131.568673789`），Inventory 解析不了：截掉 ` m=` 之后按 Go 格式解析并换算；已是 RFC3339 则直接换算为 UTC；解析不了或为空退回报送时刻（误差为 journal 处理延迟，秒级）。投递保证来自 journal 的重试语义：**至少一次**、单条记录内有序、失败条目留在 head 约 5 秒重投、DS 重启不丢（重复的变更幂等，最后写入生效）。schema 等 DS 内部类型不上报；未链接 Inventory（config 无 `inventory.url`）的 DS 不挂载。Inventory 地址在注册前未知时（dsId 为空）同样 503 重试。
-   - **change log**：Inventory 收到上报**同步落库**（202 = 已持久；不走 `/referral` 的异步 channel），在 Inventory 自己库的 `change` 表为每条变更分配**全局递增 seq**——行 id 为 20 位补零，计数器 `changeState/seq`，先写行再推进计数器，seq 永无空洞（与 Share 的 outbox 同构）；并发上报由 Manager 的进程内锁串行。
-   - **订阅**：`POST /subscription` 登记（`{name?, types?, ds?, from?}`，`types`/`ds` 为空 = 不过滤；缺省从当前 head 开始只收今后的，`from: 0` 回放保留期内全部），返回 `subscriberId`。`GET /subscription/{id}/changes?after={seq}&limit={n}` **读无副作用**（`after` 缺省用登记的 cursor），返回 `{changes, next, head, floor}`：`limit` 计**扫描数**而非匹配数，过滤型订阅靠 `next`（扫描水位）推进过不匹配的行；`POST /subscription/{id}/ack {"cursor": next}` 推进游标并刷新活跃时间（只前进，回退是 no-op）。游标落在已清理区间（`after+1 < floor`）返回 **410**，需重新订阅，绝不静默跳过。另有 `GET /subscription`（列表）、`GET /subscription/{id}`（状态）、`DELETE /subscription/{id}`（注销，幂等）。
-   - **清理**（`subscriptionLoop`，`subscription.pruneIntervalSec` 默认 60 秒）：删除所有活跃订阅者都已消费（`seq <= min(cursor)`）或超过保留期（`subscription.retentionHours` 默认 168 = 7 天）的变更行；时间解析不了的行（如旧版 DS 上报的 Go 格式时间）**不**按保留期删除，只随 cursor 消费清理——坏元数据不销毁数据；`updated` 超过 `subscription.subscriberTimeoutHours`（默认 24 小时）无活动的订阅者判死删除（pull/ack 都算活动）。慢订阅者先撞保留期、得到显式 410，不会拿到丢失数据的假象。
-   - 语义：全局按 seq 有序、单记录内有序、跨记录无序；变更只含元数据，订阅者按需经 `GET /{type}/{ds}/{id}` 回查记录内容（delete 后查不到，正好由 op 表达）。
+8. **记录变化订阅（report / subscription，推送模型）**：DS 把记录变更以**记录位置**（`{ds, type, id}`，不含内容、不含操作）通知给 Inventory，Inventory 推送到订阅者提供的 endpoint。事件是 **best-effort 的脏标记**：「推送加速收敛，对账保证正确」——Inventory 是 source of truth，订阅者收到位置后回查（`GET /{type}/{ds}/{id}`，404 = 删除），漏掉的事件由订阅者自己的周期对账弥补。代码：`DataService/InvReport/`（DS 侧通知进程）、`InventoryService/Subscription/`（注册表 + 推送扇出 + 租约清扫），路由在 `InventoryServer`（在通用 method 分发之前拦截）。
+   - **上报**：每个有 Journal 的 vDS（local + shared；mirrored 没有 Journal，其副本变更从 shared 源头侧上报）经 `InvReport.Reporter` 把 journal entry 转成 `{dsId, changes: [{type, id}]}` 并 `POST {inventory.url}/report`（单次 5 秒超时）。**失败即弃**：dsId 未分配、Inventory 不可达、非 2xx 都只记日志、返回 nil——journal 条目照常归档，**不重试、不滞留 head**（上报是通知不是写后处理，Inventory 宕机不拖慢其它 JournalProcess）。schema 等 DS 内部类型不上报；未链接 Inventory（config 无 `inventory.url`）的 DS 不挂载。op/ver/ts 一律不带：op 由回查推导（在 = 当前态，404 = 删除），ver/时间由对账替代（DS 侧不再有 `normalizeTs`）。
+   - **推送**：Inventory 收到上报 → 校验、以 dsId 盖章 `ds` → 进有界分发队列（容量 1024，满则整批丢弃并记日志——best-effort 通道里丢弃是显式设计）→ 即返 202 `{accepted}`（受理 ≠ 送达）。分发 goroutine 按注册表过滤（`types`/`ds` 空 = 不过滤）后**每订阅者一个 goroutine、带 5 秒超时** POST `{"changes": [{ds, type, id}]}` 到其 endpoint；转发完即忘，不记录已推送什么。推送失败**不重试、不向任何人报错**，只在订阅者记录上标注 `unreachable` + `lastError`（节流写回，最小间隔 60 秒）；成功的推送清除标注（一次写）。失败不导致停用：下一条事件照推。
+   - **注册表**：Inventory 自己库的 `subscription` 表，`endpoint`（http(s) URL）为主键，`POST /subscription` 登记/心跳是**幂等 upsert**（刷新 `registered`、更新 `types`/`ds`/`ttlSec`，保留 `created` 与健康标注——心跳只证明订阅者活着，不证明 endpoint 可达）。订阅者声明租约 `ttlSec`（默认 86400，下限 60）。**Inventory 重启推流零等待恢复**（注册表持久化，心跳只是 GC 信号）。
+   - **清理**（`sweepLoop`，`subscription.sweepIntervalSec` 默认 60 秒）：删除超过 TTL 未心跳的订阅——纯垃圾回收，判据是订阅者自己声明的租约，判错的代价只是下次心跳重新注册。**判死只看心跳缺席，不看推送失败**：活着但 endpoint 坏的订阅者留在表里，`unreachable` 标注给运维看（`GET /subscription`）。`Registered` 解析不了的记录跳过不删（坏元数据不销毁注册，等下次心跳重写修复）。
+   - **订阅者契约**（正确性完全由这一条承担，staleness 上界 = 对账周期）：① 周期对账——`GET /{type}?ver=1` 拿 `{ds, id, ver}` 列表与本地 diff：id 对不上 = 新增/删除，ver 对不上 = 更新，其余跳过（DS 侧 `GET /{vDS}/{type}?ver=1` 提供版本；不带 `?ver=1` 的列表仍是 `{ds}/{id}` 字符串数组，旧消费者不受影响）。② bootstrap 顺序：先注册 → 全量查询 → 收推送；推送与查询快照的重叠天然幂等（位置触发回查，回查返回当前态）。③ 重启/离线回来 → 对账一次（没有任何 gap 信号，纯靠自律）；推送不可区分「安静」与「停流」，心跳自愈 Inventory 重启。
 
 ### REST API 概览
 
@@ -134,7 +134,7 @@ Data Service 的 URL 是 `/{vDS}/{type}[/{id}]`（`{vDS}` 为 `local`、`shared/
 | Data Service | `PATCH` | `/{vDS}/{type}/{id}[/{attrPath}]` | 部分更新 Record；请求体是 JSON 值（字符串发 `"abc"`），不是合法 JSON 时按原文本处理 |
 | Data Service | `DELETE` | `/{vDS}/{type}/{id}` | 删除 Record |
 | Data Service | `GET` | `/{vDS}/schema[/{type}]` | 列出 / 查询已注册的 Schema |
-| Inventory Service | `GET` | `/{type}` | 列出所有 DS 上该类型的 id，**始终**为 `{ds}/{id}` |
+| Inventory Service | `GET` | `/{type}` | 列出所有 DS 上该类型的 id，**始终**为 `{ds}/{id}`；`?ver=1` 改返回 `[{ds, id, ver}]`（订阅者对账用） |
 | Inventory Service | `GET` | `/{type}/{ds}[/{id}[/{attrPath}]]` | 跨 DS 查询 Record，必须带 ds；沿引用展开时先在起始记录的 vDS 内找，找不到再全局查找 |
 | Inventory Service | `GET` | `/schema` | 列出所有已同步的类型 |
 | Inventory Service | `GET` | `/referral[/{type}]` | 查询类型到 Data Service 的映射 |
@@ -142,13 +142,10 @@ Data Service 的 URL 是 `/{vDS}/{type}[/{id}]`（`{vDS}` 为 `local`、`shared/
 | Inventory Service | `POST` | `/referral` | Data Service 上报类型变更事件，触发同步 |
 | Inventory Service | `DELETE` | `/{type}/{id}` | 删除 Inventory 本地记录（如 `inventory/{ds-id}`） |
 | Inventory Service | `DELETE` | `/inventory/{dsId}?url={url}` | 只移除一个副本 URL，没有剩余 URL 时删除整条记录 |
-| Inventory Service | `POST` | `/report` | DS 上报记录变更（元数据，见「记录变化订阅」），同步落库后 202 `{accepted, head}` |
-| Inventory Service | `POST` | `/subscription` | 登记订阅（`{name?, types?, ds?, from?}`），返回 `{subscriberId, cursor, head}` |
-| Inventory Service | `GET` | `/subscription` | 列出所有订阅 |
-| Inventory Service | `GET` | `/subscription/{id}` | 订阅状态（cursor、过滤条件、活跃时间） |
-| Inventory Service | `GET` | `/subscription/{id}/changes?after={seq}&limit={n}` | 拉取变更（读无副作用），返回 `{changes, next, head, floor}`；游标落在已清理区间返回 410 |
-| Inventory Service | `POST` | `/subscription/{id}/ack` | 推进游标（`{"cursor": N}`，只前进）并刷新活跃时间 |
-| Inventory Service | `DELETE` | `/subscription/{id}` | 注销订阅（幂等） |
+| Inventory Service | `POST` | `/report` | DS 上报记录位置（`{dsId, changes: [{type, id}]}`，见「记录变化订阅」），进分发队列即 202 `{accepted}`；受理 ≠ 送达 |
+| Inventory Service | `POST` | `/subscription` | 登记/心跳订阅（`{endpoint, name?, types?, ds?, ttlSec?}`，同一 endpoint 幂等 upsert），Inventory 向 endpoint 推送变更位置 |
+| Inventory Service | `GET` | `/subscription` | 列出所有订阅（含 `unreachable`/`lastError` 健康标注） |
+| Inventory Service | `DELETE` | `/subscription?url={endpoint}` | 注销订阅（幂等） |
 
 **Inventory 中 shared / mirrored vDS 的注册**（`allocateSignedDsId`）：以名字 + 来源身份（`instanceId` = `SourceId`，即通道地址）注册。同名同来源（镜像副本、shared 与它自己的镜像）合并 URL 成一条记录，有 shared 时 kind 保持 shared；同名不同来源的后来者改名为 `{name}-{来源 id 前 8 位}`；同来源不同名合并进已有记录；`pinnedSources` 把名字固定给某个来源 id。sync 时按各副本 `/config` 的 cursor 给 URL 排序（shared 源头最前）。同一类型同版本的 schema 在不同 DS 上内容不同时，后来的 DS 不进入该类型的 referral（D6）。
 
@@ -208,9 +205,9 @@ test/                          # 集成测试与单元测试
     SchemaTest/                # Schema 引擎单元测试
     SchemaPathTest/            # 路径查询引擎测试
     UtilTest/                  # 工具函数测试
-    DataServiceTest/           # 集成测试（需要运行中的服务）；子目录 InvReportTest/ 记录变化订阅的 DS 侧上报进程单测（转换矩阵、503 重试、journal 集成）
-    InventoryServiceTest/      # 记录变化订阅的 Inventory 侧协议单测（change log seq、pull/ack 游标、过滤、410 gap、判死清理）
-    VdsTest/                   # vDS / Channel 测试：进程内起 DS + Inventory（内存库 MemDb），含 git 通道；subscription_test.go 是订阅系统端到端（上报→订阅→拉取→ack→宕机补收→判死）
+    DataServiceTest/           # 集成测试（需要运行中的服务）；子目录 InvReportTest/ 记录变化订阅的 DS 侧通知进程单测（载荷形状、失败不阻塞 journal、journal 集成）
+    InventoryServiceTest/      # 记录变化订阅的 Inventory 侧单测（注册校验与幂等心跳、推送扇出与过滤、失败标注不重试、租约清扫）
+    VdsTest/                   # vDS / Channel 测试：进程内起 DS + Inventory（内存库 MemDb），含 git 通道；subscription_test.go 是订阅系统端到端（上报→推送→失败标注/恢复→宕机不回填→对账列表?ver=1）
 ```
 
 ### 辅助目录
@@ -326,15 +323,17 @@ go test ./test/src/UtilTest/...
 go test ./test/src/DataServiceTest/...
 
 # 记录变化订阅系统（全部无外部依赖，MemDb / httptest）
-# DS 侧上报进程单测：HandleType 矩阵、entry→change 转换、失败重试、journal 集成（成功归档 / 失败保留）
+# DS 侧通知进程单测：HandleType 矩阵、载荷只含位置（无 op/ver/ts）、失败不阻塞 journal（条目照常归档）
 go test ./test/src/DataServiceTest/InvReportTest/...
-# Inventory 侧 Manager 协议单测：seq 分配与连续性、pull/ack 游标语义（next 扫描水位、回退 no-op）、
-# 过滤（types/ds）、410 gap、注册默认值与钳位、判死清理与保留期兜底
+# Inventory 侧单测：注册校验与幂等心跳（同 endpoint upsert、ttl 钳位）、推送扇出与过滤、
+# 失败标注（unreachable + lastError）不重试、成功清除标注、租约清扫（TTL 过期删、心跳保活）
 go test ./test/src/InventoryServiceTest/...
 # 端到端（进程内 DS + Inventory，走真实 HTTP 路由）：
-# TestReportSubscribePullAck（上报→订阅→拉取→ack→注销）、TestSubscriptionFilteredWatermark（过滤订阅逐条推进）、
-# TestReportRetryWhenInventoryDownAndRestart（Inventory 宕机 + DS 重启补收）、TestStaleSubscriberReaping（判死清理）
-go test ./test/src/VdsTest/... -run 'TestReport|TestSubscription|TestStaleSubscriber'
+# TestReportPushFanout（上报→推送位置→update/delete 同形状）、TestSubscriptionFilters（types 过滤）、
+# TestPushFailureAnnotationAndRecovery（失败标注→不重试→恢复清除标注）、TestRegisterHeartbeatUnregister、
+# TestSubscriberLeaseSweep（TTL 清扫）、TestNoBackfillWhenInventoryComesBack（宕机通知丢弃不回填）、
+# TestListWithVer（对账列表 ?ver=1）
+go test ./test/src/VdsTest/... -run 'TestReport|TestSubscription|TestPush|TestRegister|TestSubscriber|TestNoBackfill|TestListWithVer'
 
 # 运行单个测试函数
 go test ./test/src/SchemaTest/... -run TestSchemaOps

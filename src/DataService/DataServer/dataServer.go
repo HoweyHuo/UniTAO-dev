@@ -319,7 +319,7 @@ func (srv *Server) handler(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		srv.handleGet(w, vds, dataType, idPath)
+		srv.handleGet(w, r, vds, dataType, idPath)
 	case http.MethodPost:
 		srv.handlePost(w, r, vds, dataType, idPath)
 	case http.MethodDelete:
@@ -360,8 +360,22 @@ func (srv *Server) handleVdsRoot(w http.ResponseWriter, vds *Vds) {
 	Http.ResponseJson(w, result, http.StatusOK, srv.config.Http)
 }
 
-func (srv *Server) handleGet(w http.ResponseWriter, vds *Vds, dataType string, idPath string) {
+func (srv *Server) handleGet(w http.ResponseWriter, r *http.Request, vds *Vds, dataType string, idPath string) {
 	if idPath == "" {
+		// 列表请求的查询串挂在类型名上（/{type}?ver=1）；深路径的查询串是属性路径查询的一部分，不动
+		if idx := strings.Index(dataType, "?"); idx >= 0 {
+			dataType = dataType[:idx]
+		}
+		if r.URL.Query().Get("ver") == "1" {
+			srv.log.Printf("list id+ver of [%s/%s]", vds.Path, dataType)
+			verList, err := vds.Handler.ListVer(dataType)
+			if err != nil {
+				Http.ResponseJson(w, err, err.Status, srv.config.Http)
+				return
+			}
+			Http.ResponseJson(w, verList, http.StatusOK, srv.config.Http)
+			return
+		}
 		srv.log.Printf("list id of [%s/%s]", vds.Path, dataType)
 		idList, err := vds.Handler.List(dataType)
 		if err != nil {

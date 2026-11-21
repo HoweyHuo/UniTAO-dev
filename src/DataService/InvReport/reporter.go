@@ -1,58 +1,54 @@
-// Package InvReport 把本 vDS 的每一条记录变更以元数据（不含记录内容）上报给
-// Inventory Service（记录变化订阅系统：POST {inventory.url}/report）。
+// Package InvReport 把本 vDS 的记录变更以记录位置（不含内容、不含操作）通知给
+// Inventory Service（POST {inventory.url}/report），由 Inventory 推送给订阅者。
 //
+// 通知是 best-effort 的脏标记：发送失败只记日志，永不向 journal 返回错误——
+// 条目照常归档，不重试、不滞留 head。订阅者收到位置后回查 Inventory 拿当前态，
+// 漏掉的通知由订阅者自己的周期对账弥补（Inventory 是 source of truth）。
 // 以 JournalProcess 形式挂载（setupJournal 的 extra 参数，local 与 shared vDS 都生效；
-// mirrored vDS 没有 Journal，其副本变更从 shared 源头侧上报）。投递保证来自 journal
-// 自带的重试语义：处理失败条目留在 head、约 5 秒重投、单条记录内有序、DS 重启后不丢，
-// 即至少一次（at-least-once）投递，Inventory 侧按全局 seq 排序。
+// mirrored vDS 没有 Journal，其副本变更从 shared 源头侧上报）；schema 等 DS 内部类型不上报。
 package InvReport
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
-	"strings"
 	"time"
 
 	"DataService/Common"
 	"DataService/DataJournal/ProcessIface"
 
-	"github.com/salesforce/UniTAO/lib/Schema/Record"
 	"github.com/salesforce/UniTAO/lib/Util/Http"
 )
 
 const (
 	Name       = "InvReport"
 	ReportPath = "report"
-	// OpUpsert / OpDelete 与 DataService/Channel 的操作名一致。
-	OpUpsert = "upsert"
-	OpDelete = "delete"
+	// DefaultReportTimeoutSec 单次上报的超时：Inventory 卡住不能拖住 journal worker。
+	DefaultReportTimeoutSec = 5
 )
 
-// Change 是一条不携带记录内容的变更元数据；订阅者按需经 Inventory 查询接口取记录本身。
+// Change 是一条不携带内容与操作的记录位置；ds 由 Inventory 以请求里的 dsId 盖章。
 type Change struct {
 	Type string `json:"type"`
 	Id   string `json:"id"`
-	Op   string `json:"op"`
-	Ver  string `json:"ver,omitempty"` // 记录 __ver
-	Ts   string `json:"ts,omitempty"`  // 变更时间（journal entry 时间）
 }
 
-// reportRequest 是 POST {inv}/report 的请求体。当前每个 journal entry 发一条 change，
-// 协议按数组设计，为后续批量上报留口。
+// reportRequest 是 POST {inv}/report 的请求体。按数组设计，为批量上报留口。
 type reportRequest struct {
 	DsId    string   `json:"dsId"`
-	Vds     string   `json:"vds,omitempty"` // vDS 路径（local、shared/{name}），仅作展示
 	Changes []Change `json:"changes"`
 }
 
-// Reporter 是把变更元数据上报给 Inventory 的 Journal process。
+// Reporter 把变更位置通知给 Inventory 的 Journal process。
 type Reporter struct {
 	vdsPath string
 	// invId 返回本 vDS 在 Inventory 的 dsId（self registration 分配，此前为空串）。
 	invId  func() string
 	invUrl string
 	log    *log.Logger
+	client *http.Client
 }
 
 // NewReporter 创建上报进程；invUrl 为空（DS 未链接 Inventory）时进程对任何类型都不生效。
@@ -60,7 +56,13 @@ func NewReporter(vdsPath string, invId func() string, invUrl string, logger *log
 	if logger == nil {
 		logger = log.Default()
 	}
-	return &Reporter{vdsPath: vdsPath, invId: invId, invUrl: invUrl, log: logger}
+	return &Reporter{
+		vdsPath: vdsPath,
+		invId:   invId,
+		invUrl:  invUrl,
+		log:     logger,
+		client:  &http.Client{Timeout: time.Duration(DefaultReportTimeoutSec) * time.Second},
+	}
 }
 
 func (r *Reporter) Name() string {
@@ -83,76 +85,55 @@ func (r *Reporter) HandleType(dataType string, version string) (bool, error) {
 	return true, nil
 }
 
-// ProcessEntry 把一条 journal entry 转成一条变更并 POST 给 Inventory。
-// After 为空 = 删除，否则 = upsert（创建与更新共用，Ver 取写入后的记录版本）。
+// ProcessEntry 把一条 journal entry 的记录位置 POST 给 Inventory。
+// 任何失败（dsId 未分配、Inventory 不可达、非 2xx）都只记日志并返回 nil：
+// journal 条目照常归档，本进程不承诺送达。
 func (r *Reporter) ProcessEntry(dataType string, dataId string, entry *ProcessIface.JournalEntry) *Http.HttpError {
 	if entry == nil {
 		return Http.NewHttpError(fmt.Sprintf("journal entry of [%s/%s] is nil", dataType, dataId), http.StatusNotModified)
 	}
-	change := Change{Type: dataType, Id: dataId, Ts: normalizeTs(entry.Time)}
-	if entry.After == nil {
-		change.Op = OpDelete
-		if entry.Before != nil {
-			change.Ver, _ = entry.Before[Record.Version].(string)
-		}
-	} else {
-		change.Op = OpUpsert
-		change.Ver, _ = entry.After[Record.Version].(string)
-	}
-	return r.ProcessChanges([]Change{change})
+	r.ProcessChanges([]Change{{Type: dataType, Id: dataId}})
+	return nil
 }
 
-// goTimeLayout 与 time.Time.String() 的格式一致；journal 的 entry.Time 用它写入
-// （DataJournal/journalLib.go：time.Now().String()），带 UTC 时区时形如
-// "2026-11-20 07:29:57.240172258 +0000 UTC m=+131.568673789"。
-const goTimeLayout = "2006-01-02 15:04:05.999999999 -0700 MST"
-
-// normalizeTs 把 journal entry 时间归一化为 RFC3339 UTC。
-// entry.Time 是 Go 默认 String() 格式（含单调时钟读数，截断 " m=" 之后解析）；
-// 已是 RFC3339 则原样换算；解析不了（或为空）退回报送时刻，误差为 journal 处理延迟（秒级）。
-func normalizeTs(entryTime string) string {
-	now := func() string { return time.Now().UTC().Format(time.RFC3339) }
-	if entryTime == "" {
-		return now()
-	}
-	if t, err := time.Parse(time.RFC3339, entryTime); err == nil {
-		return t.UTC().Format(time.RFC3339)
-	}
-	raw := entryTime
-	if idx := strings.Index(raw, " m="); idx >= 0 {
-		raw = raw[:idx]
-	}
-	if t, err := time.Parse(goTimeLayout, raw); err == nil {
-		return t.UTC().Format(time.RFC3339)
-	}
-	return now()
-}
-
-// ProcessChanges 把一组变更元数据 POST 给 Inventory。任何失败（传输错误或非 2xx）
-// 都返回 503，journal 保留条目稍后重试；dsId 未分配（self registration 未完成）同样 503。
-func (r *Reporter) ProcessChanges(changes []Change) *Http.HttpError {
+// ProcessChanges 把一组记录位置 POST 给 Inventory；失败即弃，不重试。
+func (r *Reporter) ProcessChanges(changes []Change) {
 	if len(changes) == 0 {
-		return nil
+		return
 	}
 	dsId := ""
 	if r.invId != nil {
 		dsId = r.invId()
 	}
 	if dsId == "" {
-		return Http.NewHttpError(fmt.Sprintf("dsId of vDS [%s] not assigned yet (self registration pending)", r.vdsPath), http.StatusServiceUnavailable)
+		r.Log(fmt.Sprintf("dsId not assigned yet (self registration pending), drop %d change notification(s)", len(changes)))
+		return
 	}
 	url, err := Http.URLPathJoin(r.invUrl, ReportPath)
 	if err != nil {
-		return Http.NewHttpError(fmt.Sprintf("failed to build report url for inventory=[%s], Error: %s", r.invUrl, err), http.StatusServiceUnavailable)
+		r.Log(fmt.Sprintf("failed to build report url for inventory=[%s], Error: %s", r.invUrl, err))
+		return
 	}
-	payload := reportRequest{DsId: dsId, Vds: r.vdsPath, Changes: changes}
-	resp, code, err := Http.SubmitPayload(*url, http.MethodPost, nil, payload)
+	body, err := json.Marshal(reportRequest{DsId: dsId, Changes: changes})
+	if err != nil {
+		r.Log(fmt.Sprintf("failed to marshal report of %d change(s), Error: %s", len(changes), err))
+		return
+	}
+	request, err := http.NewRequest(http.MethodPost, *url, bytes.NewReader(body))
+	if err != nil {
+		r.Log(fmt.Sprintf("failed to build report request to [%s], Error: %s", *url, err))
+		return
+	}
+	request.Header.Set("Content-Type", "application/json")
+	resp, err := r.client.Do(request)
 	if resp != nil && resp.Body != nil {
 		resp.Body.Close()
 	}
 	if err != nil {
-		return Http.NewHttpError(fmt.Sprintf("failed to report [%d] change(s) of vDS [%s] to inventory [%s] (code=%d), Error: %s",
-			len(changes), r.vdsPath, r.invUrl, code, err), http.StatusServiceUnavailable)
+		r.Log(fmt.Sprintf("failed to report [%d] change(s) of vDS [%s] to inventory [%s], Error: %s", len(changes), r.vdsPath, r.invUrl, err))
+		return
 	}
-	return nil
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		r.Log(fmt.Sprintf("inventory [%s] rejected report of [%d] change(s) with code=%d, drop", r.invUrl, len(changes), resp.StatusCode))
+	}
 }

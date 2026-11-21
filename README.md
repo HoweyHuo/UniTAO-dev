@@ -220,45 +220,31 @@ a shared vDS may only reference records inside the **same** shared vDS (checked 
 
 ## Record Change Subscription
 
-every Data Service that links an Inventory (`inventory.url` in its config) reports the **metadata** of each record change (create / update / delete - never the record content) to the Inventory:
+every Data Service that links an Inventory (`inventory.url` in its config) notifies the Inventory of each record change with the **record position only** - `ds`, `type`, `id`; never the content, never the operation:
 
 ```
-DS write → journal → InvReport reporter → POST {inventory.url}/report
+DS write -> journal -> InvReport reporter -> POST {inventory.url}/report -> Inventory pushes to subscribers
 ```
 
-delivery is at-least-once and ordered per record: the reporter runs as a journal process, so a failed report keeps the journal entry and retries every ~5 s, across DS restarts. `schema` and other DS-internal types are not reported; mirrored vDS have no journal, their changes come from the shared source side.
+events are **best-effort dirty markers**. the Inventory is the source of truth: on receiving a position, a subscriber fetches the record through the Inventory query api (`GET /{type}/{ds}/{id}`) - a 404 means the record was deleted. delivery carries no guarantee anywhere: the reporter drops failed notifications (a 5 s timeout, then log and move on - the journal entry is archived either way), and the Inventory pushes each batch to every matching subscriber with no retry. `schema` and other DS-internal types are not reported; mirrored vDS have no journal, their changes come from the shared source side.
 
-the Inventory appends every change to its own `change` log with a global, gap-free sequence number, and clients **subscribe and pull**:
+subscribers give the Inventory an endpoint to push to; the same endpoint registers idempotently (re-register as a heartbeat):
 
 ```
-POST http://localhost:8003/subscription                        # register, optional filters
-     {"name": "ui", "types": ["Server"], "ds": "DataService01"}
-# → {"subscriberId": "sub-…", "cursor": 42, "head": 42}        # from "now"; "from": 0 replays the retained log
+POST http://localhost:8003/subscription
+     {"endpoint": "http://ui.internal:9000/events", "name": "ui",
+      "types": ["Server"],          # optional filter; missing = all types
+      "ds": "DataService01",        # optional filter; missing = all DS
+      "ttlSec": 86400}              # lease the subscriber declares for itself
 
-GET  http://localhost:8003/subscription/sub-…/changes?limit=100
-# → {"changes": [{"seq": 43, "ds": "DataService01", "vds": "local", "type": "Server",
-#               "id": "srv-1", "op": "upsert", "ver": "0.0.1", "ts": "…"}],
-#    "next": 43, "head": 43, "floor": 1}
-# side-effect free: "after" defaults to the stored cursor, "limit" counts scanned rows
-# so a filtered subscription advances past non-matching rows via "next"
-
-POST http://localhost:8003/subscription/sub-…/ack              # advance the cursor, refresh liveness
-     {"cursor": 43}
+# the Inventory pushes to the endpoint:
+POST http://ui.internal:9000/events
+     {"changes": [{"ds": "DataService01", "type": "Server", "id": "srv-1"}]}
 ```
 
-`GET /subscription/{id}` shows the status, `DELETE /subscription/{id}` unsubscribes (idempotent), `GET /subscription` lists all. a cursor that has fallen into the pruned region answers **410** - re-subscribe, data is never silently skipped.
+a failed push is never retried and reports to no one - it only marks the subscription `unreachable` with the latest error (visible in `GET /subscription`, throttled writes); a later successful push clears the mark. a subscription whose heartbeat stops for longer than its declared lease is swept (`subscription.sweepIntervalSec`, default 60 s; default lease 24 h). the registry lives in the Inventory database, so an Inventory restart resumes pushing with no wait - heartbeats exist only for garbage collection.
 
-the Inventory prunes the log every minute: changes are deleted once every live subscriber has consumed them (`seq <= min(cursor)`) or when they exceed the retention period; subscriptions with no activity (no pull, no ack) for 24 h are reaped. all three values are configurable in the Inventory config:
-
-```json
-"subscription": {
-    "retentionHours": 168,            # keep changes for 7 days even if unconsumed
-    "subscriberTimeoutHours": 24,     # reap subscriptions silent for a day
-    "pruneIntervalSec": 60
-}
-```
-
-changes carry no record content on purpose - after receiving a change, fetch the record itself through the Inventory query API (`GET /{type}/{ds}/{id}`); a `delete` change tells you why the record is gone. duplicates are possible (at-least-once) and harmless: every change is a full upsert/delete of one record, the last write wins.
+**correctness is the subscriber's own job**: events only accelerate convergence. a subscriber must periodically reconcile - `GET /{type}?ver=1` returns `[{ds, id, ver}]`, so the diff finds adds/removes by id and updates by ver without re-fetching unchanged records. bootstrap in this order: register -> full query -> then rely on pushes (the overlap is idempotent); after downtime or a restart, reconcile once. `DELETE /subscription?url={endpoint}` unsubscribes (idempotent).
 
 ## Network Security Model
 

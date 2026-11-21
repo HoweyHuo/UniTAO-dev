@@ -42,14 +42,10 @@ type SyncConfig struct {
 	IntervalSec int `json:"intervalSec"`
 }
 
-// SubscriptionConfig 记录变化订阅的清理参数，<=0 时使用默认值（见 Subscription 包的 Default* 常量）。
+// SubscriptionConfig 记录变化订阅的参数，<=0 时使用默认值（见 Subscription 包的 Default* 常量）。
 type SubscriptionConfig struct {
-	// RetentionHours 变更保留时长（小时），即使订阅者未消费，超期也会被清理（默认 168 = 7 天）。
-	RetentionHours int `json:"retentionHours"`
-	// SubscriberTimeoutHours 订阅者无活动判死时长（小时），判死后删除订阅记录（默认 24）。
-	SubscriberTimeoutHours int `json:"subscriberTimeoutHours"`
-	// PruneIntervalSec 清理循环间隔（秒），默认 60。
-	PruneIntervalSec int `json:"pruneIntervalSec"`
+	// SweepIntervalSec 租约清扫循环间隔（秒），默认 60；TTL 由订阅者注册时自行声明。
+	SweepIntervalSec int `json:"sweepIntervalSec"`
 }
 
 type ServerConfig struct {

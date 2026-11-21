@@ -182,6 +182,33 @@ func (h *Handler) List(dataType string) ([]interface{}, *Http.HttpError) {
 	return result, nil
 }
 
+// ListVer 列出类型的 {id, ver}（GET /{vDS}/{type}?ver=1）。Inventory 的对账列表
+// （GET /{type}?ver=1）经此拿到版本，ver 不变的记录无需回查内容。
+func (h *Handler) ListVer(dataType string) ([]interface{}, *Http.HttpError) {
+	if dataType != JsonKey.Schema && dataType != "" {
+		_, err := h.LocalData(JsonKey.Schema, dataType)
+		if err != nil {
+			return nil, Http.WrapError(err, fmt.Sprintf("object of type “%s” does not exist", dataType), err.Status)
+		}
+	}
+	if dataType == "" {
+		dataType = JsonKey.Schema
+	}
+	recordList, e := h.QueryDb(dataType, "")
+	if e != nil {
+		return nil, Http.NewHttpError(e.Error(), http.StatusInternalServerError)
+	}
+	result := make([]interface{}, 0, len(recordList))
+	for _, record := range recordList {
+		ver, _ := record[Record.Version].(string)
+		result = append(result, map[string]interface{}{
+			"id":  record[Record.DataId].(string),
+			"ver": ver,
+		})
+	}
+	return result, nil
+}
+
 func (h *Handler) Get(dataType string, idPath string) (interface{}, *Http.HttpError) {
 	if dataType == JsonKey.Schema {
 		id, version, ex := SchemaDoc.ParseDataType(idPath)

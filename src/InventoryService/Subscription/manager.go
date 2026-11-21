@@ -1,11 +1,24 @@
+// Package Subscription 实现记录变化订阅的 Inventory 侧：订阅者注册表（endpoint 为主键，
+// 存 Inventory 自己库的 subscription 表）与变更推送（report 到达即异步扇出，转发完即忘）。
+//
+// 事件是 best-effort 的脏标记：载荷只有记录位置（ds/type/id），不带 op/ver/ts——
+// 订阅者收到后回查 Inventory（GET /{type}/{ds}/{id}，404 = 删除）。推送失败不重试、
+// 不向任何人报错，只在订阅者记录上标注不可达与最新错误（节流写回，给运维看，不驱动逻辑）；
+// 成功的推送清除标注。Inventory 不为订阅者保留任何事件数据：没有 change 表、没有游标、
+// 没有 ack。正确性由订阅者自己的周期性对账承担（GET /{type}?ver=1 拿 {ds,id,ver} 列表 diff）。
+//
+// 订阅者的存活用租约表达：注册/心跳是幂等 upsert（POST /subscription），超过 TTL 没有心跳
+// 的记录被周期清扫（Sweep）删除——这是纯 GC，判错的代价只是下次心跳重新注册。
+// 判死只看心跳缺席，不看推送失败：活着但 endpoint 坏的订阅者留在表里被运维看见。
 package Subscription
 
 import (
-	"crypto/rand"
-	"encoding/hex"
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 
@@ -17,118 +30,112 @@ import (
 )
 
 const (
-	// OpUpsert / OpDelete 与 DataService/Channel 的操作名一致。
-	OpUpsert = "upsert"
-	OpDelete = "delete"
+	// KeySubscription 订阅注册表的类型名与表名。
+	KeySubscription = "subscription"
+	stateVer        = "0.0.1"
 
-	// DefaultRetentionHours 变更保留时长：即使订阅者落后也最多保留 7 天。
-	DefaultRetentionHours = 168
-	// DefaultSubscriberTimeoutHours 订阅者无活动（pull/ack 都算）判死的时长。
-	DefaultSubscriberTimeoutHours = 24
-	// DefaultPullLimit / MaxPullLimit 单次拉取的扫描行数上下限。
-	DefaultPullLimit = 100
-	MaxPullLimit     = 1000
+	// ReportPath 是 DS 上报变更的路由段（POST /report）。
+	ReportPath = "report"
+	// SubPath 是订阅路由段（/subscription）。
+	SubPath = "subscription"
+
+	// DefaultTtlSec 订阅者未声明 ttlSec 时的默认租约（24 小时）。
+	DefaultTtlSec = 86400
+	// MinTtlSec 租约下限：心跳间隔必须远小于租约，过短的租约没有意义。
+	MinTtlSec = 60
+	// DefaultPushTimeoutSec 单次推送的超时：慢订阅者不能占用推送资源太久。
+	DefaultPushTimeoutSec = 5
+	// EventQueueCap 分发队列容量：满则丢弃（best-effort，丢弃要显式）。
+	EventQueueCap = 1024
+	// MarkThrottleSec 失败标注写回的最小间隔：死订阅者 + 事件密集时避免每事件一次写。
+	MarkThrottleSec = 60
 )
 
-// Subscription 是一个订阅者的登记记录（__id = Id）。
+// Subscription 是一个订阅者的注册记录（__id = Endpoint）。
 type Subscription struct {
-	Id      string   `json:"id"`
-	Name    string   `json:"name,omitempty"`
-	Types   []string `json:"types,omitempty"` // 空 = 所有类型
-	Ds      string   `json:"ds,omitempty"`    // 空 = 所有 DS
-	Cursor  uint64   `json:"cursor"`          // 已确认消费到的 seq
-	Created string   `json:"created"`
-	Updated string   `json:"updated"` // 最近一次 pull/ack 的活跃时间
+	Endpoint string   `json:"endpoint"` // 接收推送的 URL，主键：同一 endpoint 重复注册 = 幂等 upsert
+	Name     string   `json:"name,omitempty"`
+	Types    []string `json:"types,omitempty"`  // 空 = 所有类型
+	Ds       string   `json:"ds,omitempty"`     // 空 = 所有 DS
+	TtlSec   int      `json:"ttlSec,omitempty"` // 订阅者声明的租约；0 = 默认值
+	Created  string   `json:"created"`
+	// Registered 最近一次注册/心跳时间；超过 TTL 未心跳被 Sweep 删除。
+	Registered string `json:"registered"`
+	// Unreachable / LastError / LastAttempt 是最近一次推送的健康标注，只给人看。
+	Unreachable bool   `json:"unreachable,omitempty"`
+	LastError   string `json:"lastError,omitempty"`
+	LastAttempt string `json:"lastAttempt,omitempty"`
 }
 
-// RegisterRequest 注册订阅。From 为 nil 时从注册时刻的 head 开始（只收今后的变更）；
-// From=0 表示回放保留期内的全部历史；From=N>0 表示从 seq=N+1 开始（落在已清理区间时首次 pull 得 410）。
+// RegisterRequest 注册（或心跳）订阅。同一 endpoint 幂等 upsert：刷新租约、更新过滤条件。
 type RegisterRequest struct {
-	Name  string   `json:"name,omitempty"`
-	Types []string `json:"types,omitempty"`
-	Ds    string   `json:"ds,omitempty"`
-	From  *uint64  `json:"from,omitempty"`
+	Endpoint string   `json:"endpoint"`
+	Name     string   `json:"name,omitempty"`
+	Types    []string `json:"types,omitempty"`
+	Ds       string   `json:"ds,omitempty"`
+	TtlSec   int      `json:"ttlSec,omitempty"`
 }
 
-type RegisterResponse struct {
-	SubscriberId string `json:"subscriberId"`
-	Cursor       uint64 `json:"cursor"` // 实际起始游标
-	Head         uint64 `json:"head"`
+// Change 是一条变更通知，只携带记录位置：订阅者经 `GET /{type}/{ds}/{id}` 回查，
+// 记录不存在即删除。不带 op/ver/ts——那些都能由回查推导或对账替代。
+type Change struct {
+	Ds   string `json:"ds"`
+	Type string `json:"type"`
+	Id   string `json:"id"`
 }
 
-// PullResponse 是 GET /subscription/{id}/changes 的应答。
-// Next 是本次扫描水位：订阅者应 ack 该值（或下次以 after=Next 续读）。
-type PullResponse struct {
-	SubscriberId string   `json:"subscriberId"`
-	After        uint64   `json:"after"`
-	Head         uint64   `json:"head"`
-	Floor        uint64   `json:"floor,omitempty"` // 现存最老 seq（空 log 时为 head+1）
-	Changes      []Change `json:"changes"`
-	Next         uint64   `json:"next"`
-}
-
-type AckRequest struct {
-	Cursor uint64 `json:"cursor"`
-}
-
-type AckResponse struct {
-	SubscriberId string `json:"subscriberId"`
-	Cursor       uint64 `json:"cursor"`
-}
-
-type StatusResponse struct {
-	Subscription Subscription `json:"subscription"`
-	Head         uint64       `json:"head"`
-}
-
-// ReportRequest 是 DS 上报（POST /report）的请求体；Changes 里的 Seq/Ds/Vds 由服务端填充。
+// ReportRequest 是 DS 上报（POST /report）的请求体；Ds 由服务端以 dsId 盖章。
 type ReportRequest struct {
 	DsId    string   `json:"dsId"`
-	Vds     string   `json:"vds,omitempty"`
 	Changes []Change `json:"changes"`
 }
 
+// ReportResponse 只报告受理数量：受理 ≠ 送达，推送是 best-effort。
 type ReportResponse struct {
-	Accepted int    `json:"accepted"`
-	Head     uint64 `json:"head"`
+	Accepted int `json:"accepted"`
 }
 
-// Options 是 Prune 的清理参数，<=0 时使用默认值。
+// PushRequest 是推送给订阅者的 body。
+type PushRequest struct {
+	Changes []Change `json:"changes"`
+}
+
+// Options 是推送参数，<=0 时使用默认值。
 type Options struct {
-	RetentionHours         int
-	SubscriberTimeoutHours int
+	PushTimeoutSec int
 }
 
-// Manager 管理 Inventory 自己库里的 change 日志与订阅记录。
-// 单进程假设：全部操作经一把进程内锁串行，与 DataSync 的 syncLock 同一并发模型。
+// Manager 管理订阅注册表与推送扇出。单进程假设：注册表操作经一把进程内锁串行
+// （与 DataSync 的 syncLock 同一并发模型）；推送在独立 goroutine 里带超时执行。
 type Manager struct {
-	db        DbIface.Database
-	lock      sync.Mutex
-	now       func() time.Time
-	retention time.Duration
-	timeout   time.Duration
-	log       *log.Logger
+	db       DbIface.Database
+	lock     sync.Mutex
+	now      func() time.Time
+	log      *log.Logger
+	events   chan *ReportRequest
+	client   *http.Client
+	markMu   sync.Mutex
+	lastMark map[string]time.Time // 失败标注的节流（内存缓存，丢了只多写一次）
 }
 
 func NewManager(db DbIface.Database, opts Options, logger *log.Logger) *Manager {
 	if logger == nil {
 		logger = log.Default()
 	}
-	retention := time.Duration(DefaultRetentionHours) * time.Hour
-	if opts.RetentionHours > 0 {
-		retention = time.Duration(opts.RetentionHours) * time.Hour
+	timeout := time.Duration(DefaultPushTimeoutSec) * time.Second
+	if opts.PushTimeoutSec > 0 {
+		timeout = time.Duration(opts.PushTimeoutSec) * time.Second
 	}
-	timeout := time.Duration(DefaultSubscriberTimeoutHours) * time.Hour
-	if opts.SubscriberTimeoutHours > 0 {
-		timeout = time.Duration(opts.SubscriberTimeoutHours) * time.Hour
+	m := &Manager{
+		db:       db,
+		now:      time.Now,
+		log:      logger,
+		events:   make(chan *ReportRequest, EventQueueCap),
+		client:   &http.Client{Timeout: timeout},
+		lastMark: map[string]time.Time{},
 	}
-	return &Manager{
-		db:        db,
-		now:       time.Now,
-		retention: retention,
-		timeout:   timeout,
-		log:       logger,
-	}
+	go m.dispatchLoop()
+	return m
 }
 
 // SetClock 替换时钟（测试用），同 Share.Publisher.SetClock。
@@ -136,22 +143,12 @@ func (m *Manager) SetClock(now func() time.Time) {
 	m.now = now
 }
 
-// SetRetention 替换保留时长（测试用）。
-func (m *Manager) SetRetention(d time.Duration) {
-	m.retention = d
-}
-
-// SetSubscriberTimeout 替换订阅者判死时长（测试用）。
-func (m *Manager) SetSubscriberTimeout(d time.Duration) {
-	m.timeout = d
-}
-
 func (m *Manager) nowStr() string {
 	return m.now().UTC().Format(time.RFC3339)
 }
 
-// Ingest 同步落库一批上报的变更：分配连续全局 seq（先写行、后推进计数器），
-// 返回即代表已持久（2xx 才会让 DS 的 journal 归档条目）。
+// Ingest 受理一批上报：校验、盖章、进入分发队列后即返回（202）。
+// 队列满则整批丢弃并记日志——best-effort 通道里丢弃是设计行为，不阻塞 DS。
 func (m *Manager) Ingest(req *ReportRequest) (*ReportResponse, *Http.HttpError) {
 	if req.DsId == "" {
 		return nil, Http.NewHttpError("missing dsId in change report", http.StatusBadRequest)
@@ -163,281 +160,226 @@ func (m *Manager) Ingest(req *ReportRequest) (*ReportResponse, *Http.HttpError) 
 		if change.Type == "" || change.Id == "" {
 			return nil, Http.NewHttpError(fmt.Sprintf("changes[%d] missing type or id", idx), http.StatusBadRequest)
 		}
-		if change.Op != OpUpsert && change.Op != OpDelete {
-			return nil, Http.NewHttpError(fmt.Sprintf("changes[%d] invalid op=[%s], only [%s, %s] supported", idx, change.Op, OpUpsert, OpDelete), http.StatusBadRequest)
-		}
 	}
-	m.lock.Lock()
-	defer m.lock.Unlock()
-	last, err := readHead(m.db)
-	if err != nil {
-		return nil, wrapDbError("failed to read change seq counter", err)
+	select {
+	case m.events <- req:
+	default:
+		m.log.Printf("event queue full, drop [%d] change(s) of ds=[%s]", len(req.Changes), req.DsId)
 	}
-	for idx := range req.Changes {
-		change := &req.Changes[idx]
-		change.Seq = last + uint64(idx) + 1
-		change.Ds = req.DsId
-		change.Vds = req.Vds
-		// 先写行再推进计数器：中途失败计数器不动，DS 重试覆盖同一 seq，seq 永无空洞。
-		if err := saveChange(m.db, change); err != nil {
-			return nil, wrapDbError(fmt.Sprintf("failed to save change [%s/%s]", change.Type, change.Id), err)
-		}
-	}
-	if err := writeHead(m.db, last+uint64(len(req.Changes))); err != nil {
-		return nil, wrapDbError("failed to advance change seq counter", err)
-	}
-	return &ReportResponse{Accepted: len(req.Changes), Head: last + uint64(len(req.Changes))}, nil
+	return &ReportResponse{Accepted: len(req.Changes)}, nil
 }
 
-// Register 登记一个订阅者，返回分配的 id 与实际起始游标。
-func (m *Manager) Register(req *RegisterRequest) (*RegisterResponse, *Http.HttpError) {
+// dispatchLoop 从队列取上报并扇出；Dispatch 单独导出供测试同步执行。
+func (m *Manager) dispatchLoop() {
+	for req := range m.events {
+		m.Dispatch(req)
+	}
+}
+
+// Dispatch 把一批变更推送给所有匹配的订阅者。Ds 在这里以 dsId 盖章（推送位置可直接用于
+// GET /{type}/{ds}/{id}）。每个订阅者一个 goroutine、各自带超时，慢订阅者互不拖累。
+// 转发完即忘：不记录已推送什么，也不为失败重试。
+func (m *Manager) Dispatch(req *ReportRequest) {
+	for idx := range req.Changes {
+		req.Changes[idx].Ds = req.DsId
+	}
+	subs, hx := m.List()
+	if hx != nil {
+		m.log.Printf("failed to load subscriptions for dispatch: %s", hx.Message)
+		return
+	}
+	for idx := range subs {
+		sub := &subs[idx]
+		matched := []Change{}
+		for _, change := range req.Changes {
+			if m.match(sub, &change) {
+				matched = append(matched, change)
+			}
+		}
+		if len(matched) == 0 {
+			continue
+		}
+		go m.push(sub, matched)
+	}
+}
+
+// push 向一个订阅者推送一批变更。失败只标注（节流），绝不重试；成功清除标注。
+func (m *Manager) push(sub *Subscription, changes []Change) {
+	body, err := json.Marshal(PushRequest{Changes: changes})
+	if err != nil {
+		m.log.Printf("failed to marshal push to [%s]: %s", sub.Endpoint, err)
+		return
+	}
+	request, err := http.NewRequest(http.MethodPost, sub.Endpoint, bytes.NewReader(body))
+	if err != nil {
+		m.markResult(sub.Endpoint, false, fmt.Sprintf("invalid endpoint: %s", err))
+		return
+	}
+	request.Header.Set("Content-Type", "application/json")
+	resp, err := m.client.Do(request)
+	if resp != nil && resp.Body != nil {
+		defer resp.Body.Close()
+	}
+	if err == nil && resp.StatusCode >= 200 && resp.StatusCode <= 299 {
+		m.markResult(sub.Endpoint, true, "")
+		return
+	}
+	status := 0
+	if resp != nil {
+		status = resp.StatusCode
+	}
+	m.markResult(sub.Endpoint, false, fmt.Sprintf("push failed (code=%d): %s", status, err))
+}
+
+// markResult 记录推送结果：成功且原标注为不可达 → 清除标注（一次写）；
+// 失败 → 标注不可达 + 最新错误，按 MarkThrottleSec 节流写回。
+func (m *Manager) markResult(endpoint string, ok bool, errMsg string) {
+	m.markMu.Lock()
+	last, throttled := m.lastMark[endpoint]
+	if !ok {
+		m.lastMark[endpoint] = m.now()
+	}
+	m.markMu.Unlock()
+	m.lock.Lock()
+	defer m.lock.Unlock()
+	sub, hx := m.loadSubscription(endpoint)
+	if hx != nil {
+		return // 订阅者已注销，标注无处可写
+	}
+	if ok {
+		if !sub.Unreachable {
+			return // 健康路径上的成功不产生任何写
+		}
+		sub.Unreachable = false
+		sub.LastError = ""
+		sub.LastAttempt = m.nowStr()
+		if err := m.saveSubscription(sub); err != nil {
+			m.log.Printf("failed to clear unreachable mark of [%s]: %s", endpoint, err)
+		}
+		return
+	}
+	now := m.now()
+	if sub.Unreachable && sub.LastError == errMsg && throttled && now.Sub(last) < time.Duration(MarkThrottleSec)*time.Second {
+		return // 同样的错误、节流窗口内：不重复写
+	}
+	sub.Unreachable = true
+	sub.LastError = errMsg
+	sub.LastAttempt = m.nowStr()
+	if err := m.saveSubscription(sub); err != nil {
+		m.log.Printf("failed to mark [%s] unreachable: %s", endpoint, err)
+	}
+}
+
+// Register 登记或心跳一个订阅者：同一 endpoint 幂等 upsert，刷新 Registered、更新过滤条件；
+// 保留 Created 与健康标注（心跳只证明订阅者进程活着，不证明 endpoint 可达）。
+func (m *Manager) Register(req *RegisterRequest) (*Subscription, *Http.HttpError) {
 	if req == nil {
 		req = &RegisterRequest{}
+	}
+	if hx := validateEndpoint(req.Endpoint); hx != nil {
+		return nil, hx
 	}
 	for _, dataType := range req.Types {
 		if dataType == "" {
 			return nil, Http.NewHttpError("types must not contain empty value", http.StatusBadRequest)
 		}
 	}
+	ttl := req.TtlSec
+	if ttl <= 0 {
+		ttl = DefaultTtlSec
+	}
+	if ttl < MinTtlSec {
+		ttl = MinTtlSec
+	}
 	m.lock.Lock()
 	defer m.lock.Unlock()
-	head, err := readHead(m.db)
-	if err != nil {
-		return nil, wrapDbError("failed to read change seq counter", err)
-	}
-	cursor := head
-	if req.From != nil {
-		cursor = *req.From
-		if cursor > head {
-			cursor = head
-		}
-	}
-	id, err := newSubscriberId()
-	if err != nil {
-		return nil, wrapDbError("failed to generate subscriber id", err)
-	}
 	nowStr := m.nowStr()
-	sub := Subscription{
-		Id:      id,
-		Name:    req.Name,
-		Types:   req.Types,
-		Ds:      req.Ds,
-		Cursor:  cursor,
-		Created: nowStr,
-		Updated: nowStr,
+	sub := &Subscription{
+		Endpoint:   req.Endpoint,
+		Name:       req.Name,
+		Types:      req.Types,
+		Ds:         req.Ds,
+		TtlSec:     ttl,
+		Registered: nowStr,
 	}
-	if err := m.saveSubscription(&sub); err != nil {
-		return nil, wrapDbError("failed to save subscription", err)
+	if existing, hx := m.loadSubscription(req.Endpoint); hx == nil {
+		sub.Created = existing.Created
+		sub.Unreachable = existing.Unreachable
+		sub.LastError = existing.LastError
+		sub.LastAttempt = existing.LastAttempt
+	} else {
+		sub.Created = nowStr
 	}
-	return &RegisterResponse{SubscriberId: id, Cursor: cursor, Head: head}, nil
-}
-
-// Pull 按 after（缺省用登记的 cursor）扫描变更，读无副作用。
-// limit 计扫描行数而非匹配行数，过滤型订阅才能推进过不匹配的行；
-// 游标落在已清理区间（after+1 < 现存最老 seq）时返回 410，绝不静默跳过。
-func (m *Manager) Pull(id string, after *uint64, limit int) (*PullResponse, *Http.HttpError) {
-	m.lock.Lock()
-	defer m.lock.Unlock()
-	sub, hx := m.loadSubscription(id)
-	if hx != nil {
-		return nil, hx
-	}
-	head, err := readHead(m.db)
-	if err != nil {
-		return nil, wrapDbError("failed to read change seq counter", err)
-	}
-	start := sub.Cursor
-	if after != nil {
-		start = *after
-	}
-	if start > head {
-		return nil, Http.NewHttpError(fmt.Sprintf("after=[%d] is ahead of head=[%d]", start, head), http.StatusBadRequest)
-	}
-	changes, err := loadChanges(m.db, head)
-	if err != nil {
-		return nil, wrapDbError("failed to load changes", err)
-	}
-	floor := floorOf(changes)
-	if floor == 0 {
-		floor = head + 1
-	}
-	if start+1 < floor {
-		hx := Http.NewHttpError(fmt.Sprintf("cursor=[%d] falls behind the retained log (floor=[%d], head=[%d]), please re-subscribe", start, floor, head), http.StatusGone)
-		hx.Payload = map[string]interface{}{"floor": floor, "head": head}
-		return nil, hx
-	}
-	if limit <= 0 {
-		limit = DefaultPullLimit
-	}
-	if limit > MaxPullLimit {
-		limit = MaxPullLimit
-	}
-	matched := []Change{}
-	scanned := 0
-	lastScanned := start
-	for _, change := range changes {
-		if change.Seq <= start {
-			continue
-		}
-		if scanned >= limit {
-			break
-		}
-		scanned++
-		lastScanned = change.Seq
-		if m.match(sub, &change) {
-			matched = append(matched, change)
-		}
-	}
-	next := head
-	if scanned >= limit {
-		next = lastScanned
-	}
-	return &PullResponse{
-		SubscriberId: id,
-		After:        start,
-		Head:         head,
-		Floor:        floor,
-		Changes:      matched,
-		Next:         next,
-	}, nil
-}
-
-// Ack 推进订阅者游标（只前进；回退是 no-op 但仍刷新活跃时间），返回存储后的游标。
-func (m *Manager) Ack(id string, cursor uint64) (*AckResponse, *Http.HttpError) {
-	m.lock.Lock()
-	defer m.lock.Unlock()
-	sub, hx := m.loadSubscription(id)
-	if hx != nil {
-		return nil, hx
-	}
-	head, err := readHead(m.db)
-	if err != nil {
-		return nil, wrapDbError("failed to read change seq counter", err)
-	}
-	if cursor > head {
-		return nil, Http.NewHttpError(fmt.Sprintf("cursor=[%d] is ahead of head=[%d]", cursor, head), http.StatusBadRequest)
-	}
-	if cursor > sub.Cursor {
-		sub.Cursor = cursor
-	}
-	sub.Updated = m.nowStr()
 	if err := m.saveSubscription(sub); err != nil {
 		return nil, wrapDbError("failed to save subscription", err)
 	}
-	return &AckResponse{SubscriberId: id, Cursor: sub.Cursor}, nil
+	return sub, nil
 }
 
-// Get 返回订阅状态；未知 id（从未存在或已被判死清理）返回 404。
-func (m *Manager) Get(id string) (*StatusResponse, *Http.HttpError) {
-	m.lock.Lock()
-	defer m.lock.Unlock()
-	sub, hx := m.loadSubscription(id)
-	if hx != nil {
-		return nil, hx
+func validateEndpoint(endpoint string) *Http.HttpError {
+	if endpoint == "" {
+		return Http.NewHttpError("missing endpoint in subscription", http.StatusBadRequest)
 	}
-	head, err := readHead(m.db)
-	if err != nil {
-		return nil, wrapDbError("failed to read change seq counter", err)
+	parsed, err := url.Parse(endpoint)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return Http.NewHttpError(fmt.Sprintf("invalid endpoint=[%s], expect http(s) URL", endpoint), http.StatusBadRequest)
 	}
-	return &StatusResponse{Subscription: *sub, Head: head}, nil
+	return nil
 }
 
-// List 返回所有订阅记录。
+// List 返回所有订阅记录（含健康标注）。
 func (m *Manager) List() ([]Subscription, *Http.HttpError) {
 	m.lock.Lock()
 	defer m.lock.Unlock()
-	result, err := m.db.Get(map[string]interface{}{
-		DbIface.Table:   KeySubscription,
-		Record.DataType: KeySubscription,
-	})
+	subs, err := m.listSubscriptions()
 	if err != nil {
 		return nil, wrapDbError("failed to load subscriptions", err)
-	}
-	subs := []Subscription{}
-	for _, item := range result {
-		data, _ := item[Record.Data].(map[string]interface{})
-		sub := Subscription{}
-		if err := Json.CopyTo(data, &sub); err != nil {
-			return nil, wrapDbError("failed to parse subscription", err)
-		}
-		subs = append(subs, sub)
 	}
 	return subs, nil
 }
 
 // Delete 注销订阅；幂等，记录不存在也返回成功。
-func (m *Manager) Delete(id string) *Http.HttpError {
+func (m *Manager) Delete(endpoint string) *Http.HttpError {
+	if endpoint == "" {
+		return Http.NewHttpError("missing endpoint, use DELETE /subscription?url={endpoint}", http.StatusBadRequest)
+	}
 	m.lock.Lock()
 	defer m.lock.Unlock()
 	if err := m.db.Delete(KeySubscription, map[string]interface{}{
 		Record.DataType: KeySubscription,
-		Record.DataId:   id,
+		Record.DataId:   endpoint,
 	}); err != nil {
-		return wrapDbError(fmt.Sprintf("failed to delete subscription [%s]", id), err)
+		return wrapDbError(fmt.Sprintf("failed to delete subscription [%s]", endpoint), err)
 	}
 	return nil
 }
 
-// Prune 清理：删除所有活跃订阅者都已消费（seq <= min(cursor)）或超过保留期的变更行；
-// 判死并删除 updated 超时的订阅者。无活跃订阅者时不因 cursor 清理（只按保留期兜底）。
-func (m *Manager) Prune() error {
+// Sweep 租约清扫：删除超过 TTL 未心跳的订阅（纯 GC，判错的代价 = 下次心跳重新注册）。
+func (m *Manager) Sweep() error {
 	m.lock.Lock()
 	defer m.lock.Unlock()
-	head, err := readHead(m.db)
-	if err != nil {
-		return fmt.Errorf("failed to read change seq counter. Error: %s", err)
-	}
-	changes, err := loadChanges(m.db, head)
-	if err != nil {
-		return fmt.Errorf("failed to load changes. Error: %s", err)
-	}
 	subs, err := m.listSubscriptions()
 	if err != nil {
 		return err
 	}
 	now := m.now()
-	minCursor := head
-	hasLive := false
 	for idx := range subs {
 		sub := &subs[idx]
-		if m.isLive(sub, now) {
-			hasLive = true
-			if sub.Cursor < minCursor {
-				minCursor = sub.Cursor
-			}
+		registered, err := time.Parse(time.RFC3339, sub.Registered)
+		if err != nil {
+			// 解析不了的健康/时间字段不该销毁注册：跳过，等下次心跳重写修复
+			continue
 		}
-	}
-	if !hasLive {
-		minCursor = head
-	}
-	retainFrom := now.Add(-m.retention)
-	removed := 0
-	for _, change := range changes {
-		// 时间无法解析时不按保留期删除（只在被所有活跃订阅者消费后随 cursor 清理）：
-		// 坏元数据不该销毁数据。
-		ts, err := time.Parse(time.RFC3339, change.Ts)
-		stale := err == nil && ts.Before(retainFrom)
-		if change.Seq <= minCursor || stale {
-			if err := deleteChange(m.db, seqId(change.Seq)); err != nil {
-				return fmt.Errorf("failed to delete change [%d]. Error: %s", change.Seq, err)
-			}
-			removed++
-		}
-	}
-	for idx := range subs {
-		sub := &subs[idx]
-		if !m.isLive(sub, now) {
-			m.log.Printf("subscription [%s] is stale (updated=[%s]), remove it", sub.Id, sub.Updated)
+		ttl := time.Duration(sub.TtlSec) * time.Second
+		if now.Sub(registered) > ttl {
+			m.log.Printf("subscription [%s] lease expired (registered=[%s], ttl=%s), remove it", sub.Endpoint, sub.Registered, ttl)
 			if err := m.db.Delete(KeySubscription, map[string]interface{}{
 				Record.DataType: KeySubscription,
-				Record.DataId:   sub.Id,
+				Record.DataId:   sub.Endpoint,
 			}); err != nil {
-				return fmt.Errorf("failed to delete subscription [%s]. Error: %s", sub.Id, err)
+				return fmt.Errorf("failed to delete subscription [%s]. Error: %s", sub.Endpoint, err)
 			}
 		}
-	}
-	if removed > 0 {
-		m.log.Printf("pruned %d changes (minCursor=[%d], head=[%d])", removed, minCursor, head)
 	}
 	return nil
 }
@@ -462,15 +404,6 @@ func (m *Manager) match(sub *Subscription, change *Change) bool {
 	return true
 }
 
-// isLive 判断订阅者是否活跃（pull/ack 都会刷新 updated）。
-func (m *Manager) isLive(sub *Subscription, now time.Time) bool {
-	updated, err := time.Parse(time.RFC3339, sub.Updated)
-	if err != nil {
-		return false
-	}
-	return !updated.Before(now.Add(-m.timeout))
-}
-
 func (m *Manager) listSubscriptions() ([]Subscription, error) {
 	result, err := m.db.Get(map[string]interface{}{
 		DbIface.Table:   KeySubscription,
@@ -491,23 +424,23 @@ func (m *Manager) listSubscriptions() ([]Subscription, error) {
 	return subs, nil
 }
 
-// loadSubscription 读取并解析一条订阅记录；不存在返回 404。
-func (m *Manager) loadSubscription(id string) (*Subscription, *Http.HttpError) {
+// loadSubscription 读取并解析一条订阅记录；不存在返回 404。调用方须持有 m.lock。
+func (m *Manager) loadSubscription(endpoint string) (*Subscription, *Http.HttpError) {
 	result, err := m.db.Get(map[string]interface{}{
 		DbIface.Table:   KeySubscription,
 		Record.DataType: KeySubscription,
-		Record.DataId:   id,
+		Record.DataId:   endpoint,
 	})
 	if err != nil {
-		return nil, wrapDbError(fmt.Sprintf("failed to load subscription [%s]", id), err)
+		return nil, wrapDbError(fmt.Sprintf("failed to load subscription [%s]", endpoint), err)
 	}
 	if len(result) == 0 {
-		return nil, Http.NewHttpError(fmt.Sprintf("subscription [%s] does not exist", id), http.StatusNotFound)
+		return nil, Http.NewHttpError(fmt.Sprintf("subscription [%s] does not exist", endpoint), http.StatusNotFound)
 	}
 	data, _ := result[0][Record.Data].(map[string]interface{})
 	sub := &Subscription{}
 	if err := Json.CopyTo(data, sub); err != nil {
-		return nil, wrapDbError(fmt.Sprintf("failed to parse subscription [%s]", id), err)
+		return nil, wrapDbError(fmt.Sprintf("failed to parse subscription [%s]", endpoint), err)
 	}
 	return sub, nil
 }
@@ -517,20 +450,11 @@ func (m *Manager) saveSubscription(sub *Subscription) error {
 	if err != nil {
 		return err
 	}
-	record := Record.NewRecord(KeySubscription, stateVer, sub.Id, subMap)
+	record := Record.NewRecord(KeySubscription, stateVer, sub.Endpoint, subMap)
 	return m.db.Replace(KeySubscription, map[string]interface{}{
 		Record.DataType: KeySubscription,
-		Record.DataId:   sub.Id,
+		Record.DataId:   sub.Endpoint,
 	}, record.Map())
-}
-
-// newSubscriberId 生成 "sub-" + 16 字节随机 hex（InventoryService 模块零外部依赖，不用 uuid）。
-func newSubscriberId() (string, error) {
-	buf := make([]byte, 16)
-	if _, err := rand.Read(buf); err != nil {
-		return "", err
-	}
-	return "sub-" + hex.EncodeToString(buf), nil
 }
 
 func wrapDbError(msg string, err error) *Http.HttpError {
