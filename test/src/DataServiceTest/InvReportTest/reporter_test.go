@@ -8,7 +8,6 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
-	"time"
 
 	"DataService/DataJournal"
 	"DataService/DataJournal/ProcessIface"
@@ -34,7 +33,7 @@ func newCaptureServer(status int) *captureServer {
 		status := c.status
 		c.mu.Unlock()
 		w.WriteHeader(status)
-		w.Write([]byte(`{"accepted":1,"head":1}`))
+		w.Write([]byte(`{"accepted":1}`))
 	})
 	c.srv = httptest.NewServer(mux)
 	return c
@@ -76,11 +75,11 @@ func recordMap(dataType string, id string, ver string) map[string]interface{} {
 	}
 }
 
-// mustReport 执行一次 ProcessEntry 并返回捕获到的 body。
+// mustReport 执行一次 ProcessEntry 并断言它不向 journal 报错（best-effort：失败也返回 nil）。
 func mustReport(t *testing.T, c *captureServer, r *InvReport.Reporter, entry *ProcessIface.JournalEntry) map[string]interface{} {
 	t.Helper()
 	if hx := r.ProcessEntry("server", "s1", entry); hx != nil {
-		t.Fatalf("ProcessEntry failed: %s", hx.Message)
+		t.Fatalf("ProcessEntry must not fail the journal, got: %s", hx.Message)
 	}
 	return c.lastBody(t)
 }
@@ -123,109 +122,79 @@ func TestHandleTypeMatrix(t *testing.T) {
 	}
 }
 
-func TestProcessEntryConversion(t *testing.T) {
+// TestProcessEntryPayload 载荷只有记录位置 {type, id}：创建/更新/删除产出完全相同的形状，
+// op/ver/ts 都不由 DS 决定——订阅者回查 Inventory 推导。
+func TestProcessEntryPayload(t *testing.T) {
 	c := newCaptureServer(http.StatusOK)
 	defer c.srv.Close()
 	r := newReporter(c.srv.URL)
 
-	// create：before=nil → upsert，ver 取 after
-	body := mustReport(t, c, r, &ProcessIface.JournalEntry{
-		Time:  "2026-01-01T00:00:00Z",
-		After: recordMap("server", "s1", "0.0.1"),
-	})
-	if body["dsId"] != "ds1" || body["vds"] != "local" {
-		t.Fatalf("unexpected envelope: %v", body)
-	}
-	change := firstChange(t, body)
-	if change["type"] != "server" || change["id"] != "s1" || change["op"] != "upsert" || change["ver"] != "0.0.1" || change["ts"] != "2026-01-01T00:00:00Z" {
-		t.Fatalf("unexpected change: %v", change)
-	}
-	if _, has := change["data"]; has {
-		t.Fatalf("change must not carry record content: %v", change)
-	}
-
-	// update：before/after 都在 → upsert，ver 取 after
-	body = mustReport(t, c, r, &ProcessIface.JournalEntry{
-		Time:   "2026-01-01T00:00:01Z",
+	entry := &ProcessIface.JournalEntry{
+		Time:   "2026-01-01 08:09:10.123456789 +0000 UTC m=+131.568673789",
 		Before: recordMap("server", "s1", "0.0.1"),
 		After:  recordMap("server", "s1", "0.0.2"),
-	})
-	change = firstChange(t, body)
-	if change["op"] != "upsert" || change["ver"] != "0.0.2" {
-		t.Fatalf("unexpected update change: %v", change)
 	}
-
-	// delete：after=nil → delete，ver 取 before
-	body = mustReport(t, c, r, &ProcessIface.JournalEntry{
-		Time:   "2026-01-01T00:00:02Z",
-		Before: recordMap("server", "s1", "0.0.2"),
-	})
-	change = firstChange(t, body)
-	if change["op"] != "delete" || change["ver"] != "0.0.2" {
-		t.Fatalf("unexpected delete change: %v", change)
+	for name, e := range map[string]*ProcessIface.JournalEntry{
+		"create": {Time: entry.Time, After: recordMap("server", "s1", "0.0.1")},
+		"update": entry,
+		"delete": {Time: entry.Time, Before: recordMap("server", "s1", "0.0.2")},
+	} {
+		body := mustReport(t, c, r, e)
+		if body["dsId"] != "ds1" {
+			t.Fatalf("%s: unexpected envelope: %v", name, body)
+		}
+		change := firstChange(t, body)
+		if change["type"] != "server" || change["id"] != "s1" {
+			t.Fatalf("%s: unexpected position: %v", name, change)
+		}
+		for _, absent := range []string{"op", "ver", "ts", "data", "vds"} {
+			if _, has := change[absent]; has {
+				t.Fatalf("%s: change must not carry [%s]: %v", name, absent, change)
+			}
+		}
+		if _, has := body["vds"]; has {
+			t.Fatalf("%s: report must not carry vds: %v", name, body)
+		}
 	}
 	if c.count() != 3 {
 		t.Fatalf("expected 3 reports, got %d", c.count())
 	}
 }
 
-// TestNormalizeTs 验证 journal 的时间格式（Go 默认 String()）被归一化为 RFC3339。
-func TestNormalizeTs(t *testing.T) {
-	c := newCaptureServer(http.StatusOK)
-	defer c.srv.Close()
-	r := newReporter(c.srv.URL)
+// TestFailuresNeverBlockJournal 上报的任何失败都只记日志、返回 nil：
+// journal 条目照常归档，不重试、不滞留 head。
+func TestFailuresNeverBlockJournal(t *testing.T) {
+	entry := &ProcessIface.JournalEntry{After: recordMap("server", "s1", "0.0.1")}
 
-	// journal 的 Go 默认格式（含单调时钟读数）→ RFC3339 UTC
-	body := mustReport(t, c, r, &ProcessIface.JournalEntry{
-		Time:  "2026-01-01 08:09:10.123456789 +0000 UTC m=+131.568673789",
-		After: recordMap("server", "s1", "0.0.1"),
-	})
-	if change := firstChange(t, body); change["ts"] != "2026-01-01T08:09:10Z" {
-		t.Fatalf("go-format time not normalized: %v", change["ts"])
+	// dsId 未分配（self registration 未完成）→ 丢弃，不报错、不发请求
+	noId := InvReport.NewReporter("local", func() string { return "" }, "http://localhost:9999", log.New(io.Discard, "", 0))
+	if hx := noId.ProcessEntry("server", "s1", entry); hx != nil {
+		t.Fatalf("missing dsId must not fail the journal, got: %s", hx.Message)
 	}
 
-	// 已是 RFC3339 → 换算为 UTC
-	body = mustReport(t, c, r, &ProcessIface.JournalEntry{
-		Time:  "2026-01-02T10:11:12+02:00",
-		After: recordMap("server", "s1", "0.0.1"),
-	})
-	if change := firstChange(t, body); change["ts"] != "2026-01-02T08:11:12Z" {
-		t.Fatalf("rfc3339 time not converted to UTC: %v", change["ts"])
-	}
-
-	// 空时间 → 回退为当前时刻（仍是合法 RFC3339）
-	body = mustReport(t, c, r, &ProcessIface.JournalEntry{
-		After: recordMap("server", "s1", "0.0.1"),
-	})
-	change := firstChange(t, body)
-	ts, _ := change["ts"].(string)
-	if _, err := time.Parse(time.RFC3339, ts); err != nil {
-		t.Fatalf("fallback ts is not RFC3339: %q (%s)", ts, err)
-	}
-}
-
-func TestProcessEntryErrors(t *testing.T) {
-	// dsId 未分配（self registration 未完成）→ 503，journal 会重试
-	r := InvReport.NewReporter("local", func() string { return "" }, "http://localhost:9999", log.New(io.Discard, "", 0))
-	if hx := r.ProcessEntry("server", "s1", &ProcessIface.JournalEntry{After: recordMap("server", "s1", "0.0.1")}); hx.Status != 503 {
-		t.Fatalf("missing dsId: expected 503, got %d", hx.Status)
-	}
-
-	// Inventory 返回 500 → 503（可重试）；恢复正常 → nil
+	// Inventory 返回 500 → 记日志、返回 nil
 	c := newCaptureServer(http.StatusInternalServerError)
 	defer c.srv.Close()
-	r = newReporter(c.srv.URL)
-	if hx := r.ProcessEntry("server", "s1", &ProcessIface.JournalEntry{After: recordMap("server", "s1", "0.0.1")}); hx.Status != 503 {
-		t.Fatalf("inventory 500: expected 503, got %d", hx.Status)
+	r := newReporter(c.srv.URL)
+	if hx := r.ProcessEntry("server", "s1", entry); hx != nil {
+		t.Fatalf("inventory 500 must not fail the journal, got: %s", hx.Message)
 	}
-	c.setStatus(http.StatusOK)
-	if hx := r.ProcessEntry("server", "s1", &ProcessIface.JournalEntry{After: recordMap("server", "s1", "0.0.1")}); hx != nil {
-		t.Fatalf("inventory 200: expected nil, got %s", hx.Message)
+	if c.count() != 1 {
+		t.Fatalf("the failed report must still have been sent once, got %d", c.count())
+	}
+
+	// Inventory 不可达（连接拒绝）→ 记日志、返回 nil
+	dead := newCaptureServer(http.StatusOK)
+	url := dead.srv.URL
+	dead.srv.Close()
+	r2 := InvReport.NewReporter("local", func() string { return "ds1" }, url, log.New(io.Discard, "", 0))
+	if hx := r2.ProcessEntry("server", "s1", entry); hx != nil {
+		t.Fatalf("unreachable inventory must not fail the journal, got: %s", hx.Message)
 	}
 }
 
-// TestJournalIntegration 验证 reporter 与 journal 重试语义的配合：
-// 上报成功条目归档，失败条目保留、重跑重投。
+// TestJournalIntegration 验证 reporter 与 journal 的配合：上报成败都不影响条目归档——
+// 失败的条目同样被归档（没有重试），后续条目继续处理。
 func TestJournalIntegration(t *testing.T) {
 	handler, err := DataServiceTest.MockHandler()
 	if err != nil {
@@ -237,13 +206,28 @@ func TestJournalIntegration(t *testing.T) {
 	}
 	handler.AddJournal = journal.AddJournal
 
-	c := newCaptureServer(http.StatusOK)
+	c := newCaptureServer(http.StatusInternalServerError)
 	defer c.srv.Close()
 	reporter := newReporter(c.srv.URL)
 	worker := DataJournal.NewJournalWorker(journal, "server", "s1", nil, []ProcessIface.JournalProcess{reporter})
 
-	// create 一条记录 → journal entry → 处理成功 → 条目归档
+	// Inventory 故障期间写入：上报失败，但条目照常归档、不滞留 head
 	if hx := handler.AddJournal("server", "s1", nil, recordMap("server", "s1", "0.0.1")); hx != nil {
+		t.Fatalf("failed to add journal entry: %s", hx.Message)
+	}
+	if hx := worker.ProcessNextEntry(); hx != nil {
+		t.Fatalf("failed report must not block the journal, got: %s", hx.Message)
+	}
+	if journal.NextJournalEntry("server", "s1") != nil {
+		t.Fatalf("entry must be archived even when the report failed")
+	}
+	if c.count() != 1 {
+		t.Fatalf("expected 1 report attempt, got %d", c.count())
+	}
+
+	// 恢复后写入：上报成功，同样归档
+	c.setStatus(http.StatusOK)
+	if hx := handler.AddJournal("server", "s1", recordMap("server", "s1", "0.0.1"), recordMap("server", "s1", "0.0.2")); hx != nil {
 		t.Fatalf("failed to add journal entry: %s", hx.Message)
 	}
 	if hx := worker.ProcessNextEntry(); hx != nil {
@@ -252,29 +236,7 @@ func TestJournalIntegration(t *testing.T) {
 	if journal.NextJournalEntry("server", "s1") != nil {
 		t.Fatalf("entry should be archived after successful report")
 	}
-	if c.count() != 1 {
-		t.Fatalf("expected 1 report, got %d", c.count())
-	}
-
-	// Inventory 故障 → 处理失败，条目保留；恢复后重跑投递成功
-	c.setStatus(http.StatusInternalServerError)
-	if hx := handler.AddJournal("server", "s1", recordMap("server", "s1", "0.0.1"), recordMap("server", "s1", "0.0.2")); hx != nil {
-		t.Fatalf("failed to add journal entry: %s", hx.Message)
-	}
-	if hx := worker.ProcessNextEntry(); hx == nil {
-		t.Fatalf("expected failure while inventory is down")
-	}
-	if journal.NextJournalEntry("server", "s1") == nil {
-		t.Fatalf("entry must be retained after failed report")
-	}
-	c.setStatus(http.StatusOK)
-	if hx := worker.ProcessNextEntry(); hx != nil {
-		t.Fatalf("expected retry to succeed after recovery, got: %s", hx.Message)
-	}
-	if journal.NextJournalEntry("server", "s1") != nil {
-		t.Fatalf("entry should be archived after successful retry")
-	}
-	if c.count() != 3 { // 500 那次也发出了 POST
-		t.Fatalf("expected 3 reports total, got %d", c.count())
+	if c.count() != 2 {
+		t.Fatalf("expected 2 reports total, got %d", c.count())
 	}
 }

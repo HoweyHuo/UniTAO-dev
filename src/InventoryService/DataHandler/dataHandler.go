@@ -106,7 +106,7 @@ func (h *Handler) init() error {
 	if err != nil {
 		return err
 	}
-	for _, name := range []string{Schema.Inventory, RefRecord.Referral, Subscription.KeyChange, Subscription.KeySubscription} {
+	for _, name := range []string{Schema.Inventory, RefRecord.Referral, Subscription.KeySubscription} {
 		tblExists := false
 		for _, tbl := range tbList {
 			if tbl == name {
@@ -238,6 +238,67 @@ func (h *Handler) Get(dataType string, dataPath string) (interface{}, *Http.Http
 		return h.listFromDs(pinDs, dataType)
 	}
 	return h.getDataByPath(dataType, restId, restNext, pinDs)
+}
+
+// ListVer 与 List 相同，但返回 [{ds, id, ver}]（GET /{type}?ver=1）。
+// 订阅者的周期对账经此diff：id 对不上 = 新增/删除，ver 对不上 = 更新，其余跳过、无需回查内容。
+func (h *Handler) ListVer(dataType string) ([]map[string]interface{}, *Http.HttpError) {
+	referral, err := h.GetReferral(dataType)
+	if err != nil {
+		return nil, err
+	}
+	result := []map[string]interface{}{}
+	anySuccess := false
+	var lastErr string
+	for _, ds := range referral.DsInfos {
+		dsUrl, e := ds.GetUrl()
+		if e != nil {
+			h.Log(fmt.Sprintf("skip DS=[%s] for ver list of [%s]: %s", ds.Id, dataType, e.Error()))
+			lastErr = e.Error()
+			continue
+		}
+		urlPath, e := Http.URLPathJoin(dsUrl, dataType)
+		if e != nil {
+			h.Log(fmt.Sprintf("failed to build ver list url for DS=[%s]: %s", ds.Id, e.Error()))
+			lastErr = e.Error()
+			continue
+		}
+		data, code, e := Http.GetRestData(*urlPath + "?ver=1")
+		if e != nil {
+			h.Log(fmt.Sprintf("failed to ver list [%s] from DS=[%s], url=[%s], code=%d, error: %s", dataType, ds.Id, *urlPath, code, e.Error()))
+			lastErr = e.Error()
+			continue
+		}
+		items, ok := data.([]interface{})
+		if !ok {
+			h.Log(fmt.Sprintf("bad ver list result from DS=[%s], url=[%s], not an array", ds.Id, *urlPath))
+			lastErr = fmt.Sprintf("ver list result from DS=[%s] is not an array", ds.Id)
+			continue
+		}
+		anySuccess = true
+		for _, item := range items {
+			entry, ok := item.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			id, _ := entry["id"].(string)
+			if id == "" {
+				continue
+			}
+			ver, _ := entry["ver"].(string)
+			result = append(result, map[string]interface{}{
+				"ds":  ds.Id,
+				"id":  id,
+				"ver": ver,
+			})
+		}
+	}
+	if !anySuccess {
+		return nil, Http.NewHttpError(
+			fmt.Sprintf("failed to ver list [%s] from any DataService, last error: %s", dataType, lastErr),
+			http.StatusInternalServerError)
+	}
+	return result, nil
 }
 
 // listFromDs 列出指定 DS 上某类型的所有 id（带 {ds}/ 前缀）。
