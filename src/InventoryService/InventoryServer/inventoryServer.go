@@ -212,7 +212,11 @@ func (srv *Server) Start(logger *log.Logger) error {
 	srv.syncer = DataSync.New(srv.data, srv.log)
 	go srv.syncLoop(interval)
 	// 记录变化订阅：注册表 + 推送扇出 + 租约清扫循环
-	srv.subs = Subscription.NewManager(srv.data.Db, Subscription.Options{}, srv.log)
+	subs, err := Subscription.NewManager(srv.data.Db, Subscription.Options{}, srv.log)
+	if err != nil {
+		return fmt.Errorf("failed to init subscription manager. Error: %s", err)
+	}
+	srv.subs = subs
 	sweepSec := srv.config.Subscription.SweepIntervalSec
 	if sweepSec <= 0 {
 		sweepSec = DefaultSweepIntervalSec
@@ -226,9 +230,13 @@ func (srv *Server) SubscriptionManager() *Subscription.Manager {
 	return srv.subs
 }
 
-// sweepLoop 周期清扫：删除超过 TTL 未心跳的订阅。错误仅记日志，循环不中断。
+// sweepLoop 周期清扫：迁移旧版本记录、删除超过 TTL 未心跳的订阅。错误仅记日志，循环不中断。
+// 启动时先清扫一次：升级后旧版本的记录立刻迁移，不等第一个间隔。
 func (srv *Server) sweepLoop(interval time.Duration) {
 	srv.log.Printf("start subscription sweep loop, interval=%s", interval)
+	if err := srv.subs.Sweep(); err != nil {
+		srv.log.Printf("subscription sweep failed, Error: %s", err)
+	}
 	for {
 		time.Sleep(interval)
 		if err := srv.subs.Sweep(); err != nil {
@@ -472,22 +480,21 @@ func (srv *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 	Http.ResponseJson(w, resp, http.StatusAccepted, srv.config.Http)
 }
 
-// handleSubscribe 登记或心跳订阅：POST /subscription，body={"endpoint","types","ds","ttlSec"}。
-// 同一 endpoint 幂等 upsert。
+// handleSubscribe 登记或心跳订阅：POST /subscription，body 即订阅记录的 data
+// （{"endpoint","name","types","ds","ttlSec"}，经 subscription schema 校验）。
+// 同一 endpoint 幂等 upsert；响应是保存后的记录信封。
 func (srv *Server) handleSubscribe(w http.ResponseWriter, r *http.Request) {
 	reqBody, e := Http.LoadRequest(r)
 	if e != nil {
 		Http.ResponseJson(w, e, e.Status, srv.config.Http)
 		return
 	}
-	req := &Subscription.RegisterRequest{}
-	if payload, ok := reqBody.(map[string]interface{}); ok {
-		if ex := Json.CopyTo(payload, req); ex != nil {
-			Http.ResponseJson(w, ex.Error(), http.StatusBadRequest, srv.config.Http)
-			return
-		}
+	payload, ok := reqBody.(map[string]interface{})
+	if !ok {
+		Http.ResponseJson(w, "failed to parse request into JSON object", http.StatusBadRequest, srv.config.Http)
+		return
 	}
-	resp, hx := srv.subs.Register(req)
+	resp, hx := srv.subs.Register(payload)
 	if hx != nil {
 		Http.ResponseJson(w, hx, hx.Status, srv.config.Http)
 		return

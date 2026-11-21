@@ -31,6 +31,7 @@ import (
 	"UniTao/Test/DataServiceTest"
 
 	"InventoryService/DataHandler"
+	"InventoryService/Subscription"
 
 	"github.com/salesforce/UniTAO/lib/Schema/JsonKey"
 	"github.com/salesforce/UniTAO/lib/Schema/Record"
@@ -75,6 +76,28 @@ func TestGetRecordSchemaFramework(t *testing.T) {
 	for _, key := range []string{Record.DataId, Record.DataType, Record.Version} {
 		if _, ok := props[key]; !ok {
 			t.Fatalf("[%s] schema should declare [%s]", Record.KeyRecord, key)
+		}
+	}
+}
+
+// /schema/subscription 返回订阅记录的 schema（subscription 是 schema 描述的 Inventory 内部类型）。
+func TestGetSubscriptionSchema(t *testing.T) {
+	db := &DataServiceTest.MockDatabase{Data: map[string]interface{}{}}
+	handler := &DataHandler.Handler{Db: db}
+	record, err := handler.GetSchemaRecord(Subscription.KeySubscription)
+	if err != nil {
+		t.Fatalf("failed to get schema of [%s]: %s", Subscription.KeySubscription, err)
+	}
+	if record.Id != Subscription.KeySubscription || record.Type != JsonKey.Schema {
+		t.Fatalf("unexpected subscription schema identity: id=[%s] type=[%s]", record.Id, record.Type)
+	}
+	props, ok := record.Data[JsonKey.Properties].(map[string]interface{})
+	if !ok {
+		t.Fatalf("[%s] schema should declare properties", Subscription.KeySubscription)
+	}
+	for _, key := range []string{"endpoint", "types", "ds", "ttlSec", "registered", "unreachable", "lastError"} {
+		if _, ok := props[key]; !ok {
+			t.Fatalf("[%s] schema should declare [%s]", Subscription.KeySubscription, key)
 		}
 	}
 }
