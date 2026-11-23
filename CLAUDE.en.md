@@ -256,6 +256,12 @@ javascript/Schema/             # JavaScript port of schema library (jsonSchema.j
 
 6. **Journaling**: Data changes are journaled for audit trail and cross-service synchronization.
 
+7. **Record change subscription (push model)**: Data Services notify the Inventory of record changes as **positions only** (`{ds, type, id}`, no content, no operation); the Inventory pushes them to subscriber endpoints. Events are **best-effort dirty markers**: a subscriber re-reads the record (`GET /{type}/{ds}/{id}`, 404 = deleted) and catches missed events with its own periodic reconciliation. Code: `DataService/InvReport/` (DS side), `InventoryService/Subscription/` (registry, push fan-out, lease sweep). See CLAUDE.md item 8 for the full design.
+   - **Reporting**: every vDS with a journal (local + shared) reports through `InvReport.Reporter`: `POST {inventory.url}/report` with `{dsId, changes: [{type, id}]}` (5 s timeout). Failures are logged and dropped; no retry. DS-internal types such as `schema` are not reported.
+   - **mirrored vDS**: they have no journal, so `Share.Mirror` reports to **its own network's** Inventory itself, under the mirrored vDS's own ds id (`setupMirrored` calls `SetReporter` when the DS links an Inventory). After each applied queue batch and `saveState`, it sends the batch's `{type, id}`, deduplicated and without internal types (`InvReport.FilterChanges`). After `load(history)` replaces the whole table, it sends a single **reset** signal instead of one entry per record: `{"dsId", "changes": [], "reset": true}`. Reports from the shared source only reach the source network's Inventory, so they do not cover the mirror side.
+   - **Push**: the Inventory queues each report (capacity 1024, dropped when full), returns 202 `{accepted}`, and POSTs `{"changes": [{ds, type, id}...], "resets": ["{ds}"...]}` to every matching subscriber (5 s timeout, no retry; failures only mark the subscription `unreachable`). `resets` lists DS whose data was replaced wholesale; it is filtered by the subscription's `ds` but **not** by `types`, and left out when empty. When a push carries only resets, `changes` is `[]`, never null. Older subscribers can ignore `resets`.
+   - **Subscriber contract**: register (`POST /subscription`, idempotent per endpoint, doubles as heartbeat) → full query → rely on pushes; reconcile periodically and after downtime with `GET /{type}?ver=1` (`[{ds, id, ver}]`). The diff finds adds/removes by id. **`ver` is the record's schema version (`__ver`) and does not change when the content is edited**, so it only reveals format upgrades, never content edits. Edits are found through pushes (on a `resets` entry, treat the whole DS as possibly modified); subscribers that need a stronger guarantee re-read the content themselves (e.g. compare content fingerprints).
+
 ### REST API Overview
 
 Both the Data Service and the Inventory Service expose an HTTP JSON API.
@@ -276,6 +282,7 @@ Both services route as `/{type}[/{id}]` — there is **no `/data` or `/inv` pref
 | Inventory Service | `GET` | `/referral[/{type}]` | Query the type-to-Data-Service mapping |
 | Inventory Service | `PUT` | `/` | Register / update a Data Service (body is an `inventory` Record) |
 | Inventory Service | `POST` | `/referral` | A Data Service reports a type change event, triggering sync |
+| Inventory Service | `POST` | `/report` | A Data Service reports record positions (`{dsId, changes: [{type, id}], reset?}`; `reset: true` means the DS was replaced wholesale, `changes` may then be empty, and subscribers receive it as `resets: [dsId]`); queued, returns 202 `{accepted}` (accepted ≠ delivered) |
 | Inventory Service | `DELETE` | `/{type}/{id}` | Delete a local Inventory record (e.g. `inventory/{ds-id}`) |
 
 The Data Service path query engine also supports `?schema` (show the schema at the current path), `?flat` (show only the current layer), and `?iterator` (list the options at each leaf), plus `[*]` to wildcard an array/map index.
