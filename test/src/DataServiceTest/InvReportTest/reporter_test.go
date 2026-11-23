@@ -240,3 +240,59 @@ func TestJournalIntegration(t *testing.T) {
 		t.Fatalf("expected 2 reports total, got %d", c.count())
 	}
 }
+
+// TestProcessResetPayload 重置信号：{"dsId", "changes": [], "reset": true}，changes 是空数组而非 null；
+// 失败同样即弃（不 panic、不重试）。
+func TestProcessResetPayload(t *testing.T) {
+	c := newCaptureServer(http.StatusAccepted)
+	defer c.srv.Close()
+	r := newReporter(c.srv.URL)
+	r.ProcessReset()
+	c.mu.Lock()
+	raw := c.bodies[len(c.bodies)-1]
+	c.mu.Unlock()
+	if raw != `{"dsId":"ds1","changes":[],"reset":true}` {
+		t.Fatalf("unexpected reset payload: %s", raw)
+	}
+	// 普通增量不带 reset 字段
+	r.ProcessChanges([]InvReport.Change{{Type: "server", Id: "s1"}})
+	if body := c.lastBody(t); body["reset"] != nil {
+		t.Fatalf("change report must not carry reset: %v", body)
+	}
+	// Inventory 拒绝：只记日志，不重试
+	c.setStatus(http.StatusInternalServerError)
+	r.ProcessReset()
+	if c.count() != 3 {
+		t.Fatalf("expected exactly 3 requests (no retry), got %d", c.count())
+	}
+	// dsId 未分配 / 未链接 Inventory：不发
+	InvReport.NewReporter("mirrored/x", func() string { return "" }, c.srv.URL, log.New(io.Discard, "", 0)).ProcessReset()
+	newReporter("").ProcessReset()
+	if c.count() != 3 {
+		t.Fatalf("reset must be dropped without dsId or inventory url, got %d requests", c.count())
+	}
+}
+
+// TestFilterChanges 去掉 DS 内部类型、按 (type, id) 去重、保持首次出现的顺序；全被过滤时返回空切片。
+func TestFilterChanges(t *testing.T) {
+	got := InvReport.FilterChanges([]InvReport.Change{
+		{Type: "server", Id: "s1"},
+		{Type: "schema", Id: "server"},
+		{Type: "rack", Id: "r1"},
+		{Type: "server", Id: "s1"},
+		{Type: "cmtIdx", Id: "x"},
+		{Type: "server", Id: "s2"},
+	})
+	want := []InvReport.Change{{Type: "server", Id: "s1"}, {Type: "rack", Id: "r1"}, {Type: "server", Id: "s2"}}
+	if len(got) != len(want) {
+		t.Fatalf("expected %v, got %v", want, got)
+	}
+	for idx := range want {
+		if got[idx] != want[idx] {
+			t.Fatalf("expected %v, got %v", want, got)
+		}
+	}
+	if empty := InvReport.FilterChanges([]InvReport.Change{{Type: "schema", Id: "a"}}); empty == nil || len(empty) != 0 {
+		t.Fatalf("expected empty non-nil slice, got %#v", empty)
+	}
+}

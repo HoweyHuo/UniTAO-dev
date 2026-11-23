@@ -9,6 +9,7 @@ import (
 
 	"DataService/Channel"
 	"DataService/DataHandler"
+	"DataService/InvReport"
 
 	"github.com/salesforce/UniTAO/lib/Schema/JsonKey"
 	"github.com/salesforce/UniTAO/lib/Util/Http"
@@ -33,6 +34,14 @@ type MirrorState struct {
 	Epoch   string // Cursor 所属的通道 epoch（加载 history 时记下）；通道 Reset 后 epoch 变化，需要重新订阅
 }
 
+// ChangeReporter 把 mirror 应用的变化通知给本地 Inventory（InvReport.Reporter 实现）。
+// mirrored vDS 没有 Journal，变化由 Mirror 直接上报：每批增量应用并保存进度后 ProcessChanges，
+// 用 history 整体替换本表后 ProcessReset。上报是 best-effort，失败即弃。
+type ChangeReporter interface {
+	ProcessChanges(changes []InvReport.Change)
+	ProcessReset()
+}
+
 // Mirror 是 mirrored vDS 的后台同步器（subscriber）：订阅、加载 history、按顺序消费 queue、汇报进度。
 type Mirror struct {
 	Source       string // 来源共享名
@@ -50,6 +59,12 @@ type Mirror struct {
 	reason       string
 	lastSync     string
 	stop         chan struct{}
+	reporter     ChangeReporter // DS 链接了 Inventory 时设置（SetReporter），否则为 nil
+}
+
+// SetReporter 设置变化上报；须在 Run 之前调用。
+func (m *Mirror) SetReporter(reporter ChangeReporter) {
+	m.reporter = reporter
 }
 
 func NewMirror(source string, localName string, sourceId string, handler *DataHandler.Handler, channel Channel.Subscriber, pullIntervalSec int, loadState func() MirrorState, saveState func(MirrorState) error, logger *log.Logger) *Mirror {
@@ -194,6 +209,7 @@ func (m *Mirror) syncOnce() error {
 		if len(changes) == 0 {
 			break
 		}
+		batch := make([]InvReport.Change, 0, len(changes))
 		for _, change := range changes {
 			if change.Seq != state.Cursor+1 {
 				return fmt.Errorf("unexpected seq %d after cursor %d", change.Seq, state.Cursor)
@@ -205,9 +221,16 @@ func (m *Mirror) syncOnce() error {
 				return fmt.Errorf("failed to apply seq %d [%s %s/%s]: %s", change.Seq, change.Op, change.Type, change.Id, err)
 			}
 			state.Cursor = change.Seq
+			batch = append(batch, InvReport.Change{Type: change.Type, Id: change.Id})
 		}
 		if err := m.saveState(state); err != nil {
 			return err
+		}
+		// 保存进度之后上报：没报出去的就丢了（best-effort，订阅者另有一致性检查）
+		if m.reporter != nil {
+			if located := InvReport.FilterChanges(batch); len(located) > 0 {
+				m.reporter.ProcessChanges(located)
+			}
 		}
 		m.Log(fmt.Sprintf("applied up to seq %d", state.Cursor))
 	}
@@ -265,6 +288,10 @@ func (m *Mirror) load(history *Channel.HistoryReader) error {
 	state.Epoch = m.channel.Epoch() // history 在最近一次 Refresh 读到的 manifest 里，属于它的 epoch
 	if err := m.saveState(state); err != nil {
 		return err
+	}
+	// 整体替换只报一个重置信号，不逐条上报（history 可能很大）；保存进度之后报，没报出去的就丢了
+	if m.reporter != nil {
+		m.reporter.ProcessReset()
 	}
 	m.Log(fmt.Sprintf("loaded history %s at seq %d with %d records in %d parts", history.Id, history.Seq, history.Records, history.Parts))
 	return nil

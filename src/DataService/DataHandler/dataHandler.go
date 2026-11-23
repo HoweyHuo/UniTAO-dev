@@ -182,8 +182,9 @@ func (h *Handler) List(dataType string) ([]interface{}, *Http.HttpError) {
 	return result, nil
 }
 
-// ListVer 列出类型的 {id, ver}（GET /{vDS}/{type}?ver=1）。Inventory 的对账列表
-// （GET /{type}?ver=1）经此拿到版本，ver 不变的记录无需回查内容。
+// ListVer 列出类型的 {id, ver}（GET /{vDS}/{type}?ver=1），供 Inventory 的对账列表
+// （GET /{type}?ver=1）使用。ver 是记录的 schema 版本（__ver），内容修改时不变：
+// 对账靠它只能发现新增/删除与格式升级，发现不了内容修改。
 func (h *Handler) ListVer(dataType string) ([]interface{}, *Http.HttpError) {
 	if dataType != JsonKey.Schema && dataType != "" {
 		_, err := h.LocalData(JsonKey.Schema, dataType)

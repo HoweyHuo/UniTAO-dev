@@ -267,7 +267,7 @@ func (srv *Server) initVds(vds *Vds, journalLogger *log.Logger) error {
 func (srv *Server) setupJournal(vds *Vds, journalLogger *log.Logger, extra ...ProcessIface.JournalProcess) error {
 	if srv.invLinked() {
 		// 记录变化上报：注册为 extra process，local 与 shared vDS 都生效（mirrored 没有 Journal，
-		// 其副本变更从 shared 源头侧上报）。通知是 best-effort 的：失败只记日志、条目照常归档，
+		// 由 Mirror 自己上报增量与重置信号，见 setupMirrored）。通知是 best-effort 的：失败只记日志、条目照常归档，
 		// 不重试、不滞留 head——漏掉的通知由订阅者的周期对账弥补。
 		extra = append(extra, InvReport.NewReporter(vds.Path, vds.InvId, srv.config.Inv.Url, journalLogger))
 	}
@@ -327,6 +327,11 @@ func (srv *Server) setupMirrored(vds *Vds) error {
 		})
 	}
 	vds.Mirror = Share.NewMirror(cfg.Name, cfg.LocalName(), vds.InstanceId, vds.Handler, channel, cfg.PullIntervalSec, loadState, saveState, srv.log)
+	if srv.invLinked() {
+		// mirrored vDS 没有 Journal：由 Mirror 自己向本网 Inventory 上报应用的增量与整体替换的重置信号，
+		// dsId 是 mirrored vDS 自己的 InvId（best-effort，失败即弃）
+		vds.Mirror.SetReporter(InvReport.NewReporter(vds.Path, vds.InvId, srv.config.Inv.Url, srv.log))
+	}
 	return nil
 }
 
