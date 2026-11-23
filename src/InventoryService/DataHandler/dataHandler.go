@@ -242,7 +242,9 @@ func (h *Handler) Get(dataType string, dataPath string) (interface{}, *Http.Http
 }
 
 // ListVer 与 List 相同，但返回 [{ds, id, ver}]（GET /{type}?ver=1）。
-// 订阅者的周期对账经此diff：id 对不上 = 新增/删除，ver 对不上 = 更新，其余跳过、无需回查内容。
+// 订阅者的周期对账经此 diff：id 对不上 = 新增/删除，ver 对不上 = schema 版本升级。
+// ver 是记录的 __ver，内容修改时不变，所以内容修改只能靠推送发现；需要更强保证的订阅者
+// 自己回查内容（如比较内容指纹）。
 func (h *Handler) ListVer(dataType string) ([]map[string]interface{}, *Http.HttpError) {
 	referral, err := h.GetReferral(dataType)
 	if err != nil {

@@ -511,3 +511,78 @@ func TestSweepMigratesLegacyRecords(t *testing.T) {
 		t.Fatalf("re-registered record must survive")
 	}
 }
+
+// rawBodies 返回收到的原始推送 body（检查 JSON 形状：[] 而非 null、resets 是否省略）。
+func (s *sinkServer) rawBodies() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string{}, s.bodies...)
+}
+
+// TestIngestReset 验证重置上报：reset 为 true 时允许 changes 为空，受理数为 0。
+func TestIngestReset(t *testing.T) {
+	mgr, _ := newMgr(t)
+	sink := newSinkServer(http.StatusOK)
+	defer sink.srv.Close()
+	mustRegister(t, mgr, reg{"endpoint": sink.srv.URL})
+
+	resp, hx := mgr.Ingest(&Subscription.ReportRequest{DsId: "dsM", Reset: true})
+	if hx != nil {
+		t.Fatalf("reset without changes must be accepted, got %s", hx.Message)
+	}
+	if resp.Accepted != 0 {
+		t.Fatalf("expected accepted=0, got %d", resp.Accepted)
+	}
+	waitFor("reset pushed via dispatch loop", func() bool { return sink.count() == 1 })
+	bodies := sink.rawBodies()
+	if len(bodies) != 1 || bodies[0] != `{"changes":[],"resets":["dsM"]}` {
+		t.Fatalf("unexpected reset push body: %v", bodies)
+	}
+}
+
+// TestDispatchResetFilters 验证重置推送：按订阅的 ds 过滤、不按 types 过滤；
+// 只有重置时 changes 是 []；普通推送省略 resets；重置与增量可在同一次推送里。
+func TestDispatchResetFilters(t *testing.T) {
+	mgr, _ := newMgr(t)
+	all := newSinkServer(http.StatusOK)
+	typed := newSinkServer(http.StatusOK)
+	sameDs := newSinkServer(http.StatusOK)
+	otherDs := newSinkServer(http.StatusOK)
+	for _, s := range []*sinkServer{all, typed, sameDs, otherDs} {
+		defer s.srv.Close()
+	}
+	mustRegister(t, mgr, reg{"endpoint": all.srv.URL})
+	mustRegister(t, mgr, reg{"endpoint": typed.srv.URL, "types": []string{"app"}})
+	mustRegister(t, mgr, reg{"endpoint": sameDs.srv.URL, "ds": "dsM"})
+	mustRegister(t, mgr, reg{"endpoint": otherDs.srv.URL, "ds": "other"})
+
+	mgr.Dispatch(&Subscription.ReportRequest{DsId: "dsM", Changes: []Subscription.Change{}, Reset: true})
+	for name, s := range map[string]*sinkServer{"all": all, "typed": typed, "sameDs": sameDs} {
+		waitFor(name+" got reset", func() bool { return s.count() == 1 })
+		if bodies := s.rawBodies(); len(bodies) != 1 || bodies[0] != `{"changes":[],"resets":["dsM"]}` {
+			t.Fatalf("%s: unexpected reset push: %v", name, bodies)
+		}
+	}
+	time.Sleep(100 * time.Millisecond)
+	if otherDs.count() != 0 {
+		t.Fatalf("subscriber of another ds must not get the reset: %v", otherDs.rawBodies())
+	}
+
+	// 普通增量：resets 省略
+	dispatch(t, mgr, "dsM", Subscription.Change{Type: "app", Id: "a1"})
+	waitFor("all got change", func() bool { return all.count() == 2 })
+	if body := all.rawBodies()[1]; body != `{"changes":[{"ds":"dsM","type":"app","id":"a1"}]}` {
+		t.Fatalf("unexpected change push: %s", body)
+	}
+
+	// 重置 + 增量同一批：types 过滤只作用于 changes，resets 照常带上
+	mgr.Dispatch(&Subscription.ReportRequest{DsId: "dsM", Changes: []Subscription.Change{{Type: "host", Id: "h1"}}, Reset: true})
+	waitFor("typed got reset with filtered changes", func() bool { return typed.count() == 3 })
+	if body := typed.rawBodies()[2]; body != `{"changes":[],"resets":["dsM"]}` {
+		t.Fatalf("typed: unexpected push: %s", body)
+	}
+	waitFor("all got combined push", func() bool { return all.count() == 3 })
+	if body := all.rawBodies()[2]; body != `{"changes":[{"ds":"dsM","type":"host","id":"h1"}],"resets":["dsM"]}` {
+		t.Fatalf("all: unexpected push: %s", body)
+	}
+}

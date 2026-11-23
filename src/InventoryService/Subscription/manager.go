@@ -12,7 +12,13 @@
 // 订阅者收到后回查 Inventory（GET /{type}/{ds}/{id}，404 = 删除）。推送失败不重试、
 // 不向任何人报错，只在订阅者记录上标注不可达与最新错误（节流写回，给运维看，不驱动逻辑）；
 // 成功的推送清除标注。Inventory 不为订阅者保留任何事件数据：没有 change 表、没有游标、
-// 没有 ack。正确性由订阅者自己的周期性对账承担（GET /{type}?ver=1 拿 {ds,id,ver} 列表 diff）。
+// 没有 ack。订阅者的周期性对账（GET /{type}?ver=1 拿 {ds,id,ver} 列表 diff）发现新增/删除与
+// schema 版本升级；ver 是记录的 __ver，内容修改时不变，内容修改靠推送发现，需要更强保证的
+// 订阅者自己回查内容（如比较内容指纹）。
+//
+// 重置：mirrored vDS 用 history 整体替换本表时不逐条上报，而是上报 reset（changes 为空）；
+// 推送体里变成 resets: [dsId]，只按订阅的 ds 过滤、不按 types 过滤，订阅者把该 ds 的数据
+// 全部按可能修改处理。
 //
 // 订阅者的存活用租约表达：注册/心跳是幂等 upsert（POST /subscription），超过 TTL 没有心跳
 // 的记录被周期清扫（Sweep）删除——这是纯 GC，判错的代价只是下次心跳重新注册。
@@ -166,9 +172,12 @@ type Change struct {
 }
 
 // ReportRequest 是 DS 上报（POST /report）的请求体；Ds 由服务端以 dsId 盖章。
+// Reset 为 true 表示该 ds 的数据整体替换过（mirrored vDS 用 history 替换本表），
+// 不逐条列出变化，此时 Changes 可以为空；推送时变成 PushRequest.Resets 里的一项。
 type ReportRequest struct {
 	DsId    string   `json:"dsId"`
 	Changes []Change `json:"changes"`
+	Reset   bool     `json:"reset,omitempty"`
 }
 
 // ReportResponse 只报告受理数量：受理 ≠ 送达，推送是 best-effort。
@@ -176,9 +185,13 @@ type ReportResponse struct {
 	Accepted int `json:"accepted"`
 }
 
-// PushRequest 是推送给订阅者的 body。
+// PushRequest 是推送给订阅者的 body：{"changes":[{ds,type,id}...],"resets":["dsId"...]}。
+// Resets 列出整体替换过的 ds（订阅者应把该 ds 的数据全部按可能修改处理），只按订阅的 ds 过滤、
+// 不按 types 过滤；没有重置时省略。只有重置时 Changes 是空数组 []（不是 null）。
+// 两个字段都是推送模式之后新增的语义，旧订阅者忽略 resets 即可。
 type PushRequest struct {
 	Changes []Change `json:"changes"`
+	Resets  []string `json:"resets,omitempty"`
 }
 
 // Options 是推送参数，<=0 时使用默认值。
@@ -251,8 +264,11 @@ func (m *Manager) Ingest(req *ReportRequest) (*ReportResponse, *Http.HttpError) 
 	if req.DsId == "" {
 		return nil, Http.NewHttpError("missing dsId in change report", http.StatusBadRequest)
 	}
-	if len(req.Changes) == 0 {
+	if len(req.Changes) == 0 && !req.Reset {
 		return nil, Http.NewHttpError("missing changes in change report", http.StatusBadRequest)
+	}
+	if req.Changes == nil {
+		req.Changes = []Change{}
 	}
 	for idx, change := range req.Changes {
 		if change.Type == "" || change.Id == "" {
@@ -262,7 +278,7 @@ func (m *Manager) Ingest(req *ReportRequest) (*ReportResponse, *Http.HttpError) 
 	select {
 	case m.events <- req:
 	default:
-		m.log.Printf("event queue full, drop [%d] change(s) of ds=[%s]", len(req.Changes), req.DsId)
+		m.log.Printf("event queue full, drop [%d] change(s) (reset=%t) of ds=[%s]", len(req.Changes), req.Reset, req.DsId)
 	}
 	return &ReportResponse{Accepted: len(req.Changes)}, nil
 }
@@ -297,16 +313,20 @@ func (m *Manager) Dispatch(req *ReportRequest) {
 				matched = append(matched, change)
 			}
 		}
-		if len(matched) == 0 {
+		var resets []string
+		if req.Reset && (sub.Ds == "" || sub.Ds == req.DsId) {
+			resets = []string{req.DsId} // 重置只按 ds 过滤：任何类型都可能变了
+		}
+		if len(matched) == 0 && len(resets) == 0 {
 			continue
 		}
-		go m.push(sub, matched)
+		go m.push(sub, PushRequest{Changes: matched, Resets: resets})
 	}
 }
 
 // push 向一个订阅者推送一批变更。失败只标注（节流），绝不重试；成功清除标注。
-func (m *Manager) push(sub *Subscription, changes []Change) {
-	body, err := json.Marshal(PushRequest{Changes: changes})
+func (m *Manager) push(sub *Subscription, payload PushRequest) {
+	body, err := json.Marshal(payload)
 	if err != nil {
 		m.log.Printf("failed to marshal push to [%s]: %s", sub.Endpoint, err)
 		return

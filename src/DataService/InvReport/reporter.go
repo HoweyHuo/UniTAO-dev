@@ -4,8 +4,10 @@
 // 通知是 best-effort 的脏标记：发送失败只记日志，永不向 journal 返回错误——
 // 条目照常归档，不重试、不滞留 head。订阅者收到位置后回查 Inventory 拿当前态，
 // 漏掉的通知由订阅者自己的周期对账弥补（Inventory 是 source of truth）。
-// 以 JournalProcess 形式挂载（setupJournal 的 extra 参数，local 与 shared vDS 都生效；
-// mirrored vDS 没有 Journal，其副本变更从 shared 源头侧上报）；schema 等 DS 内部类型不上报。
+// 以 JournalProcess 形式挂载（setupJournal 的 extra 参数，local 与 shared vDS 都生效）；
+// mirrored vDS 没有 Journal，由 Share.Mirror 直接调用：每批增量应用后 ProcessChanges，
+// 用 history 整体替换本表后 ProcessReset（整个 ds 按全部修改处理，不逐条上报）。
+// schema 等 DS 内部类型不上报。
 package InvReport
 
 import (
@@ -36,9 +38,12 @@ type Change struct {
 }
 
 // reportRequest 是 POST {inv}/report 的请求体。按数组设计，为批量上报留口。
+// Reset 为 true 表示整个 ds 的数据都可能变了（mirrored vDS 用 history 整体替换本表），
+// 此时 Changes 为空，由订阅者自己检查。
 type reportRequest struct {
 	DsId    string   `json:"dsId"`
 	Changes []Change `json:"changes"`
+	Reset   bool     `json:"reset,omitempty"`
 }
 
 // Reporter 把变更位置通知给 Inventory 的 Journal process。
@@ -96,9 +101,36 @@ func (r *Reporter) ProcessEntry(dataType string, dataId string, entry *ProcessIf
 	return nil
 }
 
+// FilterChanges 去掉 DS 内部类型（schema 等）并按 (type, id) 去重，保持首次出现的顺序。
+func FilterChanges(changes []Change) []Change {
+	result := []Change{}
+	seen := map[Change]bool{}
+	for _, change := range changes {
+		if _, internal := Common.InternalTypes[change.Type]; internal || seen[change] {
+			continue
+		}
+		seen[change] = true
+		result = append(result, change)
+	}
+	return result
+}
+
 // ProcessChanges 把一组记录位置 POST 给 Inventory；失败即弃，不重试。
 func (r *Reporter) ProcessChanges(changes []Change) {
 	if len(changes) == 0 {
+		return
+	}
+	r.send(reportRequest{Changes: changes}, fmt.Sprintf("%d change(s)", len(changes)))
+}
+
+// ProcessReset 通知 Inventory 本 ds 的数据整体替换过（按全部修改处理）；失败即弃，不重试。
+func (r *Reporter) ProcessReset() {
+	r.send(reportRequest{Changes: []Change{}, Reset: true}, "reset")
+}
+
+// send 盖上 dsId 并 POST {inv}/report；what 只用于日志。
+func (r *Reporter) send(req reportRequest, what string) {
+	if r.invUrl == "" {
 		return
 	}
 	dsId := ""
@@ -106,17 +138,18 @@ func (r *Reporter) ProcessChanges(changes []Change) {
 		dsId = r.invId()
 	}
 	if dsId == "" {
-		r.Log(fmt.Sprintf("dsId not assigned yet (self registration pending), drop %d change notification(s)", len(changes)))
+		r.Log(fmt.Sprintf("dsId not assigned yet (self registration pending), drop %s notification", what))
 		return
 	}
+	req.DsId = dsId
 	url, err := Http.URLPathJoin(r.invUrl, ReportPath)
 	if err != nil {
 		r.Log(fmt.Sprintf("failed to build report url for inventory=[%s], Error: %s", r.invUrl, err))
 		return
 	}
-	body, err := json.Marshal(reportRequest{DsId: dsId, Changes: changes})
+	body, err := json.Marshal(req)
 	if err != nil {
-		r.Log(fmt.Sprintf("failed to marshal report of %d change(s), Error: %s", len(changes), err))
+		r.Log(fmt.Sprintf("failed to marshal report of %s, Error: %s", what, err))
 		return
 	}
 	request, err := http.NewRequest(http.MethodPost, *url, bytes.NewReader(body))
@@ -130,10 +163,10 @@ func (r *Reporter) ProcessChanges(changes []Change) {
 		resp.Body.Close()
 	}
 	if err != nil {
-		r.Log(fmt.Sprintf("failed to report [%d] change(s) of vDS [%s] to inventory [%s], Error: %s", len(changes), r.vdsPath, r.invUrl, err))
+		r.Log(fmt.Sprintf("failed to report [%s] of vDS [%s] to inventory [%s], Error: %s", what, r.vdsPath, r.invUrl, err))
 		return
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		r.Log(fmt.Sprintf("inventory [%s] rejected report of [%d] change(s) with code=%d, drop", r.invUrl, len(changes), resp.StatusCode))
+		r.Log(fmt.Sprintf("inventory [%s] rejected report of [%s] with code=%d, drop", r.invUrl, what, resp.StatusCode))
 	}
 }

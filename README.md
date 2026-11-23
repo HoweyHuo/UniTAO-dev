@@ -226,7 +226,11 @@ every Data Service that links an Inventory (`inventory.url` in its config) notif
 DS write -> journal -> InvReport reporter -> POST {inventory.url}/report -> Inventory pushes to subscribers
 ```
 
-events are **best-effort dirty markers**. the Inventory is the source of truth: on receiving a position, a subscriber fetches the record through the Inventory query api (`GET /{type}/{ds}/{id}`) - a 404 means the record was deleted. delivery carries no guarantee anywhere: the reporter drops failed notifications (a 5 s timeout, then log and move on - the journal entry is archived either way), and the Inventory pushes each batch to every matching subscriber with no retry. `schema` and other DS-internal types are not reported; mirrored vDS have no journal, their changes come from the shared source side.
+events are **best-effort dirty markers**. the Inventory is the source of truth: on receiving a position, a subscriber fetches the record through the Inventory query api (`GET /{type}/{ds}/{id}`) - a 404 means the record was deleted. delivery carries no guarantee anywhere: the reporter drops failed notifications (a 5 s timeout, then log and move on - the journal entry is archived either way), and the Inventory pushes each batch to every matching subscriber with no retry. `schema` and other DS-internal types are not reported. mirrored vDS have no journal, so the mirror reports to its own network's Inventory itself (under the mirrored vDS's ds id): after each queue batch it applies, the batch's positions (deduplicated); after it replaces its whole table with a history, a single reset signal instead of one position per record:
+
+```
+POST {inventory.url}/report  {"dsId": "prod", "changes": [], "reset": true}
+```
 
 subscribers give the Inventory an endpoint to push to; the same endpoint registers idempotently (re-register as a heartbeat):
 
@@ -240,13 +244,19 @@ POST http://localhost:8003/subscription
 # the Inventory pushes to the endpoint:
 POST http://ui.internal:9000/events
      {"changes": [{"ds": "DataService01", "type": "Server", "id": "srv-1"}]}
+
+# after a mirrored vDS replaced its whole table (reset); resets is left out when empty
+POST http://ui.internal:9000/events
+     {"changes": [], "resets": ["prod"]}
 ```
+
+`resets` lists DS whose data may all have changed: treat every record of that DS as possibly modified (e.g. reconcile it). resets are filtered by the subscription's `ds` but not by `types`; when a push carries only resets, `changes` is an empty array. subscribers that predate resets can ignore the field.
 
 a failed push is never retried and reports to no one - it only marks the subscription `unreachable` with the latest error (visible in `GET /subscription`, throttled writes); a later successful push clears the mark. a subscription whose heartbeat stops for longer than its declared lease is swept (`subscription.sweepIntervalSec`, default 60 s; default lease 24 h). the registry lives in the Inventory database, so an Inventory restart resumes pushing with no wait - heartbeats exist only for garbage collection.
 
 a subscription is a schema-described Inventory type: `GET /schema/subscription` returns its schema, and the registration payload is validated against it. `GET /subscription` lists the records as envelopes (`{__id, __type, __ver, data}`, the subscription fields in `data`); the record id is a hash of the endpoint (`sub-` + 16 hex digits). records left by older versions are migrated by the sweep (also once at Inventory start): records without an endpoint (pull-model era) are removed, records keyed by the raw endpoint are moved to the hashed id.
 
-**correctness is the subscriber's own job**: events only accelerate convergence. a subscriber must periodically reconcile - `GET /{type}?ver=1` returns `[{ds, id, ver}]`, so the diff finds adds/removes by id and updates by ver without re-fetching unchanged records. bootstrap in this order: register -> full query -> then rely on pushes (the overlap is idempotent); after downtime or a restart, reconcile once. `DELETE /subscription?url={endpoint}` unsubscribes (idempotent).
+**correctness is the subscriber's own job**: events only accelerate convergence. a subscriber must periodically reconcile - `GET /{type}?ver=1` returns `[{ds, id, ver}]`, so the diff finds adds/removes by id. `ver` is the record's schema version (`__ver`), which does **not** change when the content is modified: it only reveals format upgrades, never content edits. content edits are found through pushes; a subscriber that needs a stronger guarantee re-reads the content itself (e.g. compares content fingerprints). bootstrap in this order: register -> full query -> then rely on pushes (the overlap is idempotent); after downtime or a restart, reconcile once. `DELETE /subscription?url={endpoint}` unsubscribes (idempotent).
 
 ## Network Security Model
 
