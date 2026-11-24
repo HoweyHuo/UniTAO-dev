@@ -395,7 +395,11 @@ func (h *Handler) ValidateDataRefs(doc *SchemaDoc.SchemaDoc, data map[string]int
 		case JsonKey.Object:
 			valueObj := value.(map[string]interface{})
 			if !SchemaDoc.IsMap(attrDef) {
-				return h.ValidateDataRefs(subDoc, valueObj, attrPath)
+				// 子对象校验通过后还要继续校验后面的属性，不能直接 return
+				if err := h.ValidateDataRefs(subDoc, valueObj, attrPath); err != nil {
+					return err
+				}
+				continue
 			}
 			if !isRef && !isSubDoc {
 				continue
