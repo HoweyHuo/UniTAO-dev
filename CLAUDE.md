@@ -76,6 +76,7 @@ UniTAO 由两类服务组成：
    - **只能挂在 `type: "string"` 的字段上**（`SchemaDoc.IsCmtRef`）；数组引用写成 `items` 下的字符串。
    - **写入时校验**：保存前会经 Inventory Service 查目标记录，不存在则 400 `reference inventory:{type} with value=[{id}] does not exists`。所以**被引用的记录必须先存在**；两个记录互相引用时，若两侧字段都是必填就会死锁（字段**默认必填**，不写 `required` 就是必填），需把至少一侧设为 `"required": false` 再分步补写。
    - **依赖 referral 表**：类型要先被 Inventory Service 的 sync 登记才能被引用。sync 在启动时、新 DS 注册事件、以及周期（`sync.intervalSec`，默认 300 秒）触发，所以刚注册的 schema 不能立即被引用；手动触发用 `InventoryServiceAdmin sync`。referral 记录存在 Inventory Service 自己的库里（`dataSync.go` 的 `Db.Replace`），**重启不会丢失**，所以这个等待只在首次引入某类型时出现，重启任一服务都不会重新引入。
+   - **DS 侧的 referral 缓存**：DS 查引用时（`DataServiceProxy`）按类型缓存 referral（该类型在哪些 DS 上），有效期 `DsInfoTTL`（30 秒）；按缓存查遍各 DS 都 404 时立即强制刷新一次 referral，只查新出现的 DS。所以别的 DS 新登记某类型后，只要 Inventory 的 referral 已更新，不用重启 DS 就能引用那里的记录。
 
    完整用法与 demo 实例见 `README.md` 的 contentMediaType 一节。
 
